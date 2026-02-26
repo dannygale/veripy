@@ -28,25 +28,43 @@ class VerilogEmitter:
     def __init__(self, module, module_name=None):
         self.mod = module
         self.name = module_name or type(module).__name__.lower()
+        self._current_func = None
         self.signals = {}
         self.arrays = {}
+        self.submodules = {}
         for k in dir(module):
             v = getattr(module, k)
             if isinstance(v, SignalArray):
                 self.arrays[k] = v
             elif isinstance(v, Signal):
                 self.signals[k] = v
+        from .module import Module
+        for k in dir(module):
+            if k.startswith('_'):
+                continue
+            v = getattr(module, k)
+            if isinstance(v, Module) and v is not module:
+                self.submodules[k] = v
 
     def emit(self):
         lines = []
         lines += self._emit_header()
         lines += self._emit_internals()
+        lines += self._emit_submodule_instances()
         for method in self.mod._comb_blocks:
             lines += self._emit_comb(method)
         for clk, method in self.mod._posedge_blocks:
             lines += self._emit_posedge(clk, method)
         lines.append('endmodule')
         return '\n'.join(lines)
+
+    def emit_all(self):
+        """Emit this module + all sub-module definitions."""
+        parts = []
+        for sub_name, sub in self.submodules.items():
+            parts.append(sub.to_verilog(module_name=sub_name))
+        parts.append(self.emit())
+        return '\n\n'.join(parts)
 
     # --- header: module declaration + ports ---
     def _emit_header(self):
@@ -70,12 +88,34 @@ class VerilogEmitter:
         for name, arr in sorted(self.arrays.items()):
             w = self._width_str(arr[0])
             lines.append(f'    reg {w}{name} [0:{arr.depth - 1}];')
+        # Wires for sub-module ports
+        for sub_name, sub in sorted(self.submodules.items()):
+            for port_name in sorted(dir(sub)):
+                sig = getattr(sub, port_name)
+                if isinstance(sig, Signal) and sig._kind in ('input', 'output'):
+                    w = self._width_str(sig)
+                    lines.append(f'    wire {w}{sub_name}_{port_name};')
         lines.append('')
+        return lines
+
+    def _emit_submodule_instances(self):
+        lines = []
+        for sub_name, sub in sorted(self.submodules.items()):
+            mod_type = sub_name  # instance type = attribute name (matches emit_all)
+            inst_name = f'{sub_name}_inst'
+            ports = []
+            for port_name in sorted(dir(sub)):
+                sig = getattr(sub, port_name)
+                if isinstance(sig, Signal) and sig._kind in ('input', 'output'):
+                    ports.append(f'.{port_name}({sub_name}_{port_name})')
+            lines.append(f'    {mod_type} {inst_name} (')
+            lines.append(',\n'.join(f'        {p}' for p in ports))
+            lines.append('    );')
+            lines.append('')
         return lines
 
     def _port_list(self):
         ports = []
-        # Stable ordering: inputs first, then outputs
         for name, sig in sorted(self.signals.items()):
             if sig._kind == 'input':
                 ports.append((name, sig, 'input'))
@@ -133,7 +173,6 @@ class VerilogEmitter:
                 t, v = self._extract_nba(stmt)
                 lines.append(f'{pad}{t} {assign_op} {v};')
             elif isinstance(stmt, ast.Expr):
-                # standalone expression — skip (e.g. docstrings)
                 pass
         return lines
 
@@ -145,8 +184,7 @@ class VerilogEmitter:
         if node.orelse:
             if len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If):
                 lines.append(f'{pad}end else')
-                inner = self._emit_if(node.orelse[0], indent, assign_op)
-                lines += inner
+                lines += self._emit_if(node.orelse[0], indent, assign_op)
             else:
                 lines.append(f'{pad}end else begin')
                 lines += self._stmts_to_v(node.orelse, indent + 1, assign_op)
@@ -179,7 +217,6 @@ class VerilogEmitter:
         """Replace Name(var_name) with Constant(val), then constant-fold BinOps."""
         import copy
         stmts = copy.deepcopy(stmts)
-        # Replace variable references
         for node in ast.walk(ast.Module(body=stmts, type_ignores=[])):
             for field, child in ast.iter_fields(node):
                 if isinstance(child, ast.Name) and child.id == var_name:
@@ -188,7 +225,6 @@ class VerilogEmitter:
                     for i, item in enumerate(child):
                         if isinstance(item, ast.Name) and item.id == var_name:
                             child[i] = ast.Constant(value=val)
-        # Constant-fold BinOps (e.g. i - 1 → 0)
         for node in ast.walk(ast.Module(body=stmts, type_ignores=[])):
             for field, child in ast.iter_fields(node):
                 if isinstance(child, ast.BinOp):
@@ -204,7 +240,6 @@ class VerilogEmitter:
         return stmts
 
     def _try_fold(self, node):
-        """Constant-fold a BinOp if both sides are constants."""
         if not (isinstance(node.left, ast.Constant) and isinstance(node.right, ast.Constant)):
             return None
         l, r = node.left.value, node.right.value
@@ -222,21 +257,26 @@ class VerilogEmitter:
             return str(v)
 
         if isinstance(node, ast.Name):
-            # Try to resolve as a closure variable (compile-time constant)
             if self._current_func:
                 try:
-                    val = self._resolve_name(node.id)
-                    return str(val)
+                    return str(self._resolve_name(node.id))
                 except SyntaxError:
                     pass
             return node.id
+
+        # self.sub.port → sub_port (sub-module port reference)
+        if (isinstance(node, ast.Attribute) and
+            isinstance(node.value, ast.Attribute) and
+            self._is_self(node.value.value)):
+            sub_name = node.value.attr
+            if sub_name in self.submodules:
+                return f'{sub_name}_{node.attr}'
 
         # self.foo → foo
         if isinstance(node, ast.Attribute) and self._is_self(node.value):
             return node.attr
 
         if isinstance(node, ast.BinOp):
-            # Try full constant evaluation (handles closure vars)
             try:
                 l_val = self._const_eval(node.left)
                 r_val = self._const_eval(node.right)
@@ -269,7 +309,6 @@ class VerilogEmitter:
             if op:
                 return f'({l} {op} {r})'
 
-        # self.sig[hi:lo] → sig[hi:lo]
         if isinstance(node, ast.Subscript):
             val = self._expr(node.value)
             sl = node.slice
@@ -279,15 +318,11 @@ class VerilogEmitter:
                 return f'{val}[{hi}:{lo}]'
             return f'{val}[{self._expr(sl)}]'
 
-        # Mux(sel, a, b) → (sel) ? a : b
         if isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Name) and func.id == 'Mux' and len(node.args) == 3:
-                sel = self._expr(node.args[0])
-                a = self._expr(node.args[1])
-                b = self._expr(node.args[2])
+                sel, a, b = [self._expr(x) for x in node.args]
                 return f'({sel}) ? {a} : {b}'
-            # Cat(a, b, ...) → {b, a}  (Verilog concat is MSB-first)
             if isinstance(func, ast.Name) and func.id == 'Cat':
                 parts = [self._expr(a) for a in reversed(node.args)]
                 return '{' + ', '.join(parts) + '}'
@@ -297,7 +332,6 @@ class VerilogEmitter:
             return '{' + ', '.join(parts) + '}'
 
         if isinstance(node, ast.IfExp):
-            # Python ternary: a if cond else b → (cond) ? a : b
             cond = self._expr(node.test)
             a = self._expr(node.body)
             b = self._expr(node.orelse)
@@ -307,7 +341,6 @@ class VerilogEmitter:
 
     # --- helpers ---
     def _is_nba(self, stmt):
-        """Detect self.x <<= expr (AugAssign with LShift)."""
         return (isinstance(stmt, ast.AugAssign) and
                 isinstance(stmt.op, ast.LShift))
 
@@ -318,7 +351,6 @@ class VerilogEmitter:
         return isinstance(node, ast.Name) and node.id == 'self'
 
     def _resolve_name(self, name):
-        """Resolve a variable name from the current function's closure."""
         func = self._current_func
         if func and hasattr(func, '__code__') and hasattr(func, '__closure__'):
             code = func.__code__
@@ -331,12 +363,10 @@ class VerilogEmitter:
         if isinstance(node, ast.Constant):
             return node.value
         if isinstance(node, ast.Name):
-            # Resolve from the closure of the function being emitted
             return self._resolve_name(node.id)
         if isinstance(node, ast.BinOp):
             l = self._const_eval(node.left)
             r = self._const_eval(node.right)
-            op = {ast.Add: '+', ast.Sub: '-', ast.Mult: '*'}
             if type(node.op) == ast.Add: return l + r
             if type(node.op) == ast.Sub: return l - r
             if type(node.op) == ast.Mult: return l * r
