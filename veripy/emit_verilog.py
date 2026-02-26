@@ -406,15 +406,20 @@ class VerilogEmitter:
 
     def _resolve_name(self, name):
         func = self._current_func
-        if func and hasattr(func, '__code__') and hasattr(func, '__closure__'):
+        if func and hasattr(func, '__code__'):
             code = func.__code__
+            # Check closure variables
             if name in code.co_freevars and func.__closure__:
                 idx = code.co_freevars.index(name)
                 val = func.__closure__[idx].cell_contents
-                # If this variable is a declared parameter, emit the param name
                 if name in self.mod._params:
                     return _ParamRef(name, val)
                 return val
+            # Check globals (module-level constants)
+            if hasattr(func, '__globals__') and name in func.__globals__:
+                val = func.__globals__[name]
+                if isinstance(val, (int, float)):
+                    return val
         raise SyntaxError(f'Cannot resolve variable: {name}')
 
     def _const_eval(self, node):
