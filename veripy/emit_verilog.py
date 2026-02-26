@@ -332,7 +332,13 @@ class VerilogEmitter:
 
         if isinstance(node, ast.BoolOp):
             op = _BOOL_OPS[type(node.op)]
-            parts = [self._expr(v) for v in node.values]
+            parts = []
+            for v in node.values:
+                e = self._expr(v)
+                # Parenthesize lower-precedence or inside and
+                if isinstance(node.op, ast.And) and isinstance(v, ast.BoolOp) and isinstance(v.op, ast.Or):
+                    e = f'({e})'
+                parts.append(e)
             return f' {op} '.join(parts)
 
         if isinstance(node, ast.UnaryOp):
