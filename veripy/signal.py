@@ -73,14 +73,55 @@ class Signal:
             self._val = self._next
             self._next = None
 
-    # --- bit slicing (simulation only; AST handles Verilog) ---
+    # --- bit slicing ---
     def __getitem__(self, key):
         if isinstance(key, slice):
             hi = key.start if key.start is not None else self.width - 1
             lo = key.stop if key.stop is not None else 0
-            bits = hi - lo + 1
-            return (self._val >> lo) & ((1 << bits) - 1)
+            return _SliceProxy(self, hi, lo)
         return (self._val >> key) & 1
+
+    def __setitem__(self, key, value):
+        # _SliceProxy.__ilshift__ already scheduled the update; accept silently.
+        pass
+
+
+class _SliceProxy:
+    """Proxy for bit-slice access. Supports read (int conversion) and write (<<=)."""
+
+    def __init__(self, signal, hi, lo):
+        self._signal = signal
+        self._hi = hi
+        self._lo = lo
+        self._bits = hi - lo + 1
+        self._mask = (1 << self._bits) - 1
+
+    @property
+    def _val(self):
+        return (self._signal._val >> self._lo) & self._mask
+
+    def __int__(self):
+        return self._val
+
+    def __index__(self):
+        return self._val
+
+    def __bool__(self):
+        return self._val != 0
+
+    def __eq__(self, o):
+        return self._val == (o._val if isinstance(o, (Signal, _SliceProxy)) else int(o))
+
+    def __ilshift__(self, value):
+        """Partial write: schedule update to just this bit range."""
+        v = value._val if isinstance(value, Signal) else int(value)
+        v &= self._mask
+        # Clear the target bits, set new value
+        full_mask = self._signal._mask
+        clear = full_mask & ~(self._mask << self._lo)
+        current = self._signal._val if self._signal._next is None else self._signal._next
+        self._signal._next = (current & clear) | (v << self._lo)
+        return self
 
 
 def Input(width=1):
