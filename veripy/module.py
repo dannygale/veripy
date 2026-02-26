@@ -1,6 +1,6 @@
 """Module base class: defines the structure for simulation and Verilog emission."""
 
-from .signal import Signal, SignalArray
+from .signal import Signal, SignalArray, Mem
 
 
 class Module:
@@ -21,6 +21,8 @@ class Module:
                 val.name = attr
             elif isinstance(val, SignalArray) and not val.name:
                 val._name_elements(attr)
+            elif isinstance(val, Mem) and not val.name:
+                val.name = attr
 
     def posedge(self, clock_signal):
         """Decorator: register a method as a posedge-triggered always block."""
@@ -57,9 +59,15 @@ class Module:
                     sigs[f'{k}[{i}]'] = s
         return sigs
 
+    def _mems(self):
+        return {k: getattr(self, k) for k in dir(self)
+                if isinstance(getattr(self, k), Mem)}
+
     def _tick_signals(self):
         for sig in self._signals().values():
             sig._tick()
+        for mem in self._mems().values():
+            mem._tick()
 
     def _settle_comb(self):
         """Settle combinational logic: parent → children → parent."""

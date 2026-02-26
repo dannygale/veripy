@@ -4,7 +4,7 @@ import ast
 import inspect
 import textwrap
 
-from .signal import Signal, SignalArray
+from .signal import Signal, SignalArray, Mem
 
 
 # Python AST op → Verilog operator
@@ -31,11 +31,14 @@ class VerilogEmitter:
         self._current_func = None
         self.signals = {}
         self.arrays = {}
+        self.mems = {}
         self.submodules = {}
         for k in dir(module):
             v = getattr(module, k)
             if isinstance(v, SignalArray):
                 self.arrays[k] = v
+            elif isinstance(v, Mem):
+                self.mems[k] = v
             elif isinstance(v, Signal):
                 self.signals[k] = v
         from .module import Module
@@ -88,6 +91,9 @@ class VerilogEmitter:
         for name, arr in sorted(self.arrays.items()):
             w = self._width_str(arr[0])
             lines.append(f'    reg {w}{name} [0:{arr.depth - 1}];')
+        for name, mem in sorted(self.mems.items()):
+            w = f'[{mem.width - 1}:0] ' if mem.width > 1 else ''
+            lines.append(f'    reg {w}{name} [0:{mem.depth - 1}];')
         # Wires for sub-module ports
         for sub_name, sub in sorted(self.submodules.items()):
             for port_name in sorted(dir(sub)):
@@ -173,7 +179,13 @@ class VerilogEmitter:
                 t, v = self._extract_nba(stmt)
                 lines.append(f'{pad}{t} {assign_op} {v};')
             elif isinstance(stmt, ast.Expr):
-                pass
+                # Check for mem.write(addr, data) calls
+                if isinstance(stmt.value, ast.Call):
+                    v = self._emit_mem_write(stmt.value, assign_op)
+                    if v:
+                        lines.append(f'{pad}{v}')
+                        continue
+                # standalone expression — skip (e.g. docstrings)
         return lines
 
     def _emit_if(self, node, indent, assign_op='<='):
@@ -343,6 +355,18 @@ class VerilogEmitter:
     def _is_nba(self, stmt):
         return (isinstance(stmt, ast.AugAssign) and
                 isinstance(stmt.op, ast.LShift))
+
+    def _emit_mem_write(self, call_node, assign_op):
+        """Detect self.mem.write(addr, data) → mem[addr] <= data;"""
+        func = call_node.func
+        if (isinstance(func, ast.Attribute) and func.attr == 'write' and
+            isinstance(func.value, ast.Attribute) and self._is_self(func.value.value)):
+            mem_name = func.value.attr
+            if mem_name in self.mems and len(call_node.args) == 2:
+                addr = self._expr(call_node.args[0])
+                data = self._expr(call_node.args[1])
+                return f'{mem_name}[{addr}] {assign_op} {data};'
+        return None
 
     def _extract_nba(self, stmt):
         return self._expr(stmt.target), self._expr(stmt.value)

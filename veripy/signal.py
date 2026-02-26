@@ -148,3 +148,37 @@ class SignalArray(list):
         self.name = name
         for i, s in enumerate(self):
             s.name = f'{name}[{i}]'
+
+
+class Mem:
+    """Memory array: indexed read (combinational) and write (scheduled).
+
+    Simulation: mem[addr] reads, mem.write(addr, data) schedules a write.
+    Verilog: emits reg [W-1:0] name [0:D-1], read as name[addr],
+             write as name[addr] <= data inside always @(posedge).
+    """
+
+    def __init__(self, depth, width=1):
+        self.depth = depth
+        self.width = width
+        self.name = ''
+        self._mask = (1 << width) - 1
+        self._data = [0] * depth
+        self._pending_write = None  # (addr, value)
+
+    def __getitem__(self, addr):
+        """Combinational read."""
+        a = addr._val if isinstance(addr, Signal) else int(addr)
+        return self._data[a % self.depth]
+
+    def write(self, addr, value):
+        """Schedule a write (applied on next tick)."""
+        a = addr._val if isinstance(addr, Signal) else int(addr)
+        v = value._val if isinstance(value, Signal) else int(value)
+        self._pending_write = (a % self.depth, v & self._mask)
+
+    def _tick(self):
+        if self._pending_write is not None:
+            addr, val = self._pending_write
+            self._data[addr] = val
+            self._pending_write = None
