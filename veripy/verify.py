@@ -4,14 +4,14 @@ import unittest, subprocess, tempfile, os
 from .signal import Signal, Mem
 
 
-class DualPathTestCase(unittest.TestCase):
+class VeripyTestCase(unittest.TestCase):
     """Test case that runs each test against both Python sim and iverilog.
 
     Subclass and override create_module(). Use set(), tick(), out() in tests.
     Each test_* method automatically runs twice (Python, then Verilog) and
     asserts all outputs match on every cycle.
 
-        class TestCounter(DualPathTestCase):
+        class TestCounter(VeripyTestCase):
             def create_module(self):
                 return Counter(4)
 

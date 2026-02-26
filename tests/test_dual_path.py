@@ -3,7 +3,7 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from veripy import Module, Input, Output, Register, DualPathTestCase
+from veripy import Module, Input, Output, Register, VeripyTestCase
 
 
 class Counter(Module):
@@ -79,7 +79,7 @@ class ForwardMux(Module):
 
 # --- Dual-path tests ---
 
-class TestCounter(DualPathTestCase):
+class TestCounter(VeripyTestCase):
     def create_module(self):
         return Counter(4)
 
@@ -114,7 +114,7 @@ class TestCounter(DualPathTestCase):
         self.assertEqual(self.out('count'), 0)  # 4-bit wraps
 
 
-class TestPipeReg(DualPathTestCase):
+class TestPipeReg(VeripyTestCase):
     def create_module(self):
         return PipeReg(8)
 
@@ -148,7 +148,7 @@ class TestPipeReg(DualPathTestCase):
         self.assertEqual(self.out('q'), 0)
 
 
-class TestForwardMux(DualPathTestCase):
+class TestForwardMux(VeripyTestCase):
     def create_module(self):
         return ForwardMux(8)
 
