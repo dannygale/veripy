@@ -11,9 +11,10 @@ class Module:
     Sub-modules are any Module-typed attributes (self.alu = ALU(...)).
     """
 
-    def __init__(self):
+    def __init__(self, params=None):
         self._posedge_blocks = []
         self._comb_blocks = []
+        self._params = params or {}  # {'n': 8} → parameter n = 8
         # Auto-name signals and signal arrays from attribute names
         for attr in dir(self):
             val = getattr(self, attr)

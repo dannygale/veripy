@@ -72,7 +72,14 @@ class VerilogEmitter:
     # --- header: module declaration + ports ---
     def _emit_header(self):
         ports = self._port_list()
-        lines = [f'module {self.name} (']
+        params = self.mod._params
+        if params:
+            lines = [f'module {self.name} #(']
+            param_lines = [f'    parameter {name} = {val}' for name, val in params.items()]
+            lines.append(',\n'.join(param_lines))
+            lines.append(') (')
+        else:
+            lines = [f'module {self.name} (']
         port_lines = []
         for name, sig, direction in ports:
             w = self._width_str(sig)
@@ -271,7 +278,10 @@ class VerilogEmitter:
         if isinstance(node, ast.Name):
             if self._current_func:
                 try:
-                    return str(self._resolve_name(node.id))
+                    val = self._resolve_name(node.id)
+                    if isinstance(val, _ParamRef):
+                        return val.name
+                    return str(val)
                 except SyntaxError:
                     pass
             return node.id
@@ -289,14 +299,18 @@ class VerilogEmitter:
             return node.attr
 
         if isinstance(node, ast.BinOp):
+            # Try constant folding, but skip if a param is involved
             try:
                 l_val = self._const_eval(node.left)
                 r_val = self._const_eval(node.right)
-                ops = {ast.Add: lambda a,b: a+b, ast.Sub: lambda a,b: a-b,
-                       ast.Mult: lambda a,b: a*b}
-                fn = ops.get(type(node.op))
-                if fn is not None:
-                    return str(fn(l_val, r_val))
+                l_param = isinstance(node.left, ast.Name) and self._is_param_name(node.left.id)
+                r_param = isinstance(node.right, ast.Name) and self._is_param_name(node.right.id)
+                if not l_param and not r_param:
+                    ops = {ast.Add: lambda a,b: a+b, ast.Sub: lambda a,b: a-b,
+                           ast.Mult: lambda a,b: a*b}
+                    fn = ops.get(type(node.op))
+                    if fn is not None:
+                        return str(fn(l_val, r_val))
             except SyntaxError:
                 pass
             l, r = self._expr(node.left), self._expr(node.right)
@@ -374,20 +388,31 @@ class VerilogEmitter:
     def _is_self(self, node):
         return isinstance(node, ast.Name) and node.id == 'self'
 
+    def _is_param_name(self, name):
+        """Check if a Python variable name is a declared parameter."""
+        return name in self.mod._params
+
     def _resolve_name(self, name):
         func = self._current_func
         if func and hasattr(func, '__code__') and hasattr(func, '__closure__'):
             code = func.__code__
             if name in code.co_freevars and func.__closure__:
                 idx = code.co_freevars.index(name)
-                return func.__closure__[idx].cell_contents
+                val = func.__closure__[idx].cell_contents
+                # If this variable is a declared parameter, emit the param name
+                if name in self.mod._params:
+                    return _ParamRef(name, val)
+                return val
         raise SyntaxError(f'Cannot resolve variable: {name}')
 
     def _const_eval(self, node):
         if isinstance(node, ast.Constant):
             return node.value
         if isinstance(node, ast.Name):
-            return self._resolve_name(node.id)
+            val = self._resolve_name(node.id)
+            if isinstance(val, _ParamRef):
+                return val.value  # use concrete value for const eval
+            return val
         if isinstance(node, ast.BinOp):
             l = self._const_eval(node.left)
             r = self._const_eval(node.right)
@@ -404,3 +429,19 @@ class VerilogEmitter:
         if isinstance(func_def, ast.FunctionDef):
             return func_def
         return tree
+
+
+class _ParamRef:
+    """A reference to a Verilog parameter — str() gives the name, int() gives the value."""
+    def __init__(self, name, value):
+        self.name = name
+        self.value = value
+    def __str__(self):
+        return self.name
+    def __int__(self):
+        return int(self.value)
+    def __add__(self, o): return int(self) + int(o)
+    def __radd__(self, o): return int(o) + int(self)
+    def __sub__(self, o): return int(self) - int(o)
+    def __rsub__(self, o): return int(o) - int(self)
+    def __mul__(self, o): return int(self) * int(o)
