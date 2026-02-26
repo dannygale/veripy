@@ -125,7 +125,7 @@ class TestPipeRegVerilog(unittest.TestCase):
         self.assertIn('input flush', self.v)
         self.assertIn('input stall', self.v)
         self.assertIn('input [15:0] d', self.v)
-        self.assertIn('output reg [15:0] q', self.v)
+        self.assertIn('output [15:0] q', self.v)
 
     def test_posedge_block(self):
         self.assertIn('always @(posedge clock)', self.v)

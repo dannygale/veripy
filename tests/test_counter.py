@@ -73,7 +73,7 @@ class TestCounterVerilog(unittest.TestCase):
         self.assertIn('input clock', self.v)
         self.assertIn('input reset', self.v)
         self.assertIn('input enable', self.v)
-        self.assertIn('output reg [7:0] count', self.v)
+        self.assertIn('output [7:0] count', self.v)
 
     def test_register(self):
         self.assertIn('reg [7:0] counter', self.v)

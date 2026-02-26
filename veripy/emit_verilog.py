@@ -128,13 +128,25 @@ class VerilogEmitter:
         return lines
 
     def _port_list(self):
+        # Determine which outputs are driven by simple assigns (not always @(*))
+        assign_driven = set()
+        for method in self.mod._comb_blocks:
+            tree = self._get_func_ast(method)
+            if all(self._is_nba(s) for s in tree.body):
+                self._current_func = method
+                for stmt in tree.body:
+                    t, _ = self._extract_nba(stmt)
+                    assign_driven.add(t.split('[')[0])  # strip bit index
+                self._current_func = None
+
         ports = []
         for name, sig in sorted(self.signals.items()):
             if sig._kind == 'input':
                 ports.append((name, sig, 'input'))
         for name, sig in sorted(self.signals.items()):
             if sig._kind == 'output':
-                ports.append((name, sig, 'output reg'))
+                kind = 'output' if name in assign_driven else 'output reg'
+                ports.append((name, sig, kind))
         return ports
 
     def _width_str(self, sig):
