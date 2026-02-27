@@ -166,5 +166,80 @@ class TestSimEngineEdgeDetection(unittest.TestCase):
         self.assertEqual(int(c.count), 3)
 
 
+class TestVCDWaveformDump(unittest.TestCase):
+    def test_vcd_file_created(self):
+        import tempfile, os
+        c = Counter(n=4)
+        path = os.path.join(tempfile.mkdtemp(), 'test.vcd')
+        sim = SimEngine(c, vcd=path)
+
+        @sim.initial
+        def stim():
+            c.enable._val = 1
+            c.clock._val = 1
+            yield 1
+
+        sim.run()
+        self.assertTrue(os.path.exists(path))
+        content = open(path).read()
+        self.assertIn('$timescale', content)
+        self.assertIn('$enddefinitions', content)
+        self.assertIn('$dumpvars', content)
+
+    def test_vcd_contains_signal_declarations(self):
+        import tempfile, os
+        c = Counter(n=4)
+        path = os.path.join(tempfile.mkdtemp(), 'test.vcd')
+        sim = SimEngine(c, vcd=path)
+
+        @sim.initial
+        def stim():
+            yield 1
+
+        sim.run()
+        content = open(path).read()
+        self.assertIn('clock', content)
+        self.assertIn('count', content)
+        self.assertIn('enable', content)
+        self.assertIn('reset', content)
+
+    def test_vcd_records_changes(self):
+        import tempfile, os
+        c = Counter(n=4)
+        path = os.path.join(tempfile.mkdtemp(), 'test.vcd')
+        sim = SimEngine(c, vcd=path)
+
+        @sim.initial
+        def stim():
+            c.enable._val = 1
+            c.reset._val = 1
+            c.clock._val = 1
+            yield 1
+            c.reset._val = 0
+            c.clock._val = 0
+            yield 1
+            c.clock._val = 1
+            yield 1
+
+        sim.run()
+        content = open(path).read()
+        # Should have timestep markers
+        self.assertIn('#0', content)
+        self.assertIn('#1', content)
+        self.assertIn('#2', content)
+
+    def test_vcd_no_file_without_option(self):
+        """SimEngine without vcd= should not create any file."""
+        c = Counter(n=4)
+        sim = SimEngine(c)
+
+        @sim.initial
+        def stim():
+            yield 1
+
+        sim.run()
+        self.assertIsNone(sim._vcd)
+
+
 if __name__ == '__main__':
     unittest.main()

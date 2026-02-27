@@ -311,6 +311,12 @@ sim.run()
 
 `@sim.initial` blocks run once; `@sim.always` blocks restart on completion. The engine processes signal changes through active → NBA → re-settle regions, matching Verilog simulator behavior. Simulation ends when all initial blocks finish or `sim.finish()` is called.
 
+Pass `vcd=` to dump waveforms viewable in GTKWave:
+
+```python
+sim = SimEngine(counter, vcd='counter.vcd')
+```
+
 ## Python API
 
 Generate Verilog programmatically without the CLI:

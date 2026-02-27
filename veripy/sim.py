@@ -3,6 +3,69 @@
 import heapq
 
 
+class VCDWriter:
+    """Writes VCD (Value Change Dump) files for waveform viewing."""
+
+    def __init__(self, f, module, timescale='1ns'):
+        self._f = f
+        self._signals = []  # [(id_char, signal, width, name)]
+        self._prev = {}     # id -> last written value
+        self._write_header(module, timescale)
+
+    def _id_gen(self):
+        """Generate short VCD identifiers: !, \", #, ..., then !!, !\", ..."""
+        n = 0
+        while True:
+            s, i = '', n
+            while True:
+                s = chr(33 + (i % 94)) + s
+                i = i // 94 - 1
+                if i < 0:
+                    break
+            yield s
+            n += 1
+
+    def _collect_signals(self, module, prefix, scope_lines, var_lines, ids):
+        scope_lines.append(f'$scope module {prefix or module.__class__.__name__.lower()} $end')
+        for name, sig in sorted(module._signals().items()):
+            vid = next(ids)
+            self._signals.append((vid, sig, sig.width, f'{prefix}.{name}' if prefix else name))
+            self._prev[vid] = None
+            bits = f' [{sig.width-1}:0]' if sig.width > 1 else ''
+            var_lines.append(f'$var wire {sig.width} {vid} {name}{bits} $end')
+        scope_lines += var_lines
+        var_lines.clear()
+        for sub_name, sub in sorted(module._submodules().items()):
+            self._collect_signals(sub, f'{prefix}.{sub_name}' if prefix else sub_name,
+                                  scope_lines, var_lines, ids)
+        scope_lines.append('$upscope $end')
+
+    def _write_header(self, module, timescale):
+        w = self._f.write
+        w(f'$timescale {timescale} $end\n')
+        scope_lines, ids = [], self._id_gen()
+        self._collect_signals(module, '', scope_lines, [], ids)
+        w('\n'.join(scope_lines) + '\n')
+        w('$enddefinitions $end\n')
+        w('$dumpvars\n')
+        for vid, sig, width, _name in self._signals:
+            self._prev[vid] = sig._val
+            w(f'b{sig._val:0{width}b} {vid}\n')
+        w('$end\n')
+
+    def record(self, time):
+        """Write value changes for the current timestep."""
+        changes = []
+        for vid, sig, width, _name in self._signals:
+            v = sig._val
+            if v != self._prev[vid]:
+                changes.append(f'b{v:0{width}b} {vid}\n')
+                self._prev[vid] = v
+        if changes:
+            self._f.write(f'#{time}\n')
+            self._f.writelines(changes)
+
+
 class SimEngine:
     """Event-driven simulator for a Module.
 
@@ -12,13 +75,16 @@ class SimEngine:
     active (comb/blocking) → NBA (non-blocking) → re-settle.
     """
 
-    def __init__(self, module):
+    def __init__(self, module, vcd=None):
         self.mod = module
         self.time = 0
         self._queue = []       # min-heap of (time, seq, gen, restart_fn)
         self._seq = 0          # tie-breaker for heap ordering
         self._finished = False
         self._initial_count = 0  # track active initial blocks
+        self._vcd_path = vcd
+        self._vcd = None
+        self._vcd_file = None
 
     def initial(self, fn):
         """Register a generator function as an initial block (runs once)."""
@@ -39,30 +105,34 @@ class SimEngine:
 
     def run(self):
         """Run the simulation until all initial blocks complete or finish() is called."""
-        # Snapshot initial signal state
-        self.mod._snapshot_prev()
-        self.mod._settle_comb()
+        if self._vcd_path:
+            self._vcd_file = open(self._vcd_path, 'w')
+            self._vcd = VCDWriter(self._vcd_file, self.mod)
 
-        while self._queue and not self._finished:
-            t, _, gen, restart_fn = heapq.heappop(self._queue)
-            self.time = t
+        try:
+            self.mod._snapshot_prev()
+            self.mod._settle_comb()
 
-            # Resume the generator — it runs until next yield
-            try:
-                delay = next(gen)
-                self._schedule(t + delay, gen, restart_fn)
-            except StopIteration:
-                if restart_fn is not None:
-                    # Always block: restart from the top
-                    self._schedule(t, restart_fn(), restart_fn)
-                else:
-                    # Initial block finished
-                    self._initial_count -= 1
-                    if self._initial_count <= 0:
-                        self._finished = True
+            while self._queue and not self._finished:
+                t, _, gen, restart_fn = heapq.heappop(self._queue)
+                self.time = t
 
-            # Process signal changes at this time step
-            self._process()
+                try:
+                    delay = next(gen)
+                    self._schedule(t + delay, gen, restart_fn)
+                except StopIteration:
+                    if restart_fn is not None:
+                        self._schedule(t, restart_fn(), restart_fn)
+                    else:
+                        self._initial_count -= 1
+                        if self._initial_count <= 0:
+                            self._finished = True
+
+                self._process()
+        finally:
+            if self._vcd_file:
+                self._vcd_file.close()
+                self._vcd_file = None
 
     def _schedule(self, time, gen, restart_fn):
         heapq.heappush(self._queue, (time, self._seq, gen, restart_fn))
@@ -72,24 +142,21 @@ class SimEngine:
         """Verilog scheduling: active → detect edges → fire blocks → NBA → re-settle."""
         mod = self.mod
 
-        # Active region: settle comb with current signal values
         mod._settle_comb()
 
-        # Detect edges
         triggered = mod._check_edges()
 
         if triggered:
-            # Run triggered always blocks (writes go to NBA)
             for _edges, method in triggered:
                 method()
 
-            # NBA region: apply non-blocking assignments
             mod._apply_nba()
             for sub in mod._submodules().values():
                 sub._apply_nba()
 
-            # Re-settle comb with new register values
             mod._settle_comb()
 
-        # Snapshot for next edge detection
         mod._snapshot_prev()
+
+        if self._vcd:
+            self._vcd.record(self.time)
