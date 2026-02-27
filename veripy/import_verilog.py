@@ -143,12 +143,41 @@ class _Parser:
     def _opt_width(self):
         if self.at('['):
             self.eat('[')
-            hi = self._const_expr()
+            hi = self._expr()
             self.eat(':')
-            lo = self._const_expr()
+            lo = self._expr()
             self.eat(']')
-            return hi - lo + 1
+            try:
+                hi_val = self._eval_const(hi)
+                lo_val = self._eval_const(lo)
+                return hi_val - lo_val + 1
+            except SyntaxError:
+                # Parametric width — detect [param-1:0] → param
+                lo_val = self._try_eval(lo)
+                if lo_val == 0 and isinstance(hi, tuple) and hi[0] == '-':
+                    one = self._try_eval(hi[2])
+                    if one == 1:
+                        return self._expr_str(hi[1])
+                return self._expr_str(('+'  , ('-', hi, lo), ('num', 1)))
         return 1
+
+    def _try_eval(self, e):
+        try:
+            return self._eval_const(e)
+        except SyntaxError:
+            return None
+
+    def _expr_str(self, e):
+        """Convert expression AST to Python string."""
+        if isinstance(e, int):
+            return str(e)
+        if e[0] == 'num':
+            return str(e[1])
+        if e[0] == 'id':
+            return e[1]
+        if e[0] in ('+', '-', '*'):
+            return f'({self._expr_str(e[1])} {e[0]} {self._expr_str(e[2])})'
+        return str(e)
 
     def _declaration(self):
         kind = self.eat()[1]  # reg, wire, integer
@@ -318,7 +347,11 @@ class _Parser:
                 self.eat('.')
                 pname = self.eat()[1]
                 self.eat('(')
-                pval = self._const_expr()
+                e = self._expr()
+                try:
+                    pval = self._eval_const(e)
+                except SyntaxError:
+                    pval = self._expr_str(e)
                 self.eat(')')
                 params[pname] = pval
                 if self.at(','):
@@ -598,12 +631,20 @@ def _stmts_to_py(stmts, self_signals, indent):
     return lines
 
 
-def generate(modules):
-    """Generate VeriPy Python source from parsed module IR."""
+def generate(modules, external=None):
+    """Generate VeriPy Python source from parsed module IR.
+
+    external: optional dict of module_name → (relative_import_path, ClassName)
+              for modules defined in other files.
+    """
+    external = external or {}
     # Build a set of known module types for instance detection
-    mod_types = {m['name'] for m in modules}
+    mod_types = {m['name'] for m in modules} | set(external)
 
     lines = ['from veripy import Module, Input, Output, Register, Signal, Mem, posedge, negedge']
+    # Cross-file imports for externally defined modules
+    for mod_name, (imp_path, cls_name) in sorted(external.items()):
+        lines.append(f'from {imp_path} import {cls_name}')
     lines.append('')
 
     for mod in modules:
@@ -632,14 +673,12 @@ def generate(modules):
 
         # Ports
         for p in mod['ports']:
-            w = f'{p["width"]}' if p['width'] > 1 else ''
+            w = p['width']
+            w_arg = '' if w == 1 else str(w)
             if p['dir'] == 'input':
-                lines.append(f'        self.{p["name"]} = Input({w})')
+                lines.append(f'        self.{p["name"]} = Input({w_arg})')
             else:
-                if p['reg']:
-                    lines.append(f'        self.{p["name"]} = Output({w})')
-                else:
-                    lines.append(f'        self.{p["name"]} = Output({w})')
+                lines.append(f'        self.{p["name"]} = Output({w_arg})')
 
         # Internal declarations
         # Internal declarations (skip wires that are instance port wiring)
@@ -653,13 +692,14 @@ def generate(modules):
                 continue
             if d['name'] in inst_wire_names:
                 continue  # skip instance wiring artifacts
-            w = f'{d["width"]}' if d['width'] > 1 else ''
+            w = d['width']
+            w_arg = '' if w == 1 else str(w)
             if d['depth'] is not None:
-                lines.append(f'        self.{d["name"]} = Mem({d["depth"]}, {d["width"]})')
+                lines.append(f'        self.{d["name"]} = Mem({d["depth"]}, {w})')
             elif d['kind'] == 'reg':
-                lines.append(f'        self.{d["name"]} = Register({w})')
+                lines.append(f'        self.{d["name"]} = Register({w_arg})')
             else:
-                lines.append(f'        self.{d["name"]} = Signal({w})')
+                lines.append(f'        self.{d["name"]} = Signal({w_arg})')
 
         # Sub-module instances
         for inst in mod['instances']:
@@ -682,8 +722,18 @@ def generate(modules):
                 return tuple(_rewrite_wire(x) if isinstance(x, tuple) else x for x in expr)
             return expr
 
+        # Generate direct port wiring for sub-module connections
+        # e.g. .a(x) where x is a top-level port → self.inst.a = self.x
+        port_names = {p['name'] for p in mod['ports']}
+        direct_wires = []
+        for inst in mod['instances']:
+            for port, wire in inst['ports'].items():
+                if wire in port_names:
+                    direct_wires.append((inst['name'], port, wire))
+
         # Group assigns into comb blocks
-        if mod['assigns']:
+        has_assigns = mod['assigns'] or direct_wires
+        if has_assigns:
             lines.append('')
             lines.append('        @self.comb')
             lines.append('        def _assign():')
@@ -693,6 +743,8 @@ def generate(modules):
                 ts = _target_to_py(t, self_signals)
                 vs = _expr_to_py(v, self_signals)
                 lines.append(f'            {ts} = {vs}')
+            for inst_name, port, wire in direct_wires:
+                lines.append(f'            self.{inst_name}.{port} = self.{wire}')
 
         # Always blocks
         for i, ab in enumerate(mod['always']):
@@ -761,3 +813,48 @@ def _rewrite_expr(expr, inst_wires):
 def import_verilog(src):
     """Parse Verilog source and return equivalent VeriPy Python source."""
     return generate(parse(src))
+
+
+def import_project(src_dir):
+    """Import a directory of Verilog files with cross-file module resolution.
+
+    Returns dict of {relative_py_path: python_source}.
+    """
+    import os
+
+    # 1. Discover and parse all .v files
+    file_modules = {}  # rel_path → [parsed modules]
+    for root, _dirs, files in os.walk(src_dir):
+        for f in sorted(files):
+            if not f.endswith('.v'):
+                continue
+            full = os.path.join(root, f)
+            rel = os.path.relpath(full, src_dir)
+            with open(full) as fh:
+                file_modules[rel] = parse(fh.read())
+
+    # 2. Build global registry: module_name → (v_rel_path, class_name)
+    registry = {}
+    for rel, mods in file_modules.items():
+        for m in mods:
+            registry[m['name']] = (rel, _to_pascal(m['name']))
+
+    # 3. Generate Python for each file with cross-file imports
+    result = {}
+    for rel, mods in sorted(file_modules.items()):
+        py_rel = rel.replace('.v', '.py')
+        local_names = {m['name'] for m in mods}
+
+        # Find external modules referenced by instances in this file
+        external = {}
+        for m in mods:
+            for inst in m['instances']:
+                mt = inst['mod_type']
+                if mt not in local_names and mt in registry:
+                    v_path, cls = registry[mt]
+                    mod_path = '.' + v_path.replace('.v', '').replace(os.sep, '.')
+                    external[mt] = (mod_path, cls)
+
+        result[py_rel] = generate(mods, external)
+
+    return result

@@ -3,7 +3,7 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
-from veripy.import_verilog import import_verilog, parse, tokenize
+from veripy.import_verilog import import_verilog, import_project, parse, tokenize
 
 
 COUNTER_V = """\
@@ -193,6 +193,144 @@ class TestCodeGen(unittest.TestCase):
         py = import_verilog(HIER_V)
         self.assertIn('if self.op == 0:', py)
         self.assertIn('elif self.op == 1:', py)
+
+
+class TestParametricWidth(unittest.TestCase):
+    PARAM_V = """\
+module alu #(parameter width = 8) (
+    input [width-1:0] a,
+    input [width-1:0] b,
+    output [width-1:0] result
+);
+    assign result = a + b;
+endmodule
+"""
+
+    def test_parametric_width_generates(self):
+        py = import_verilog(self.PARAM_V)
+        self.assertIn('self.a = Input(width)', py)
+        self.assertIn('self.result = Output(width)', py)
+
+    def test_parametric_width_executes(self):
+        ns = {}
+        exec(import_verilog(self.PARAM_V), ns)
+        m = ns['Alu'](width=16)
+        m.a.set(1000); m.b.set(234)
+        m.tick()
+        self.assertEqual(int(m.result), 1234)
+
+    def test_parametric_instance_override(self):
+        src = self.PARAM_V + """
+module top (
+    input [15:0] x,
+    input [15:0] y,
+    output [15:0] z
+);
+    wire [15:0] alu_z;
+    alu #(.width(16)) u0 (
+        .a(x), .b(y), .result(alu_z)
+    );
+    assign z = alu_z;
+endmodule
+"""
+        py = import_verilog(src)
+        self.assertIn('self.u0 = Alu(width=16)', py)
+
+    def test_parametric_passthrough_override(self):
+        src = self.PARAM_V + """
+module wrap #(parameter width = 16) (
+    input [width-1:0] x,
+    input [width-1:0] y,
+    output [width-1:0] z
+);
+    wire [width-1:0] alu_z;
+    alu #(.width(width)) u0 (
+        .a(x), .b(y), .result(alu_z)
+    );
+    assign z = alu_z;
+endmodule
+"""
+        py = import_verilog(src)
+        self.assertIn("self.u0 = Alu(width=width)", py)
+
+
+class TestProjectImport(unittest.TestCase):
+    def test_cross_file_imports(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, 'alu.v'), 'w') as f:
+                f.write("""\
+module alu (
+    input [7:0] a,
+    input [7:0] b,
+    output [7:0] result
+);
+    assign result = a + b;
+endmodule
+""")
+            with open(os.path.join(d, 'top.v'), 'w') as f:
+                f.write("""\
+module top (
+    input [7:0] x,
+    input [7:0] y,
+    output [7:0] z
+);
+    wire [7:0] alu_z;
+    alu u0 (.a(x), .b(y), .result(alu_z));
+    assign z = alu_z;
+endmodule
+""")
+            result = import_project(d)
+            self.assertIn('alu.py', result)
+            self.assertIn('top.py', result)
+            self.assertIn('from .alu import Alu', result['top.py'])
+            self.assertNotIn('class Alu', result['top.py'])
+
+    def test_cross_file_executes(self):
+        import tempfile, os, sys
+        with tempfile.TemporaryDirectory() as d:
+            pkg = os.path.join(d, 'proj')
+            os.makedirs(pkg)
+            with open(os.path.join(d, 'alu.v'), 'w') as f:
+                f.write("""\
+module alu (
+    input [7:0] a,
+    input [7:0] b,
+    output [7:0] result
+);
+    assign result = a + b;
+endmodule
+""")
+            with open(os.path.join(d, 'top.v'), 'w') as f:
+                f.write("""\
+module top (
+    input [7:0] x,
+    input [7:0] y,
+    output [7:0] z
+);
+    wire [7:0] alu_z;
+    alu u0 (.a(x), .b(y), .result(alu_z));
+    assign z = alu_z;
+endmodule
+""")
+            result = import_project(d)
+            # Write to package and import
+            for rel, src in result.items():
+                with open(os.path.join(pkg, rel), 'w') as f:
+                    f.write(src)
+            open(os.path.join(pkg, '__init__.py'), 'w').close()
+            sys.path.insert(0, d)
+            try:
+                from proj.top import Top
+                t = Top()
+                t.x.set(10); t.y.set(20)
+                t.tick()
+                self.assertEqual(int(t.z), 30)
+            finally:
+                sys.path.remove(d)
+                sys.modules.pop('proj', None)
+                sys.modules.pop('proj.top', None)
+                sys.modules.pop('proj.alu', None)
 
 
 if __name__ == '__main__':

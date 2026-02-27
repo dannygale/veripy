@@ -114,16 +114,36 @@ def cmd_test(args):
 
 
 def cmd_import(args):
-    from .import_verilog import import_verilog
-    with open(args.file) as f:
-        src = f.read()
-    python_src = import_verilog(src)
-    if args.output:
-        with open(args.output, 'w') as f:
-            f.write(python_src)
-        print(f"Wrote {args.output}")
+    import os
+    path = args.file
+    if os.path.isdir(path):
+        from .import_verilog import import_project
+        if not args.output:
+            print("Error: -o <output_dir> is required when importing a directory", file=sys.stderr)
+            sys.exit(1)
+        result = import_project(path)
+        for rel_py, source in sorted(result.items()):
+            out_path = os.path.join(args.output, rel_py)
+            os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
+            with open(out_path, 'w') as f:
+                f.write(source)
+            print(f"Wrote {out_path}")
+        # Write __init__.py files for each directory
+        for root, dirs, _files in os.walk(args.output):
+            init = os.path.join(root, '__init__.py')
+            if not os.path.exists(init):
+                open(init, 'w').close()
     else:
-        print(python_src)
+        from .import_verilog import import_verilog
+        with open(path) as f:
+            src = f.read()
+        python_src = import_verilog(src)
+        if args.output:
+            with open(args.output, 'w') as f:
+                f.write(python_src)
+            print(f"Wrote {args.output}")
+        else:
+            print(python_src)
 
 
 def cmd_lint(args):
@@ -161,8 +181,8 @@ def main():
 
     # import
     p_import = sub.add_parser("import", help="Convert Verilog to VeriPy Python")
-    p_import.add_argument("file", help="Verilog file to convert")
-    p_import.add_argument("-o", "--output", help="Output Python file (default: stdout)")
+    p_import.add_argument("file", help="Verilog file or directory to convert")
+    p_import.add_argument("-o", "--output", help="Output file (single .v) or directory (project import)")
 
     # lint
     p_lint = sub.add_parser("lint", help="Run static checks on a VeriPy module")
