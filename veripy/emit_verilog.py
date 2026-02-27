@@ -194,7 +194,11 @@ class VerilogEmitter:
         lines = []
         for stmt in stmts:
             if isinstance(stmt, ast.If):
-                lines += self._emit_if(stmt, indent, assign_op)
+                case = self._try_case_chain(stmt)
+                if case:
+                    lines += self._emit_case(case, indent, assign_op)
+                else:
+                    lines += self._emit_if(stmt, indent, assign_op)
             elif isinstance(stmt, ast.For):
                 lines += self._emit_for(stmt, indent, assign_op)
             elif isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
@@ -229,6 +233,58 @@ class VerilogEmitter:
                 lines.append(f'{pad}end')
         else:
             lines.append(f'{pad}end')
+        return lines
+
+    def _try_case_chain(self, node):
+        """Detect if/elif/else chain comparing one signal against constants.
+
+        Returns (signal_expr, [(const_expr, body), ...], default_body) or None.
+        """
+        signal = None
+        branches = []
+        cur = node
+        while isinstance(cur, ast.If):
+            t = cur.test
+            if not (isinstance(t, ast.Compare) and len(t.ops) == 1
+                    and isinstance(t.ops[0], ast.Eq)):
+                return None
+            lhs, rhs = t.left, t.comparators[0]
+            # Determine which side is the signal and which is the constant
+            if self._is_self_target(lhs) or (isinstance(lhs, ast.Attribute) and self._is_self(lhs.value)):
+                sig_node, const_node = lhs, rhs
+            elif self._is_self_target(rhs) or (isinstance(rhs, ast.Attribute) and self._is_self(rhs.value)):
+                sig_node, const_node = rhs, lhs
+            else:
+                return None
+            sig_str = self._expr(sig_node)
+            if signal is None:
+                signal = sig_str
+            elif sig_str != signal:
+                return None
+            branches.append((const_node, cur.body))
+            # Walk the else chain
+            if not cur.orelse:
+                return (signal, branches, None)
+            if len(cur.orelse) == 1 and isinstance(cur.orelse[0], ast.If):
+                cur = cur.orelse[0]
+            else:
+                return (signal, branches, cur.orelse)
+        return (signal, branches, None)
+
+    def _emit_case(self, case_info, indent, assign_op):
+        signal, branches, default = case_info
+        pad = '    ' * indent
+        lines = [f'{pad}case ({signal})']
+        for const_node, body in branches:
+            label = self._expr(const_node)
+            lines.append(f'{pad}    {label}: begin')
+            lines += self._stmts_to_v(body, indent + 2, assign_op)
+            lines.append(f'{pad}    end')
+        if default:
+            lines.append(f'{pad}    default: begin')
+            lines += self._stmts_to_v(default, indent + 2, assign_op)
+            lines.append(f'{pad}    end')
+        lines.append(f'{pad}endcase')
         return lines
 
     def _emit_for(self, node, indent, assign_op='<='):
