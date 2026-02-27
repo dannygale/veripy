@@ -113,6 +113,19 @@ def cmd_test(args):
     sys.exit(subprocess.run(argv).returncode)
 
 
+def cmd_import(args):
+    from .import_verilog import import_verilog
+    with open(args.file) as f:
+        src = f.read()
+    python_src = import_verilog(src)
+    if args.output:
+        with open(args.output, 'w') as f:
+            f.write(python_src)
+        print(f"Wrote {args.output}")
+    else:
+        print(python_src)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="veripy", description="VeriPy HDL toolchain")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -129,8 +142,13 @@ def main():
     p_test.add_argument("path", nargs="?", help="Test file or directory (default: discover)")
     p_test.add_argument("-v", "--verbose", action="store_true")
 
+    # import
+    p_import = sub.add_parser("import", help="Convert Verilog to VeriPy Python")
+    p_import.add_argument("file", help="Verilog file to convert")
+    p_import.add_argument("-o", "--output", help="Output Python file (default: stdout)")
+
     args = parser.parse_args()
-    {"build": cmd_build, "test": cmd_test}[args.command](args)
+    {"build": cmd_build, "test": cmd_test, "import": cmd_import}[args.command](args)
 
 
 if __name__ == "__main__":

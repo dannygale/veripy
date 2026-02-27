@@ -86,9 +86,13 @@ veripy build <file.py> -o out/          # write .v files to a directory
 veripy build <file.py> -m Counter       # target a specific Module subclass
 veripy build <file.py> -p n=4           # pass parameters
 veripy test [path] [-v]                 # run dual-path test suite
+veripy import <file.v>                  # convert Verilog to VeriPy Python
+veripy import <file.v> -o out.py        # write to file
 ```
 
 `build` always compiles the emitted Verilog through iverilog before outputting. If the generated RTL is broken, you'll see the errors immediately.
+
+`import` parses the veripy Verilog subset (modules, ports, assign, always, case, if/else, sub-module instances with parameter overrides) and emits equivalent VeriPy Python. Useful for converting existing RTL to start using VeriPy for simulation and testing.
 
 ## Dual-Path Testing
 
