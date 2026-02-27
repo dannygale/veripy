@@ -1,3 +1,4 @@
+README.md
 pyproject.toml
 tests/test_alu_v1.py
 tests/test_counter.py
@@ -6,12 +7,14 @@ tests/test_decode_v1.py
 tests/test_dual_path.py
 tests/test_hazard_unit.py
 tests/test_pipe_stage.py
+tests/test_regfile.py
 tests/test_signal.py
 veripy/__init__.py
 veripy/cli.py
 veripy/emit_verilog.py
 veripy/module.py
 veripy/signal.py
+veripy/sim.py
 veripy/verify.py
 veripy.egg-info/PKG-INFO
 veripy.egg-info/SOURCES.txt

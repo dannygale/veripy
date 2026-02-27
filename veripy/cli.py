@@ -9,8 +9,14 @@ import sys
 import tempfile
 import unittest
 
+import re
+
 from .module import Module
 from .emit_verilog import VerilogEmitter
+
+
+def _to_snake(name):
+    return re.sub(r'(?<=[a-z0-9])(?=[A-Z])', '_', name).lower()
 
 
 def _load_modules(path, module_name=None, params=None):
@@ -74,7 +80,8 @@ def cmd_build(args):
         sys.exit(f"error: no Module subclasses found in {args.file}")
 
     for name, instance in modules:
-        emitter = VerilogEmitter(instance, name.lower())
+        snake = _to_snake(name)
+        emitter = VerilogEmitter(instance, snake)
         src = emitter.emit_all() if instance._submodules() else emitter.emit()
 
         ok, stderr = _compile_verilog(src)
@@ -85,7 +92,7 @@ def cmd_build(args):
 
         if args.output:
             os.makedirs(args.output, exist_ok=True)
-            out_path = os.path.join(args.output, f"{name.lower()}.v")
+            out_path = os.path.join(args.output, f"{snake}.v")
             with open(out_path, "w") as f:
                 f.write(src)
             print(f"{name}: {out_path}")
