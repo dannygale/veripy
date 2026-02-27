@@ -112,6 +112,58 @@ class TestCleanModule(unittest.TestCase):
         from examples.counter import Counter
         self.assertEqual(lint(Counter(n=4)), [])
 
+    def test_cdc_violation(self):
+        """Detect register read across clock domains."""
+        class CDCBad(Module):
+            def __init__(self):
+                self.fast_clk = Input()
+                self.slow_clk = Input()
+                self.d        = Input(8)
+                self.q        = Output(8)
+                self.reg_fast = Register(8)
+                self.reg_slow = Register(8)
+                super().__init__()
+
+                @self.posedge(self.fast_clk)
+                def fast_domain():
+                    self.reg_fast = self.d
+
+                @self.posedge(self.slow_clk)
+                def slow_domain():
+                    self.reg_slow = self.reg_fast  # CDC!
+
+                @self.comb
+                def out():
+                    self.q = self.reg_slow
+
+        w = lint(CDCBad())
+        cdc = [m for lvl, m in w if 'CDC' in m]
+        self.assertEqual(len(cdc), 1)
+        self.assertIn('reg_fast', cdc[0])
+        self.assertIn('fast_clk', cdc[0])
+        self.assertIn('slow_clk', cdc[0])
+
+    def test_no_cdc_single_clock(self):
+        """No CDC warning when only one clock domain exists."""
+        class SingleClock(Module):
+            def __init__(self):
+                self.clk = Input()
+                self.a   = Register(8)
+                self.b   = Register(8)
+                super().__init__()
+
+                @self.posedge(self.clk)
+                def block1():
+                    self.a = self.b
+
+                @self.posedge(self.clk)
+                def block2():
+                    self.b = self.a
+
+        w = lint(SingleClock())
+        cdc = [m for lvl, m in w if 'CDC' in m]
+        self.assertEqual(len(cdc), 0)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -135,7 +135,34 @@ def lint(module):
             for r in sorted(reg_writes):
                 warnings.append(('info', f"register '{r}' in {method.__name__} has no reset path"))
 
-    # Check 4: Unused signals (declared but never read)
+    # Check 4: Clock domain crossing
+    # Map each posedge block's clock, track which regs it writes
+    clocks = set()
+    reg_clock = {}  # register_name → clock_signal_name
+    block_clock = {}  # block index → clock_signal_name
+    block_reads = {}  # block index → set of read signal names
+    for i, (edges, method) in enumerate(module._always_blocks):
+        posedge_clocks = [e.signal.name for e in edges if e.kind == 'posedge']
+        if not posedge_clocks:
+            continue
+        clk = posedge_clocks[0]
+        clocks.add(clk)
+        block_clock[i] = clk
+        reads, writes = _collect_reads_writes(method)
+        block_reads[i] = reads
+        for w in writes:
+            if w in registers:
+                reg_clock[w] = clk
+
+    if len(clocks) > 1:
+        for i, clk in block_clock.items():
+            for r in block_reads[i]:
+                if r in reg_clock and reg_clock[r] != clk:
+                    warnings.append(('warning',
+                        f"CDC: register '{r}' (clocked by {reg_clock[r]}) "
+                        f"read in block clocked by {clk}"))
+
+    # Check 5: Unused signals (declared but never read)
     submodules = set()
     for k in dir(module):
         if not k.startswith('_'):
