@@ -138,7 +138,11 @@ class VerilogEmitter:
                 sig = getattr(sub, port_name)
                 if isinstance(sig, Signal) and sig._kind in ('input', 'output'):
                     ports.append(f'.{port_name}({sub_name}_{port_name})')
-            lines.append(f'    {mod_type} {inst_name} (')
+            if sub._params:
+                param_list = ', '.join(f'.{k}({v})' for k, v in sub._params.items())
+                lines.append(f'    {mod_type} #({param_list}) {inst_name} (')
+            else:
+                lines.append(f'    {mod_type} {inst_name} (')
             lines.append(',\n'.join(f'        {p}' for p in ports))
             lines.append('    );')
             lines.append('')
