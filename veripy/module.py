@@ -1,6 +1,6 @@
 """Module base class: defines the structure for simulation and Verilog emission."""
 
-from .signal import Signal, Mem, Edge, SensitivityList, posedge as _posedge
+from .signal import Signal, Mem, Edge, SensitivityList, Interface, posedge as _posedge
 
 
 class Module:
@@ -47,6 +47,9 @@ class Module:
                 val.name = attr
             elif isinstance(val, Mem) and not val.name:
                 val.name = attr
+            elif isinstance(val, Interface):
+                for sig_name, sig in val._signals().items():
+                    sig.name = f'{attr}_{sig_name}'
 
     def always(self, sensitivity):
         """Decorator: register a method with an explicit sensitivity list.
@@ -151,7 +154,14 @@ class Module:
             v = getattr(self, k)
             if isinstance(v, Signal):
                 sigs[k] = v
+            elif isinstance(v, Interface):
+                for sig_name, sig in v._signals().items():
+                    sigs[f'{k}_{sig_name}'] = sig
         return sigs
+
+    def _interfaces(self):
+        return {k: getattr(self, k) for k in dir(self)
+                if not k.startswith('_') and isinstance(getattr(self, k), Interface)}
 
     def _mems(self):
         return {k: getattr(self, k) for k in dir(self)

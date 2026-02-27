@@ -9,7 +9,7 @@ import textwrap
 def _to_snake(name):
     return re.sub(r'(?<=[a-z0-9])(?=[A-Z])', '_', name).lower()
 
-from .signal import Signal, Mem
+from .signal import Signal, Mem, Interface
 
 
 # Python AST op → Verilog operator
@@ -40,10 +40,15 @@ class VerilogEmitter:
         self.signals = {}
         self.mems = {}
         self.submodules = {}
+        self.interfaces = {}
         for k in dir(module):
             v = getattr(module, k)
             if isinstance(v, Mem):
                 self.mems[k] = v
+            elif isinstance(v, Interface):
+                self.interfaces[k] = v
+                for sig_name, sig in v._signals().items():
+                    self.signals[f'{k}_{sig_name}'] = sig
             elif isinstance(v, Signal):
                 self.signals[k] = v
         from .module import Module
@@ -235,7 +240,7 @@ class VerilogEmitter:
             isinstance(node.value, ast.Attribute) and
             self._is_self(node.value.value)):
             sub_name = node.value.attr
-            if sub_name in self.submodules:
+            if sub_name in self.submodules or sub_name in self.interfaces:
                 return f'{sub_name}_{node.attr}'
         return None
 
@@ -491,7 +496,7 @@ class VerilogEmitter:
             isinstance(node.value, ast.Attribute) and
             self._is_self(node.value.value)):
             sub_name = node.value.attr
-            if sub_name in self.submodules:
+            if sub_name in self.submodules or sub_name in self.interfaces:
                 return f'{sub_name}_{node.attr}'
 
         # self.foo → foo

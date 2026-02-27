@@ -216,6 +216,52 @@ def Register(width=1, reset=0):
     return Signal(width, reset=reset, _kind='reg')
 
 
+class Interface:
+    """Base class for reusable signal bundles.
+
+    Define signals as class attributes. Instantiate and assign to a Module
+    attribute to wire the whole bundle. Signals are accessed as self.bus.signal
+    in Python and emitted as bus_signal in Verilog.
+
+    Usage:
+        class AXILite(Interface):
+            awaddr  = ('input', 32)
+            awvalid = ('input', 1)
+            awready = ('output', 1)
+
+        class MyModule(Module):
+            def __init__(self):
+                self.bus = AXILite()
+                ...
+                @self.comb
+                def logic():
+                    self.bus.awready = 1
+    """
+
+    def __init__(self):
+        # Instantiate signals from class-level definitions
+        for name in dir(type(self)):
+            val = getattr(type(self), name)
+            if isinstance(val, tuple) and len(val) == 2 and val[0] in ('input', 'output'):
+                kind, width = val
+                sig = Signal(width, _kind=kind, name=name)
+                object.__setattr__(self, name, sig)
+
+    def __setattr__(self, name, value):
+        try:
+            existing = object.__getattribute__(self, name)
+            if isinstance(existing, Signal):
+                existing._assign(value)
+                return
+        except AttributeError:
+            pass
+        object.__setattr__(self, name, value)
+
+    def _signals(self):
+        return {k: v for k in dir(self)
+                if not k.startswith('_') and isinstance((v := getattr(self, k)), Signal)}
+
+
 
 class Mem:
     """Memory array: indexed read (combinational) and write (scheduled).
