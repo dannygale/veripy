@@ -84,17 +84,19 @@ Already have RTL? Convert it to VeriPy in a few steps.
 
 **1. Import your Verilog files**
 
+Import an entire project at once — cross-file module references are resolved automatically:
+
+```
+$ veripy import rtl/ -o veripy_src/
+Wrote veripy_src/alu.py
+Wrote veripy_src/datapath.py
+Wrote veripy_src/top.py
+```
+
+Or import individual files:
+
 ```
 $ veripy import rtl/alu.v -o veripy_src/alu.py
-$ veripy import rtl/datapath.v -o veripy_src/datapath.py
-```
-
-Or batch-convert a directory:
-
-```bash
-for f in rtl/*.v; do
-    veripy import "$f" -o "veripy_src/$(basename "${f%.v}.py")"
-done
 ```
 
 **2. Run lint to catch issues**
@@ -148,7 +150,7 @@ veripy lint <file.py>                   # run static checks on a module
 
 `build` always compiles the emitted Verilog through iverilog before outputting. If the generated RTL is broken, you'll see the errors immediately.
 
-`import` parses the veripy Verilog subset (modules, ports, assign, always, case, if/else, sub-module instances with parameter overrides) and emits equivalent VeriPy Python. Handles hierarchy — sub-module instances with parameter overrides and wire-to-port rewriting are preserved. Useful for converting existing RTL to start using VeriPy for simulation and testing.
+`import` parses the veripy Verilog subset (modules, ports, assign, always, case, if/else, sub-module instances with parameter overrides) and emits equivalent VeriPy Python. Handles hierarchy — sub-module instances with parameter overrides and wire-to-port rewriting are preserved. When given a directory, resolves cross-file module references and emits `from .module import Class` imports between files. Useful for converting existing RTL to start using VeriPy for simulation and testing.
 
 `lint` detects common RTL mistakes: undriven outputs, multi-driven signals, missing reset, and unused signals. See [Lint / Static Checks](#lint--static-checks).
 
@@ -411,9 +413,13 @@ for warning in lint(counter):
 # Import Verilog
 from veripy.import_verilog import import_verilog
 python_code = import_verilog('design.v')
+
+# Import entire Verilog project
+from veripy.import_verilog import import_project
+files = import_project('rtl/')  # {relative_path: python_source}
 ```
 
-`to_verilog()` emits a single module. `emit_all()` walks sub-modules and emits each unique definition, then the parent — suitable for multi-file or concatenated output. `to_sdc()` generates SDC timing constraints from annotations. `lint()` returns a list of warning strings. `import_verilog()` converts a Verilog file to VeriPy Python source.
+`to_verilog()` emits a single module. `emit_all()` walks sub-modules and emits each unique definition, then the parent — suitable for multi-file or concatenated output. `to_sdc()` generates SDC timing constraints from annotations. `lint()` returns a list of warning strings. `import_verilog()` converts a Verilog file to VeriPy Python source. `import_project()` converts a directory of Verilog files with cross-file module resolution.
 
 ## Parameterization
 
@@ -474,12 +480,13 @@ class alu(Module):
 
 The importer handles:
 - Module declarations with parameters
+- Parametric widths (`[width-1:0]` → `Input(width)`)
 - `assign`, `always @(*)`, `always @(posedge ...)` blocks
 - `if`/`else`, `case` statements
-- Sub-module instances with parameter overrides (`#(.WIDTH(16))`)
-- Hierarchical designs — wire-to-port rewriting is preserved so sub-module connections round-trip correctly
+- Sub-module instances with parameter overrides (`#(.WIDTH(16))`) including parametric passthrough (`#(.width(width))`)
+- Hierarchical designs — wire-to-port rewriting and direct port wiring are preserved so sub-module connections round-trip correctly
 
-From Python:
+Single file:
 
 ```python
 from veripy.import_verilog import import_verilog
@@ -491,6 +498,22 @@ Write to file with `-o`:
 
 ```
 $ veripy import design.v -o design.py
+```
+
+Import an entire project — resolves cross-file module references automatically:
+
+```
+$ veripy import rtl/ -o src/
+Wrote src/alu.py
+Wrote src/datapath.py
+Wrote src/top.py
+```
+
+Each output file gets the right `from .alu import Alu` imports. The directory structure is mirrored and `__init__.py` files are created. From Python:
+
+```python
+from veripy.import_verilog import import_project
+files = import_project('rtl/')  # {relative_path: python_source}
 ```
 
 ## Lint / Static Checks
