@@ -141,6 +141,33 @@ Modules define signals in `__init__`, then register logic blocks:
 
 Sub-modules are declared as attributes and automatically discovered for Verilog emission.
 
+## Sub-Module Instantiation
+
+Assign a `Module` instance as an attribute to wire it as a sub-module. Drive its inputs and read its outputs from `@self.comb` blocks:
+
+```python
+class Datapath(Module):
+    def __init__(self, width=16):
+        self.clock  = Input()
+        self.a      = Input(width)
+        self.b      = Input(width)
+        self.result = Output(width)
+        self.alu    = ALU(width)       # sub-module instance
+        super().__init__()
+
+        @self.comb
+        def wire_alu():
+            self.alu.a = self.a        # drive sub-module inputs
+            self.alu.b = self.b
+            self.alu.op = 0
+
+        @self.comb
+        def output():
+            self.result = self.alu.result  # read sub-module output
+```
+
+The emitter creates wires for each sub-module port and generates an instance with port connections. Use `emit_all()` to emit both parent and child definitions.
+
 ## Signal Operations
 
 Signals support bit slicing, concatenation, and ternary selection — in both simulation and Verilog output.
@@ -170,6 +197,49 @@ def select():
 ```
 
 Emits: `assign out = sel ? a : b;`
+
+## Mem (Memory Arrays)
+
+`Mem(depth, width)` provides memory arrays with combinational reads and clocked writes:
+
+```python
+from veripy import Module, Input, Output, Mem
+
+class RegFile(Module):
+    def __init__(self, width=8, depth=4):
+        self.clock = Input()
+        self.we    = Input()
+        self.waddr = Input(2)
+        self.wdata = Input(width)
+        self.raddr = Input(2)
+        self.rdata = Output(width)
+        self.regs  = Mem(depth, width)
+        super().__init__()
+
+        @self.comb
+        def read():
+            self.rdata = self.regs[self.raddr]       # combinational read
+
+        @self.posedge(self.clock)
+        def write():
+            if self.we:
+                self.regs.write(self.waddr, self.wdata)  # clocked write
+```
+
+Emits `reg [7:0] regs [0:3]` with an `initial` block to zero-initialize, `regs[raddr]` for reads, and `regs[waddr] <= wdata` for writes.
+
+## For-Loop Unrolling
+
+`for ... in range(...)` inside logic blocks is unrolled at emit time with constant folding:
+
+```python
+@self.posedge(self.clock)
+def shift():
+    for i in range(3):
+        self.stage[i] = self.stage[i + 1]
+```
+
+The emitter expands this into individual assignments (`stage[0] <= stage[1]; stage[1] <= stage[2]; ...`). Only `range()` with constant arguments is supported.
 
 ## Sensitivity Lists
 
