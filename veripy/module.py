@@ -26,7 +26,21 @@ class Module:
     def __init__(self, params=None):
         self._always_blocks = []   # [(edges_list, method), ...]
         self._comb_blocks = []
-        self._params = params or {}
+        if params is not None:
+            self._params = params
+        else:
+            # Auto-capture constructor kwargs as Verilog parameters
+            import inspect
+            self._params = {}
+            init = type(self).__init__
+            if init is not Module.__init__:
+                frame = inspect.currentframe().f_back
+                sig = inspect.signature(init)
+                for name, param in sig.parameters.items():
+                    if name == 'self':
+                        continue
+                    if name in frame.f_locals:
+                        self._params[name] = frame.f_locals[name]
         for attr in dir(self):
             val = getattr(self, attr)
             if isinstance(val, Signal) and not val.name:

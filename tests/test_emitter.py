@@ -213,8 +213,8 @@ class TestSubmoduleParamOverride(unittest.TestCase):
         """Sub-modules without _params emit plain instance."""
         from examples.datapath import Datapath
         v = VerilogEmitter(Datapath(), 'datapath').emit()
-        self.assertNotIn('#(', v)
-        self.assertIn('alu alu (', v)
+        # With auto-capture, ALU gets _params from its constructor
+        self.assertIn('#(.width(16)) alu', v)
 
 
 class TestParamHeader(unittest.TestCase):
@@ -226,7 +226,9 @@ class TestParamHeader(unittest.TestCase):
         self.assertIn('#(', v)
 
     def test_no_param_no_hash(self):
-        v = ParamModule(width=8).to_verilog()
+        m = ParamModule(width=8)
+        m._params = {}  # explicitly clear to suppress parameter header
+        v = m.to_verilog()
         self.assertNotIn('#(', v)
 
 

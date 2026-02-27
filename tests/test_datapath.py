@@ -72,7 +72,7 @@ class TestDatapathVerilog(unittest.TestCase):
         self.v = Datapath(width=16).to_verilog()
 
     def test_submodule_instance(self):
-        self.assertIn('alu alu', self.v)
+        self.assertIn('alu #(.width(16)) alu', self.v)
 
     def test_port_map(self):
         self.assertIn('.a(alu_a)', self.v)

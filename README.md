@@ -168,14 +168,11 @@ class Datapath(Module):
 
 The emitter creates wires for each sub-module port and generates an instance with port connections. Use `emit_all()` to emit both parent and child definitions.
 
-Sub-modules with `_params` get parameter overrides on the instance, so the same module type can be reused with different configurations:
+Sub-modules with constructor arguments automatically get parameter overrides on the instance, so the same module type can be reused with different configurations:
 
 ```python
 self.l1 = Cache(size=1024)
-self.l1._params = {'size': 1024}
-
 self.l2 = Cache(size=4096)
-self.l2._params = {'size': 4096}
 ```
 
 Emits:
@@ -358,11 +355,10 @@ module alu #(
 );
 ```
 
-From Python, pass `params` to the constructor's base class to get the same effect:
+From Python, constructor arguments are automatically captured as parameters:
 
 ```python
 alu = ALU(width=16)
-alu._params = {'width': 16}
 print(alu.to_verilog())
 ```
 
