@@ -394,6 +394,50 @@ alu = ALU(width=16)
 print(alu.to_verilog())
 ```
 
+## Verilog Import
+
+Convert existing Verilog files to VeriPy Python:
+
+```
+$ veripy import alu.v
+```
+
+```python
+from veripy import Module, Input, Output, Register
+
+class alu(Module):
+    def __init__(self, width=8):
+        self.a   = Input(width)
+        self.b   = Input(width)
+        self.out = Output(width)
+        super().__init__()
+
+        @self.comb
+        def _assign_0():
+            self.out = self.a + self.b
+```
+
+The importer handles:
+- Module declarations with parameters
+- `assign`, `always @(*)`, `always @(posedge ...)` blocks
+- `if`/`else`, `case` statements
+- Sub-module instances with parameter overrides (`#(.WIDTH(16))`)
+- Hierarchical designs — wire-to-port rewriting is preserved so sub-module connections round-trip correctly
+
+From Python:
+
+```python
+from veripy.import_verilog import import_verilog
+python_code = import_verilog('design.v')
+exec(python_code)  # defines the Module subclass(es)
+```
+
+Write to file with `-o`:
+
+```
+$ veripy import design.v -o design.py
+```
+
 ## Lint / Static Checks
 
 Catch common RTL mistakes at Python time:
