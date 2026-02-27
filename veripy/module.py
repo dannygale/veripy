@@ -80,6 +80,59 @@ class Module:
         self._comb_blocks.append(method)
         return method
 
+    def fsm(self, clock, reset, states):
+        """Decorator: define an FSM with states and transitions.
+
+        The decorated function receives the current state (int) and returns
+        the next state. State constants are injected as local names.
+
+        Usage:
+            @self.fsm(self.clock, self.reset, states=['IDLE', 'RUN', 'DONE'])
+            def ctrl(state):
+                if state == IDLE:
+                    if self.start:
+                        return RUN
+                elif state == RUN:
+                    return DONE
+                elif state == DONE:
+                    self.done = 1
+                    return IDLE
+        """
+        import math
+        width = max(1, (len(states) - 1).bit_length())
+        state_reg = Signal(width, _kind='reg', name='_fsm_state')
+        next_state = Signal(width, _kind='wire', name='_fsm_next')
+        object.__setattr__(self, '_fsm_state', state_reg)
+        object.__setattr__(self, '_fsm_next', next_state)
+        state_vals = {name: i for i, name in enumerate(states)}
+
+        def decorator(func):
+            # Inject state constants into function's globals
+            func.__globals__.update(state_vals)
+
+            def comb_wrapper():
+                ns = func(int(state_reg))
+                next_state._assign(ns if ns is not None else int(state_reg))
+
+            self._comb_blocks.append(comb_wrapper)
+            # Copy AST metadata for the emitter
+            comb_wrapper.__wrapped__ = func
+            comb_wrapper._fsm_info = {
+                'states': states, 'state_vals': state_vals,
+                'state_reg': state_reg, 'next_state': next_state,
+                'width': width,
+            }
+
+            @self.posedge(clock)
+            def fsm_update():
+                if reset:
+                    state_reg._assign(0)
+                else:
+                    state_reg._assign(int(next_state))
+
+            return func
+        return decorator
+
     # --- sub-module discovery ---
     def _submodules(self):
         subs = {}
