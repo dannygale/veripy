@@ -5,7 +5,7 @@ import copy
 import inspect
 import textwrap
 
-from .signal import Signal, Mem
+from .signal import Signal, Mem, Interface
 from .parameter import Parameter, ParamExpr, is_param
 from .module import Module, DeferredModule, _resolve_deferred
 from .context import ModuleContext, _set_context, _get_context
@@ -49,7 +49,8 @@ def _analyze_and_rewrite(func):
             fname = node.value.func.id
         if fname in ('Input', 'Output', 'Register', 'Signal', 'Mem'):
             signal_names.add(target.id)
-        elif fname and fname not in ('Parameter',):
+        elif fname and fname not in ('Parameter', 'pipeline',
+                                      'create_clock', 'max_delay', 'false_path'):
             submodule_names.add(target.id)
 
     # Build self-prefixed source for each inner logic block (for emitter)
@@ -145,11 +146,27 @@ def module(func):
             elif isinstance(val, Mem):
                 val.name = name
                 object.__setattr__(instance, name, val)
+            elif isinstance(val, Interface):
+                object.__setattr__(instance, name, val)
+                # Flatten interface signals with prefix
+                for sig_name, sig in val._signals().items():
+                    sig.name = f'{name}_{sig_name}'
             elif isinstance(val, DeferredModule):
                 resolved = _resolve_deferred(val, resolved_params)
                 object.__setattr__(instance, name, resolved)
             elif isinstance(val, Module):
                 object.__setattr__(instance, name, val)
+
+        # Attach any signals registered on context (e.g. FSM state, pipeline stages)
+        for name, sig in ctx.signals.items():
+            if not hasattr(instance, name):
+                object.__setattr__(instance, name, sig)
+
+        # Finalize any pipelines before collecting blocks
+        from .module import _Pipeline
+        for name, val in local_vars.items():
+            if isinstance(val, _Pipeline):
+                val._finalize()
 
         # Collect logic blocks with emitter source attached
         for fn in ctx.comb_blocks:
@@ -163,6 +180,32 @@ def module(func):
             if src:
                 fn._veripy_emit_source = src
             instance._always_blocks.append((edges, fn))
+
+        # Collect formal properties, timing, and FSM signals from context
+        instance._assertions = list(ctx.assertions)
+        instance._covers = list(ctx.covers)
+        # Resolve timing constraint signal refs to names
+        resolved_timing = []
+        for entry in ctx.timing:
+            if entry[0] == 'create_clock':
+                _, sig, period = entry
+                resolved_timing.append(('create_clock', sig.name if isinstance(sig, Signal) else sig, period))
+            elif entry[0] == 'max_delay':
+                _, fr, to, ns = entry
+                resolved_timing.append(('max_delay',
+                                        fr.name if isinstance(fr, Signal) else fr,
+                                        to.name if isinstance(to, Signal) else to, ns))
+            elif entry[0] == 'false_path':
+                _, fr, to = entry
+                resolved_timing.append(('false_path',
+                                        fr.name if isinstance(fr, Signal) else fr,
+                                        to.name if isinstance(to, Signal) else to))
+        instance._timing = resolved_timing
+
+        # Attach any FSM signals registered on context
+        for name, sig in ctx.signals.items():
+            if not hasattr(instance, name):
+                object.__setattr__(instance, name, sig)
 
         return instance
 
