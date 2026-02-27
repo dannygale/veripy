@@ -311,7 +311,7 @@ class VerilogEmitter:
                     if isinstance(stmt.value, ast.Call) and isinstance(stmt.value.func, ast.Name) and stmt.value.func.id == 'Register':
                         continue  # skip `x = Register(w)` declaration
                     v = self._expr(stmt.value)
-                    lines.append(f'{pad}{name} {assign_op} {v};')
+                    lines.append(f'{pad}{name} = {v};')
                 else:
                     # Plain local — record for inline substitution
                     self._locals[name] = stmt.value
@@ -451,6 +451,10 @@ class VerilogEmitter:
         if isinstance(node.op, ast.Add): return ast.Constant(value=l + r)
         if isinstance(node.op, ast.Sub): return ast.Constant(value=l - r)
         if isinstance(node.op, ast.Mult): return ast.Constant(value=l * r)
+        if isinstance(node.op, ast.LShift): return ast.Constant(value=l << r)
+        if isinstance(node.op, ast.RShift): return ast.Constant(value=l >> r)
+        if isinstance(node.op, ast.BitAnd): return ast.Constant(value=l & r)
+        if isinstance(node.op, ast.BitOr): return ast.Constant(value=l | r)
         return None
 
     # --- expression translation ---
