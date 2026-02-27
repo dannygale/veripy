@@ -88,11 +88,14 @@ veripy build <file.py> -p n=4           # pass parameters
 veripy test [path] [-v]                 # run dual-path test suite
 veripy import <file.v>                  # convert Verilog to VeriPy Python
 veripy import <file.v> -o out.py        # write to file
+veripy lint <file.py>                   # run static checks on a module
 ```
 
 `build` always compiles the emitted Verilog through iverilog before outputting. If the generated RTL is broken, you'll see the errors immediately.
 
-`import` parses the veripy Verilog subset (modules, ports, assign, always, case, if/else, sub-module instances with parameter overrides) and emits equivalent VeriPy Python. Useful for converting existing RTL to start using VeriPy for simulation and testing.
+`import` parses the veripy Verilog subset (modules, ports, assign, always, case, if/else, sub-module instances with parameter overrides) and emits equivalent VeriPy Python. Handles hierarchy — sub-module instances with parameter overrides and wire-to-port rewriting are preserved. Useful for converting existing RTL to start using VeriPy for simulation and testing.
+
+`lint` detects common RTL mistakes: undriven outputs, multi-driven signals, missing reset, and unused signals. See [Lint / Static Checks](#lint--static-checks).
 
 ## Dual-Path Testing
 
@@ -133,6 +136,9 @@ $ veripy test tests/ -v
 | `Register(width)` | Stateful `reg` signal (non-blocking `<=` as module attribute, blocking `=` as local temporary) |
 | `Signal(width)` | Internal wire |
 | `Mem(width, depth)` | Memory array with `.write(addr, data)` |
+| `Interface` | Reusable signal bundle (see [Interface Bundles](#interface-bundles)) |
+
+All signal types support `.set(value)` for immediate value assignment in testbenches, and `int(signal)` to read the current value.
 
 ## Module Structure
 
@@ -141,7 +147,11 @@ Modules define signals in `__init__`, then register logic blocks:
 - `@self.comb` — combinational logic (emits `assign` or `always @(*)`)
 - `@self.posedge(self.clock)` — sequential logic (emits `always @(posedge clk)`)
 - `@self.negedge(self.clock)` — sequential logic on falling edge
-- `@self.always(sensitivity)` — explicit sensitivity list (see below)
+- `@self.always(sensitivity)` — explicit sensitivity list (see [Sensitivity Lists](#sensitivity-lists))
+- `@self.fsm(clock, reset, states=[...])` — state machine (see [FSM Sugar](#fsm-sugar))
+- `@self.assert_always(clock)` — formal assertion (see [Formal Properties](#formal-properties))
+- `@self.cover(clock)` — coverage point (see [Formal Properties](#formal-properties))
+- `self.pipeline(clock, reset, width=N)` — pipeline registers (see [Pipeline Transforms](#pipeline-transforms))
 
 Sub-modules are declared as attributes and automatically discovered for Verilog emission.
 
@@ -334,9 +344,21 @@ print(counter.to_verilog())
 from veripy.emit_verilog import VerilogEmitter
 datapath = Datapath()
 print(VerilogEmitter(datapath).emit_all())
+
+# SDC timing constraints
+print(counter.to_sdc())
+
+# Lint checks
+from veripy.lint import lint
+for warning in lint(counter):
+    print(warning)
+
+# Import Verilog
+from veripy.import_verilog import import_verilog
+python_code = import_verilog('design.v')
 ```
 
-`to_verilog()` emits a single module. `emit_all()` walks sub-modules and emits each unique definition, then the parent — suitable for multi-file or concatenated output.
+`to_verilog()` emits a single module. `emit_all()` walks sub-modules and emits each unique definition, then the parent — suitable for multi-file or concatenated output. `to_sdc()` generates SDC timing constraints from annotations. `lint()` returns a list of warning strings. `import_verilog()` converts a Verilog file to VeriPy Python source.
 
 ## Parameterization
 
