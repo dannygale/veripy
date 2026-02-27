@@ -126,7 +126,7 @@ $ veripy test tests/ -v
 |------|-------------|
 | `Input(width)` | Input port (default width 1) |
 | `Output(width)` | Output port |
-| `Register(width)` | Clocked register (updates on posedge) |
+| `Register(width)` | Stateful signal (emits `reg`, uses non-blocking assignment) |
 | `Signal(width)` | Internal wire |
 | `Mem(width, depth)` | Memory array with `.write(addr, data)` |
 
