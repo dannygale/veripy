@@ -1,6 +1,6 @@
 """Module base class: defines the structure for simulation and Verilog emission."""
 
-from .signal import Signal, Mem, Edge, SensitivityList, Interface, posedge as _posedge
+from .signal import Signal, Mem, Edge, SensitivityList, Interface, Register, posedge as _posedge
 
 
 class Module:
@@ -138,6 +138,21 @@ class Module:
                 _, fr, to = c
                 lines.append(f'set_false_path -from [get_ports {fr}] -to [get_ports {to}]')
         return '\n'.join(lines)
+
+    def pipeline(self, clock, reset, width=1):
+        """Create a pipeline with explicit stage boundaries.
+
+        Usage:
+            pipe = self.pipeline(self.clock, self.reset, width=16)
+            pipe.stage(lambda: self.a + self.b)        # stage 0
+            pipe.stage(lambda prev: prev * 2)          # stage 1
+            pipe.stage(lambda prev: prev & 0xFF)       # stage 2
+
+            @self.comb
+            def output():
+                self.out = pipe.result
+        """
+        return _Pipeline(self, clock, reset, width)
 
     def fsm(self, clock, reset, states):
         """Decorator: define an FSM with states and transitions.
@@ -315,3 +330,60 @@ def _edges_match(edges):
         if edge.kind == 'negedge' and sig._prev_val != 0 and sig._val == 0:
             return True
     return False
+
+
+class _Pipeline:
+    """Pipeline with explicit stage boundaries.
+
+    Each .stage() call adds a register boundary. The framework creates
+    registers and wires them with posedge blocks automatically.
+    """
+
+    def __init__(self, module, clock, reset, width):
+        self._module = module
+        self._clock = clock
+        self._reset = reset
+        self._width = width
+        self._stages = []      # list of (register, func)
+        self._finalized = False
+
+    def stage(self, func):
+        """Add a pipeline stage.
+
+        func receives no args for the first stage, or the previous
+        stage's registered output for subsequent stages.
+        """
+        idx = len(self._stages)
+        reg = Register(self._width)
+        reg.name = f'_pipe_stage{idx}'
+        setattr(self._module, f'_pipe_stage{idx}', reg)
+        self._stages.append((reg, func))
+        return self
+
+    def _finalize(self):
+        if self._finalized:
+            return
+        self._finalized = True
+        stages = self._stages
+        clock = self._clock
+        reset = self._reset
+
+        @self._module.posedge(clock)
+        def _pipe_advance():
+            if reset:
+                for reg, _ in stages:
+                    reg._val = 0
+            else:
+                # Snapshot current values, then update — gives real latency
+                vals = [int(reg) for reg, _ in stages]
+                for i, (reg, func) in enumerate(stages):
+                    if i == 0:
+                        reg._val = int(func())
+                    else:
+                        reg._val = int(func(vals[i - 1]))
+
+    @property
+    def result(self):
+        """Output of the last pipeline stage."""
+        self._finalize()
+        return self._stages[-1][0]

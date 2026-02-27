@@ -372,6 +372,157 @@ alu = ALU(width=16)
 print(alu.to_verilog())
 ```
 
+## Lint / Static Checks
+
+Catch common RTL mistakes at Python time:
+
+```
+veripy lint examples/counter.py
+```
+
+Detects:
+- Undriven outputs
+- Multi-driven signals
+- Missing reset on sequential blocks
+- Unused signals
+
+From Python:
+
+```python
+from veripy.lint import lint
+warnings = lint(MyModule())
+for w in warnings:
+    print(w)
+```
+
+## FSM Sugar
+
+Define state machines declaratively with `@self.fsm`:
+
+```python
+class TrafficLight(Module):
+    def __init__(self):
+        self.clock = Input()
+        self.reset = Input()
+        self.go    = Input()
+        self.color = Output(2)
+        super().__init__()
+
+        @self.fsm(self.clock, self.reset, states=['RED', 'GREEN', 'YELLOW'])
+        def light(state, RED, GREEN, YELLOW):
+            if state == RED:
+                self.color = 0
+                if self.go:
+                    return GREEN
+            elif state == GREEN:
+                self.color = 1
+                return YELLOW
+            elif state == YELLOW:
+                self.color = 2
+                return RED
+```
+
+The decorator creates a state register, next-state signal, and emits the FSM as combinational logic + a posedge block. State constants are injected as arguments.
+
+## Interface Bundles
+
+Group related signals into reusable interfaces:
+
+```python
+class AXILite(Interface):
+    def __init__(self, data_width=32, addr_width=32):
+        self.awaddr  = ('input', addr_width)
+        self.awvalid = ('input', 1)
+        self.awready = ('output', 1)
+        self.wdata   = ('input', data_width)
+        self.wvalid  = ('input', 1)
+        self.wready  = ('output', 1)
+
+class Peripheral(Module):
+    def __init__(self):
+        self.clock = Input()
+        self.bus   = AXILite()
+        super().__init__()
+```
+
+Signals are flattened with the interface name as prefix in Verilog: `bus_awaddr`, `bus_awvalid`, etc.
+
+## Formal Properties
+
+Add assertions and coverage points that check every clock cycle:
+
+```python
+class Counter(Module):
+    def __init__(self):
+        self.clock = Input()
+        self.reset = Input()
+        self.count = Output(4)
+        self.reg   = Register(4)
+        super().__init__()
+
+        @self.assert_always(self.clock)
+        def count_bounded():
+            return int(self.count) < 16
+
+        @self.cover(self.clock)
+        def count_reaches_five():
+            return int(self.count) == 5
+```
+
+`@self.assert_always` raises `AssertionError` during simulation if the property ever fails. `@self.cover` tracks whether the condition was ever true (check with `counter.count_reaches_five.hit`).
+
+## Timing Annotations and SDC Output
+
+Co-locate timing constraints with your logic:
+
+```python
+class MyDesign(Module):
+    def __init__(self):
+        self.clk   = Input()
+        self.reset = Input()
+        self.d     = Input(8)
+        self.q     = Output(8)
+        super().__init__()
+
+        self.create_clock(self.clk, period_ns=10)
+        self.max_delay(self.d, self.q, ns=5)
+        self.false_path(self.reset, self.q)
+```
+
+Generate SDC:
+
+```python
+print(design.to_sdc())
+# create_clock -period 10 [get_ports clk]
+# set_max_delay 5 -from [get_ports d] -to [get_ports q]
+# set_false_path -from [get_ports reset] -to [get_ports q]
+```
+
+## Pipeline Transforms
+
+Insert pipeline registers with explicit stage boundaries:
+
+```python
+class Pipe(Module):
+    def __init__(self, width=16):
+        self.clock  = Input()
+        self.reset  = Input()
+        self.a      = Input(width)
+        self.b      = Input(width)
+        self.out    = Output(width)
+        super().__init__()
+
+        pipe = self.pipeline(self.clock, self.reset, width=width)
+        pipe.stage(lambda: int(self.a) + int(self.b))   # stage 0: add
+        pipe.stage(lambda prev: prev * 2)                # stage 1: shift
+
+        @self.comb
+        def output():
+            self.out = pipe.result
+```
+
+Each `.stage()` call creates a register boundary. Data propagates one stage per clock cycle. Stages chain: `pipe.stage(...).stage(...)`. Reset clears all pipeline registers to zero.
+
 ## Examples
 
 See [`examples/`](examples/) for complete modules: counter, ALU, pipeline register, forwarding mux, hazard unit, instruction decoder, and a multi-module datapath.
