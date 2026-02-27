@@ -97,6 +97,30 @@ class TestConcat(unittest.TestCase):
         self.assertEqual(out._val, 0x321)
 
 
+class TestReverseShift(unittest.TestCase):
+    def test_rlshift_signal(self):
+        s = Signal(4)
+        s._val = 2
+        self.assertEqual(1 << s, 4)  # 1 << 2
+
+    def test_rrshift_signal(self):
+        s = Signal(4)
+        s._val = 3
+        self.assertEqual(24 >> s, 3)  # 24 >> 3
+
+    def test_rlshift_slice(self):
+        s = Signal(8)
+        s._val = 0x23
+        sl = s[3:0]  # value 3
+        self.assertEqual(1 << sl, 8)  # 1 << 3
+
+    def test_rrshift_slice(self):
+        s = Signal(8)
+        s._val = 0x12
+        sl = s[3:0]  # value 2
+        self.assertEqual(16 >> sl, 4)  # 16 >> 2
+
+
 class TestTernaryMux(unittest.TestCase):
     def test_ternary_select(self):
         sel = Signal(1)
@@ -106,6 +130,92 @@ class TestTernaryMux(unittest.TestCase):
         self.assertEqual(a if sel else b, b)
         sel._val = 1
         self.assertEqual(a if sel else b, a)
+
+
+class TestNegedge(unittest.TestCase):
+    def test_negedge_sim(self):
+        """Module with @self.negedge captures on falling edge."""
+        from veripy import Module, Input, Output, Register, posedge, negedge
+
+        class FallingEdge(Module):
+            def __init__(self):
+                self.clk = Input()
+                self.d   = Input(8)
+                self.q   = Output(8)
+                self.r   = Register(8)
+                super().__init__()
+
+                @self.comb
+                def drive():
+                    self.q = self.r
+
+                @self.negedge(self.clk)
+                def capture():
+                    self.r = self.d
+
+        from veripy.sim import SimEngine
+        m = FallingEdge()
+        sim = SimEngine(m)
+
+        @sim.initial
+        def stim():
+            m.d._val = 42
+            m.clk._val = 1
+            yield 1
+            # Falling edge: 1 → 0
+            m.clk._val = 0
+            yield 1
+
+        sim.run()
+        self.assertEqual(int(m.q), 42)
+
+    def test_negedge_verilog_emission(self):
+        from veripy import Module, Input, Output, Register
+
+        class NegMod(Module):
+            def __init__(self):
+                self.clk = Input()
+                self.d   = Input(8)
+                self.q   = Output(8)
+                self.r   = Register(8)
+                super().__init__()
+
+                @self.comb
+                def drive():
+                    self.q = self.r
+
+                @self.negedge(self.clk)
+                def capture():
+                    self.r = self.d
+
+        v = NegMod().to_verilog()
+        self.assertIn('always @(negedge clk)', v)
+
+    def test_combined_sensitivity_verilog(self):
+        from veripy import Module, Input, Output, Register, posedge, negedge
+
+        class AsyncRst(Module):
+            def __init__(self):
+                self.clk   = Input()
+                self.rst_n = Input()
+                self.d     = Input(8)
+                self.q     = Output(8)
+                self.r     = Register(8)
+                super().__init__()
+
+                @self.comb
+                def drive():
+                    self.q = self.r
+
+                @self.always(posedge(self.clk) | negedge(self.rst_n))
+                def logic():
+                    if not self.rst_n:
+                        self.r = 0
+                    else:
+                        self.r = self.d
+
+        v = AsyncRst().to_verilog()
+        self.assertIn('always @(posedge clk or negedge rst_n)', v)
 
 
 if __name__ == '__main__':
