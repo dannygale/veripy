@@ -96,6 +96,14 @@ class VerilogEmitter:
         for name, mem in sorted(self.mems.items()):
             w = f'[{mem.width - 1}:0] ' if mem.width > 1 else ''
             lines.append(f'    reg {w}{name} [0:{mem.depth - 1}];')
+        # Initialize memories to zero (match Python sim behavior)
+        if self.mems:
+            lines.append('    integer _i;')
+            lines.append('    initial begin')
+            for name, mem in sorted(self.mems.items()):
+                lines.append(f'        for (_i = 0; _i < {mem.depth}; _i = _i + 1)')
+                lines.append(f'            {name}[_i] = 0;')
+            lines.append('    end')
         # Wires for sub-module ports
         for sub_name, sub in sorted(self.submodules.items()):
             for port_name in sorted(dir(sub)):

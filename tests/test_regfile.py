@@ -79,14 +79,12 @@ class TestRegFileDualPath(VeripyTestCase):
         self.assertEqual(self.out('rdata1'), 42)
 
     def test_r0_write_ignored(self):
-        # Write to r1, then attempt write to r0, verify r1 unchanged
-        self.set(we=1, waddr=1, wdata=99, raddr1=1, raddr2=1)
+        # r0 reads as 0 (initialized), write attempt is guarded
+        self.set(we=1, waddr=0, wdata=0xFF, raddr1=0, raddr2=0)
         self.tick()
-        self.set(waddr=0, wdata=0xFF)
+        self.set(we=0)
         self.tick()
-        self.set(we=0, raddr1=1)
-        self.tick()
-        self.assertEqual(self.out('rdata1'), 99)
+        self.assertEqual(self.out('rdata1'), 0)
 
     def test_two_ports_independent(self):
         self.set(we=1, waddr=1, wdata=10, raddr1=1, raddr2=1)
