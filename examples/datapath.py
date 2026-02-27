@@ -23,11 +23,11 @@ class ALU(Module):
         @self.comb
         def compute():
             if self.op == 0:
-                self.result <<= self.a + self.b
+                self.result = self.a + self.b
             elif self.op == 1:
-                self.result <<= self.a - self.b
+                self.result = self.a - self.b
             else:
-                self.result <<= 0
+                self.result = 0
 
 
 class Datapath(Module):
@@ -44,20 +44,20 @@ class Datapath(Module):
 
         @self.comb
         def wire_alu():
-            self.alu.a  <<= self.a
-            self.alu.b  <<= self.b
-            self.alu.op <<= self.op
+            self.alu.a  = self.a
+            self.alu.b  = self.b
+            self.alu.op = self.op
 
         @self.posedge(self.clock)
         def pipeline():
             if self.reset:
-                self.piped <<= 0
+                self.piped = 0
             else:
-                self.piped <<= self.alu.result
+                self.piped = self.alu.result
 
         @self.comb
         def output():
-            self.result <<= self.piped
+            self.result = self.piped
 
 
 if __name__ == '__main__':

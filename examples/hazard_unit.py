@@ -51,48 +51,48 @@ class HazardUnit(Module):
         @self.comb
         def ex_fwd_a():
             if self.ex_mem_valid and self.ex_mem_reg_we and self.ex_mem_rd_addr == self.id_ex_rs1_addr:
-                self.fwd_a <<= 1
+                self.fwd_a = 1
             elif self.mem_wb_valid and self.mem_wb_reg_we and self.mem_wb_rd_addr == self.id_ex_rs1_addr:
-                self.fwd_a <<= 2
+                self.fwd_a = 2
             else:
-                self.fwd_a <<= 0
+                self.fwd_a = 0
 
         @self.comb
         def ex_fwd_b():
             if self.ex_mem_valid and self.ex_mem_reg_we and self.ex_mem_rd_addr == self.id_ex_rs2_addr:
-                self.fwd_b <<= 1
+                self.fwd_b = 1
             elif self.mem_wb_valid and self.mem_wb_reg_we and self.mem_wb_rd_addr == self.id_ex_rs2_addr:
-                self.fwd_b <<= 2
+                self.fwd_b = 2
             else:
-                self.fwd_b <<= 0
+                self.fwd_b = 0
 
         # --- ID-stage forwarding (branch operand) ---
         @self.comb
         def id_fwd():
             if self.ex_mem_valid and self.ex_mem_reg_we and not self.ex_mem_mem_re and self.ex_mem_rd_addr == self.id_rs1_addr:
-                self.id_fwd_rs1 <<= 1
+                self.id_fwd_rs1 = 1
             elif self.mem_wb_valid and self.mem_wb_reg_we and self.mem_wb_rd_addr == self.id_rs1_addr:
-                self.id_fwd_rs1 <<= 2
+                self.id_fwd_rs1 = 2
             else:
-                self.id_fwd_rs1 <<= 0
+                self.id_fwd_rs1 = 0
 
         # --- Stall ---
         @self.comb
         def stall_logic():
             if self.id_ex_valid and self.id_ex_mem_re and (self.id_ex_rd_addr == self.id_rs1_addr or self.id_ex_rd_addr == self.id_rs2_addr):
-                self.stall <<= 1
+                self.stall = 1
             elif self.id_branch_reg and ((self.id_ex_valid and self.id_ex_reg_we and self.id_ex_rd_addr == self.id_rs1_addr) or (self.ex_mem_valid and self.ex_mem_mem_re and self.ex_mem_rd_addr == self.id_rs1_addr)):
-                self.stall <<= 1
+                self.stall = 1
             elif self.id_branch_flag and self.id_ex_valid and self.id_ex_cmp:
-                self.stall <<= 1
+                self.stall = 1
             else:
-                self.stall <<= 0
+                self.stall = 0
 
         # --- Flush ---
         @self.comb
         def flush():
-            self.flush_if_id <<= self.branch_taken
-            self.flush_id_ex <<= self.stall
+            self.flush_if_id = self.branch_taken
+            self.flush_id_ex = self.stall
 
 
 if __name__ == '__main__':

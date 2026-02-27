@@ -9,7 +9,7 @@ from veripy.signal import Signal, Input, Output, Register
 class TestSignal(unittest.TestCase):
     def test_width_masking(self):
         s = Signal(4)
-        s <<= 0xFF
+        s._assign(0xFF)
         s._tick()
         self.assertEqual(s._val, 0xF)
 
@@ -54,14 +54,14 @@ class TestSignal(unittest.TestCase):
     def test_nba_and_tick(self):
         s = Signal(8)
         s._val = 10
-        s <<= 20
+        s._assign(20)
         self.assertEqual(s._val, 10)  # not yet applied
         s._tick()
         self.assertEqual(s._val, 20)  # now applied
 
     def test_nba_masks(self):
         s = Signal(4)
-        s <<= 0xFF
+        s._assign(0xFF)
         s._tick()
         self.assertEqual(s._val, 0xF)
 
@@ -84,7 +84,7 @@ class TestConcat(unittest.TestCase):
         a, b = Signal(4), Signal(4)
         a._val, b._val = 0xA, 0xB
         out = Signal(8)
-        out <<= [a, b]
+        out._assign([a, b])
         out._tick()
         self.assertEqual(out._val, 0xBA)
 
@@ -92,7 +92,7 @@ class TestConcat(unittest.TestCase):
         a, b, c = Signal(4), Signal(4), Signal(4)
         a._val, b._val, c._val = 0x1, 0x2, 0x3
         out = Signal(12)
-        out <<= [a, b, c]
+        out._assign([a, b, c])
         out._tick()
         self.assertEqual(out._val, 0x321)
 

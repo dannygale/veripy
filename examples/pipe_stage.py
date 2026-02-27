@@ -28,14 +28,14 @@ class PipeReg(Module):
 
         @self.comb
         def drive():
-            self.q <<= self.data
+            self.q = self.data
 
         @self.posedge(self.clock)
         def capture():
             if self.reset or self.flush:
-                self.data <<= 0
+                self.data = 0
             elif not self.stall:
-                self.data <<= self.d
+                self.data = self.d
 
 
 class ForwardMux(Module):
@@ -63,14 +63,14 @@ class ForwardMux(Module):
         def forward():
             # EX has priority over MEM (more recent instruction)
             if self.ex_we and self.rs_addr == self.ex_rd_addr:
-                self.out <<= self.ex_val
-                self.fwd_sel <<= 1
+                self.out = self.ex_val
+                self.fwd_sel = 1
             elif self.mem_we and self.rs_addr == self.mem_rd_addr:
-                self.out <<= self.mem_val
-                self.fwd_sel <<= 2
+                self.out = self.mem_val
+                self.fwd_sel = 2
             else:
-                self.out <<= self.reg_val
-                self.fwd_sel <<= 0
+                self.out = self.reg_val
+                self.fwd_sel = 0
 
 
 if __name__ == '__main__':

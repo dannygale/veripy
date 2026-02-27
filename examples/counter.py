@@ -18,14 +18,14 @@ class Counter(Module):
 
         @self.comb
         def drive_output():
-            self.count <<= self.counter
+            self.count = self.counter
 
         @self.posedge(self.clock)
         def increment():
             if self.reset:
-                self.counter <<= 0
+                self.counter = 0
             elif self.enable:
-                self.counter <<= self.counter + 1
+                self.counter = self.counter + 1
 
 
 if __name__ == '__main__':

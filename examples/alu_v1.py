@@ -33,39 +33,39 @@ class ALU(Module):
 
         @self.comb
         def compute():
-            self.carry <<= 0
+            self.carry = 0
             if self.op == ALU_ADD:
-                self.result <<= self.a + self.b
-                self.carry <<= 1 if (self.a + self.b) < self.a else 0
+                self.result = self.a + self.b
+                self.carry = 1 if (self.a + self.b) < self.a else 0
             elif self.op == ALU_SUB:
-                self.result <<= self.a - self.b
-                self.carry <<= 1 if self.a < self.b else 0
+                self.result = self.a - self.b
+                self.carry = 1 if self.a < self.b else 0
             elif self.op == ALU_AND:
-                self.result <<= self.a & self.b
+                self.result = self.a & self.b
             elif self.op == ALU_OR:
-                self.result <<= self.a | self.b
+                self.result = self.a | self.b
             elif self.op == ALU_XOR:
-                self.result <<= self.a ^ self.b
+                self.result = self.a ^ self.b
             elif self.op == ALU_NOT:
-                self.result <<= ~self.a
+                self.result = ~self.a
             elif self.op == ALU_SHL:
-                self.result <<= self.a << 1
-                self.carry <<= self.a[width - 1]
+                self.result = self.a << 1
+                self.carry = self.a[width - 1]
             elif self.op == ALU_SHR:
-                self.result <<= self.a >> 1
+                self.result = self.a >> 1
             elif self.op == ALU_SRA:
-                self.result <<= (self.a >> 1) | (self.a[width - 1] << (width - 1))
+                self.result = (self.a >> 1) | (self.a[width - 1] << (width - 1))
             elif self.op == ALU_PASS:
-                self.result <<= self.b
+                self.result = self.b
             elif self.op == ALU_LUI:
-                self.result <<= self.b << 8
+                self.result = self.b << 8
             else:
-                self.result <<= 0
+                self.result = 0
 
         @self.comb
         def flags():
-            self.zero <<= 1 if self.result == 0 else 0
-            self.sign <<= self.result[width - 1]
+            self.zero = 1 if self.result == 0 else 0
+            self.sign = self.result[width - 1]
 
 
 if __name__ == '__main__':

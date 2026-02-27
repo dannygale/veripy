@@ -11,6 +11,17 @@ class Module:
     Sub-modules are any Module-typed attributes (self.alu = ALU(...)).
     """
 
+    def __setattr__(self, name, value):
+        if not name.startswith('_'):
+            try:
+                existing = object.__getattribute__(self, name)
+                if isinstance(existing, Signal):
+                    existing._assign(value)
+                    return
+            except AttributeError:
+                pass
+        object.__setattr__(self, name, value)
+
     def __init__(self, params=None):
         self._posedge_blocks = []
         self._comb_blocks = []

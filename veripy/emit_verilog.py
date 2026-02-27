@@ -29,6 +29,7 @@ class VerilogEmitter:
         self.mod = module
         self.name = module_name or type(module).__name__.lower()
         self._current_func = None
+        self._locals = {}  # local variable → AST expression (inline substitution)
         self.signals = {}
         self.arrays = {}
         self.mems = {}
@@ -133,7 +134,7 @@ class VerilogEmitter:
         for method in self.mod._comb_blocks:
             tree = self._get_func_ast(method)
             if all(self._is_nba(s) for s in tree.body):
-                self._current_func = method
+                self._current_func = method; self._locals = {}
                 for stmt in tree.body:
                     t, _ = self._extract_nba(stmt)
                     assign_driven.add(t.split('[')[0])  # strip bit index
@@ -157,9 +158,9 @@ class VerilogEmitter:
     # --- comb blocks → assign or always @(*) ---
     def _emit_comb(self, method):
         tree = self._get_func_ast(method)
-        # Simple: all statements are bare <<= → use assign
+        # Simple: all statements are bare assigns → use assign
         if all(self._is_nba(s) for s in tree.body):
-            self._current_func = method
+            self._current_func = method; self._locals = {}
             lines = []
             for stmt in tree.body:
                 t, v = self._extract_nba(stmt)
@@ -168,7 +169,7 @@ class VerilogEmitter:
             self._current_func = None
             return lines
         # Complex: has control flow → always @(*)
-        self._current_func = method
+        self._current_func = method; self._locals = {}
         lines = ['    always @(*) begin']
         lines += self._stmts_to_v(tree.body, indent=2, assign_op='=')
         lines += ['    end', '']
@@ -178,7 +179,7 @@ class VerilogEmitter:
     # --- posedge blocks → always @(posedge clk) ---
     def _emit_posedge(self, clk, method):
         tree = self._get_func_ast(method)
-        self._current_func = method
+        self._current_func = method; self._locals = {}
         lines = [f'    always @(posedge {clk.name}) begin']
         lines += self._stmts_to_v(tree.body, indent=2)
         lines += ['    end', '']
@@ -194,8 +195,12 @@ class VerilogEmitter:
                 lines += self._emit_if(stmt, indent, assign_op)
             elif isinstance(stmt, ast.For):
                 lines += self._emit_for(stmt, indent, assign_op)
-            elif self._is_nba(stmt):
-                t, v = self._extract_nba(stmt)
+            elif isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                # Local variable — record for inline substitution
+                self._locals[stmt.targets[0].id] = stmt.value
+            elif isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and self._is_self_target(stmt.targets[0]):
+                t = self._expr(stmt.targets[0])
+                v = self._expr(stmt.value)
                 lines.append(f'{pad}{t} {assign_op} {v};')
             elif isinstance(stmt, ast.Expr):
                 # Check for mem.write(addr, data) calls
@@ -288,6 +293,9 @@ class VerilogEmitter:
             return str(v)
 
         if isinstance(node, ast.Name):
+            # Check inline-substituted local variables first
+            if node.id in self._locals:
+                return self._expr(self._locals[node.id])
             if self._current_func:
                 try:
                     val = self._resolve_name(node.id)
@@ -379,14 +387,14 @@ class VerilogEmitter:
             cond = self._expr(node.test)
             a = self._expr(node.body)
             b = self._expr(node.orelse)
-            return f'({cond}) ? {a} : {b}'
+            return f'(({cond}) ? {a} : {b})'
 
         raise SyntaxError(f'Unsupported expression: {ast.dump(node)}')
 
     # --- helpers ---
     def _is_nba(self, stmt):
-        return (isinstance(stmt, ast.AugAssign) and
-                isinstance(stmt.op, ast.LShift))
+        return (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and
+                self._is_self_target(stmt.targets[0]))
 
     def _emit_mem_write(self, call_node, assign_op):
         """Detect self.mem.write(addr, data) → mem[addr] <= data;"""
@@ -401,10 +409,18 @@ class VerilogEmitter:
         return None
 
     def _extract_nba(self, stmt):
-        return self._expr(stmt.target), self._expr(stmt.value)
+        return self._expr(stmt.targets[0]), self._expr(stmt.value)
 
     def _is_self(self, node):
         return isinstance(node, ast.Name) and node.id == 'self'
+
+    def _is_self_target(self, node):
+        """Check if an assignment target is rooted in self (self.x, self.sub.port, self.x[slice])."""
+        if isinstance(node, ast.Subscript):
+            return self._is_self_target(node.value)
+        if isinstance(node, ast.Attribute):
+            return self._is_self(node.value) or self._is_self_target(node.value)
+        return False
 
     def _is_param_name(self, name):
         """Check if a Python variable name is a declared parameter."""

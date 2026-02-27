@@ -53,8 +53,8 @@ class Signal:
     def __index__(self):        return self._val
     def __repr__(self):         return f"Signal({self.name}={self._val}, w={self.width})"
 
-    # --- non-blocking assignment: <<= ---
-    def __ilshift__(self, value):
+    # --- non-blocking assignment ---
+    def _assign(self, value):
         """Schedule next-cycle update (non-blocking assignment)."""
         if isinstance(value, list):
             v, shift = 0, 0
@@ -65,7 +65,6 @@ class Signal:
             self._next = v & self._mask
         else:
             self._next = self._int(value) & self._mask
-        return self
 
     def _tick(self):
         """Apply pending non-blocking assignment."""
@@ -82,12 +81,16 @@ class Signal:
         return (self._val >> key) & 1
 
     def __setitem__(self, key, value):
-        # _SliceProxy.__ilshift__ already scheduled the update; accept silently.
-        pass
+        if isinstance(key, slice):
+            self[key]._assign(value)
+        else:
+            # single bit
+            self._next = ((self._val if self._next is None else self._next)
+                          & ~(1 << key)) | ((int(value) & 1) << key)
 
 
 class _SliceProxy:
-    """Proxy for bit-slice access. Supports read (int conversion) and write (<<=)."""
+    """Proxy for bit-slice access. Supports read (int conversion) and write (=)."""
 
     def __init__(self, signal, hi, lo):
         self._signal = signal
@@ -109,10 +112,32 @@ class _SliceProxy:
     def __bool__(self):
         return self._val != 0
 
-    def __eq__(self, o):
-        return self._val == (o._val if isinstance(o, (Signal, _SliceProxy)) else int(o))
+    def _int(self, o):
+        return o._val if isinstance(o, (Signal, _SliceProxy)) else int(o)
 
-    def __ilshift__(self, value):
+    # --- arithmetic / bitwise (return plain ints, same as Signal) ---
+    def __add__(self, o):       return self._val + self._int(o)
+    def __radd__(self, o):      return self._int(o) + self._val
+    def __sub__(self, o):       return self._val - self._int(o)
+    def __rsub__(self, o):      return self._int(o) - self._val
+    def __and__(self, o):       return self._val & self._int(o)
+    def __rand__(self, o):      return self._int(o) & self._val
+    def __or__(self, o):        return self._val | self._int(o)
+    def __ror__(self, o):       return self._int(o) | self._val
+    def __xor__(self, o):       return self._val ^ self._int(o)
+    def __rxor__(self, o):      return self._int(o) ^ self._val
+    def __lshift__(self, o):    return self._val << self._int(o)
+    def __rshift__(self, o):    return self._val >> self._int(o)
+    def __invert__(self):       return ~self._val & self._mask
+    def __neg__(self):          return (-self._val) & self._mask
+    def __eq__(self, o):        return self._val == self._int(o)
+    def __ne__(self, o):        return self._val != self._int(o)
+    def __lt__(self, o):        return self._val < self._int(o)
+    def __le__(self, o):        return self._val <= self._int(o)
+    def __gt__(self, o):        return self._val > self._int(o)
+    def __ge__(self, o):        return self._val >= self._int(o)
+
+    def _assign(self, value):
         """Partial write: schedule update to just this bit range."""
         v = value._val if isinstance(value, Signal) else int(value)
         v &= self._mask
@@ -121,7 +146,6 @@ class _SliceProxy:
         clear = full_mask & ~(self._mask << self._lo)
         current = self._signal._val if self._signal._next is None else self._signal._next
         self._signal._next = (current & clear) | (v << self._lo)
-        return self
 
 
 def Input(width=1):

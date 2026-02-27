@@ -17,14 +17,14 @@ class Counter(Module):
 
         @self.comb
         def drive_output():
-            self.count <<= self.counter
+            self.count = self.counter
 
         @self.posedge(self.clock)
         def increment():
             if self.reset:
-                self.counter <<= 0
+                self.counter = 0
             elif self.enable:
-                self.counter <<= self.counter + 1
+                self.counter = self.counter + 1
 
 
 class PipeReg(Module):
@@ -40,14 +40,14 @@ class PipeReg(Module):
 
         @self.comb
         def drive():
-            self.q <<= self.data
+            self.q = self.data
 
         @self.posedge(self.clock)
         def capture():
             if self.reset or self.flush:
-                self.data <<= 0
+                self.data = 0
             elif not self.stall:
-                self.data <<= self.d
+                self.data = self.d
 
 
 class ForwardMux(Module):
@@ -67,14 +67,14 @@ class ForwardMux(Module):
         @self.comb
         def forward():
             if self.ex_we and self.rs_addr == self.ex_rd_addr:
-                self.out <<= self.ex_val
-                self.fwd_sel <<= 1
+                self.out = self.ex_val
+                self.fwd_sel = 1
             elif self.mem_we and self.rs_addr == self.mem_rd_addr:
-                self.out <<= self.mem_val
-                self.fwd_sel <<= 2
+                self.out = self.mem_val
+                self.fwd_sel = 2
             else:
-                self.out <<= self.reg_val
-                self.fwd_sel <<= 0
+                self.out = self.reg_val
+                self.fwd_sel = 0
 
 
 # --- Dual-path tests ---
