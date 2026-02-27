@@ -78,6 +78,61 @@ Requires Python 3.10+ and [Icarus Verilog](https://steveicarus.github.io/iverilo
 pip install -e .
 ```
 
+## Quickstart: Importing an Existing Verilog Project
+
+Already have RTL? Convert it to VeriPy in a few steps.
+
+**1. Import your Verilog files**
+
+```
+$ veripy import rtl/alu.v -o veripy_src/alu.py
+$ veripy import rtl/datapath.v -o veripy_src/datapath.py
+```
+
+Or batch-convert a directory:
+
+```bash
+for f in rtl/*.v; do
+    veripy import "$f" -o "veripy_src/$(basename "${f%.v}.py")"
+done
+```
+
+**2. Run lint to catch issues**
+
+```
+$ veripy lint veripy_src/alu.py
+warning: output 'result' is never driven
+warning: signal 'tmp' is unused
+```
+
+**3. Write a dual-path test**
+
+```python
+from veripy import VeripyTestCase
+from veripy_src.alu import alu
+
+class TestALU(VeripyTestCase):
+    def create_module(self):
+        return alu()
+
+    def test_add(self):
+        self.set(a=3, b=4, op=0)
+        self.tick()
+        self.assertEqual(self.out('result'), 7)
+```
+
+**4. Verify Python sim matches Verilog**
+
+```
+$ veripy test tests/ -v
+```
+
+This runs your test against both the Python model and the generated Verilog, comparing outputs cycle-by-cycle. If they diverge, you'll see exactly which signal and cycle differ.
+
+**5. Iterate in Python**
+
+From here you can refactor, add [formal properties](#formal-properties), attach [timing constraints](#timing-annotations-and-sdc-output), or build new modules — all in Python with instant simulation feedback. When you're ready, `veripy build` emits synthesizable Verilog.
+
 ## CLI
 
 ```
