@@ -114,6 +114,13 @@ class _SliceProxy:
     def __bool__(self):
         return self._val != 0
 
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            hi = key.start if key.start is not None else self._bits - 1
+            lo = key.stop if key.stop is not None else 0
+            return _SliceProxy(self._signal, self._lo + hi, self._lo + lo)
+        return (self._val >> key) & 1
+
     def _int(self, o):
         return o._val if isinstance(o, (Signal, _SliceProxy)) else int(o)
 

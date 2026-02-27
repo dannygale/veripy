@@ -158,11 +158,34 @@ class VerilogEmitter:
         return f'[{sig.width - 1}:0] '
 
     # --- comb blocks → assign or always @(*) ---
+    def _scan_reg_locals(self, tree):
+        """Pre-scan for `name = Register(width)` — returns {name: width}."""
+        regs = {}
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name)
+                    and node.value.func.id == 'Register'):
+                name = node.targets[0].id
+                width = node.value.args[0].value if node.value.args else 1
+                regs[name] = width
+        return regs
+
+    def _reg_local_decls(self, indent):
+        """Emit reg declarations for Register locals at module level."""
+        pad = '    ' * indent
+        lines = []
+        for name, w in self._reg_locals.items():
+            ws = f' [{w-1}:0]' if w > 1 else ''
+            lines.append(f'{pad}reg{ws} {name};')
+        return lines
+
     def _emit_comb(self, method):
         tree = self._get_func_ast(method)
         # Simple: all statements are bare assigns → use assign
         if all(self._is_nba(s) for s in tree.body):
-            self._current_func = method; self._locals = {}
+            self._current_func = method; self._locals = {}; self._reg_locals = {}
             lines = []
             for stmt in tree.body:
                 t, v = self._extract_nba(stmt)
@@ -172,7 +195,9 @@ class VerilogEmitter:
             return lines
         # Complex: has control flow → always @(*)
         self._current_func = method; self._locals = {}
-        lines = ['    always @(*) begin']
+        self._reg_locals = self._scan_reg_locals(tree)
+        lines = self._reg_local_decls(1)
+        lines += ['    always @(*) begin']
         lines += self._stmts_to_v(tree.body, indent=2, assign_op='=')
         lines += ['    end', '']
         self._current_func = None
@@ -182,7 +207,9 @@ class VerilogEmitter:
     def _emit_posedge(self, clk, method):
         tree = self._get_func_ast(method)
         self._current_func = method; self._locals = {}
-        lines = [f'    always @(posedge {clk.name}) begin']
+        self._reg_locals = self._scan_reg_locals(tree)
+        lines = self._reg_local_decls(1)
+        lines += [f'    always @(posedge {clk.name}) begin']
         lines += self._stmts_to_v(tree.body, indent=2)
         lines += ['    end', '']
         self._current_func = None
@@ -202,8 +229,16 @@ class VerilogEmitter:
             elif isinstance(stmt, ast.For):
                 lines += self._emit_for(stmt, indent, assign_op)
             elif isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
-                # Local variable — record for inline substitution
-                self._locals[stmt.targets[0].id] = stmt.value
+                name = stmt.targets[0].id
+                if name in self._reg_locals:
+                    # Register local — skip the initialization, emit assignments
+                    if isinstance(stmt.value, ast.Call) and isinstance(stmt.value.func, ast.Name) and stmt.value.func.id == 'Register':
+                        continue  # skip `x = Register(w)` declaration
+                    v = self._expr(stmt.value)
+                    lines.append(f'{pad}{name} {assign_op} {v};')
+                else:
+                    # Plain local — record for inline substitution
+                    self._locals[name] = stmt.value
             elif isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and self._is_self_target(stmt.targets[0]):
                 t = self._expr(stmt.targets[0])
                 v = self._expr(stmt.value)
@@ -351,6 +386,9 @@ class VerilogEmitter:
             return str(v)
 
         if isinstance(node, ast.Name):
+            # Register locals emit as variable names
+            if node.id in self._reg_locals:
+                return node.id
             # Check inline-substituted local variables first
             if node.id in self._locals:
                 return self._expr(self._locals[node.id])
