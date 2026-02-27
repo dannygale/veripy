@@ -26,6 +26,8 @@ class Module:
     def __init__(self, params=None):
         self._always_blocks = []   # [(edges_list, method), ...]
         self._comb_blocks = []
+        self._assertions = []      # [(clock_signal, func), ...]
+        self._covers = []          # [(clock_signal, func, hit), ...]
         if params is not None:
             self._params = params
         else:
@@ -82,6 +84,32 @@ class Module:
         """Decorator: register a method as combinational logic."""
         self._comb_blocks.append(method)
         return method
+
+    def assert_always(self, clock):
+        """Decorator: register a property that must hold every cycle.
+
+        Usage:
+            @self.assert_always(self.clock)
+            def no_overflow():
+                return self.count < 16
+        """
+        def decorator(func):
+            self._assertions.append((clock, func))
+            return func
+        return decorator
+
+    def cover(self, clock):
+        """Decorator: register a coverage point.
+
+        Usage:
+            @self.cover(self.clock)
+            def reaches_max():
+                return self.count == 15
+        """
+        def decorator(func):
+            self._covers.append((clock, func, [False]))
+            return func
+        return decorator
 
     def fsm(self, clock, reset, states):
         """Decorator: define an FSM with states and transitions.
@@ -233,11 +261,21 @@ class Module:
         for sub in subs.values():
             sub._apply_nba()
         self._settle_comb()
+        self._check_assertions()
 
     def simulate(self, cycles):
         """Run tick() for N cycles."""
         for _ in range(cycles):
             self.tick()
+
+    def _check_assertions(self):
+        """Check assert_always properties and update cover points."""
+        for _clock, func in self._assertions:
+            if not func():
+                raise AssertionError(f"Assertion failed: {func.__name__}")
+        for _clock, func, hit in self._covers:
+            if func():
+                hit[0] = True
 
 
 def _edges_match(edges):
