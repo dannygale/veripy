@@ -39,7 +39,9 @@ class Signal:
     def __xor__(self, o):       return self._val ^ self._int(o)
     def __rxor__(self, o):      return self._int(o) ^ self._val
     def __lshift__(self, o):    return (self._val << self._int(o)) & self._mask
+    def __rlshift__(self, o):   return self._int(o) << self._val
     def __rshift__(self, o):    return self._val >> self._int(o)
+    def __rrshift__(self, o):   return self._int(o) >> self._val
     def __invert__(self):       return (~self._val) & self._mask
     def __neg__(self):          return (-self._val) & self._mask
     def __eq__(self, o):        return self._val == self._int(o)
@@ -127,7 +129,9 @@ class _SliceProxy:
     def __xor__(self, o):       return self._val ^ self._int(o)
     def __rxor__(self, o):      return self._int(o) ^ self._val
     def __lshift__(self, o):    return self._val << self._int(o)
+    def __rlshift__(self, o):   return self._int(o) << self._val
     def __rshift__(self, o):    return self._val >> self._int(o)
+    def __rrshift__(self, o):   return self._int(o) >> self._val
     def __invert__(self):       return ~self._val & self._mask
     def __neg__(self):          return (-self._val) & self._mask
     def __eq__(self, o):        return self._val == self._int(o)
