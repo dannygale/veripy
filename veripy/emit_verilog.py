@@ -168,7 +168,13 @@ class VerilogEmitter:
                     and isinstance(node.value.func, ast.Name)
                     and node.value.func.id == 'Register'):
                 name = node.targets[0].id
-                width = node.value.args[0].value if node.value.args else 1
+                arg = node.value.args[0] if node.value.args else None
+                if arg is None:
+                    width = 1
+                elif isinstance(arg, ast.Constant):
+                    width = arg.value
+                else:
+                    width = self._const_eval(arg)
                 regs[name] = width
         return regs
 
