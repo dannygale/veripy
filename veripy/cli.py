@@ -126,6 +126,23 @@ def cmd_import(args):
         print(python_src)
 
 
+def cmd_lint(args):
+    from .lint import lint
+    modules = _load_modules(args.file, module_name=args.module)
+    if not modules:
+        sys.exit(f"error: no Module subclasses found in {args.file}")
+    found = False
+    for name, instance in modules:
+        warnings = lint(instance)
+        if warnings:
+            found = True
+            for level, msg in warnings:
+                print(f"{name}: [{level}] {msg}")
+    if not found:
+        print("No issues found.")
+    sys.exit(1 if found else 0)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="veripy", description="VeriPy HDL toolchain")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -147,8 +164,13 @@ def main():
     p_import.add_argument("file", help="Verilog file to convert")
     p_import.add_argument("-o", "--output", help="Output Python file (default: stdout)")
 
+    # lint
+    p_lint = sub.add_parser("lint", help="Run static checks on a VeriPy module")
+    p_lint.add_argument("file", help="Python file containing Module subclass(es)")
+    p_lint.add_argument("-m", "--module", help="Target a specific Module subclass by name")
+
     args = parser.parse_args()
-    {"build": cmd_build, "test": cmd_test, "import": cmd_import}[args.command](args)
+    {"build": cmd_build, "test": cmd_test, "import": cmd_import, "lint": cmd_lint}[args.command](args)
 
 
 if __name__ == "__main__":
