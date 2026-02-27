@@ -22,73 +22,109 @@ class TestControlUnit(VeripyTestCase):
         return ControlUnit()
 
     def test_nop(self):
-        self.set(opcode=OP_NOP)
-        self.tick()
-        self.assertEqual(self.out('reg_we'), 0)
-        self.assertEqual(self.out('alu_op'), ALU_ADD)
+        @self.initial
+        def stim():
+            self.set(opcode=OP_NOP)
+            yield 1
+            self.assertEqual(self.out('reg_we'), 0)
+            self.assertEqual(self.out('alu_op'), ALU_ADD)
+        self.run_sim()
 
     def test_load(self):
-        self.set(opcode=OP_LOAD)
-        self.tick()
-        self.assertEqual(self.out('reg_we'), 1)
-        self.assertEqual(self.out('mem_re'), 1)
-        self.assertEqual(self.out('mem_to_reg'), 1)
-        self.assertEqual(self.out('use_imm'), 1)
+        @self.initial
+        def stim():
+            self.set(opcode=OP_LOAD)
+            yield 1
+            self.assertEqual(self.out('reg_we'), 1)
+            self.assertEqual(self.out('mem_re'), 1)
+            self.assertEqual(self.out('mem_to_reg'), 1)
+            self.assertEqual(self.out('use_imm'), 1)
+        self.run_sim()
 
     def test_store(self):
-        self.set(opcode=OP_STORE)
-        self.tick()
-        self.assertEqual(self.out('mem_we'), 1)
-        self.assertEqual(self.out('reg_we'), 0)
+        @self.initial
+        def stim():
+            self.set(opcode=OP_STORE)
+            yield 1
+            self.assertEqual(self.out('mem_we'), 1)
+            self.assertEqual(self.out('reg_we'), 0)
+        self.run_sim()
 
     def test_alu_ops(self):
-        self.set(opcode=OP_SUB)
-        self.tick()
-        self.assertEqual(self.out('reg_we'), 1)
-        self.assertEqual(self.out('alu_op'), ALU_SUB)
+        @self.initial
+        def stim():
+            self.set(opcode=OP_SUB)
+            yield 1
+            self.assertEqual(self.out('reg_we'), 1)
+            self.assertEqual(self.out('alu_op'), ALU_SUB)
+        self.run_sim()
 
     def test_li(self):
-        self.set(opcode=OP_LI)
-        self.tick()
-        self.assertEqual(self.out('alu_op'), ALU_PASS)
-        self.assertEqual(self.out('use_imm'), 1)
+        @self.initial
+        def stim():
+            self.set(opcode=OP_LI)
+            yield 1
+            self.assertEqual(self.out('alu_op'), ALU_PASS)
+            self.assertEqual(self.out('use_imm'), 1)
+        self.run_sim()
 
     def test_jump(self):
-        self.set(opcode=OP_JMP)
-        self.tick()
-        self.assertEqual(self.out('is_jump'), 1)
+        @self.initial
+        def stim():
+            self.set(opcode=OP_JMP)
+            yield 1
+            self.assertEqual(self.out('is_jump'), 1)
+        self.run_sim()
 
     def test_brcc(self):
-        self.set(opcode=OP_BRCC)
-        self.tick()
-        self.assertEqual(self.out('is_brcc'), 1)
+        @self.initial
+        def stim():
+            self.set(opcode=OP_BRCC)
+            yield 1
+            self.assertEqual(self.out('is_brcc'), 1)
+        self.run_sim()
 
     def test_halt(self):
-        self.set(opcode=OP_HLT)
-        self.tick()
-        self.assertEqual(self.out('is_halt'), 1)
+        @self.initial
+        def stim():
+            self.set(opcode=OP_HLT)
+            yield 1
+            self.assertEqual(self.out('is_halt'), 1)
+        self.run_sim()
 
     def test_call(self):
-        self.set(opcode=OP_CALL)
-        self.tick()
-        self.assertEqual(self.out('is_call'), 1)
+        @self.initial
+        def stim():
+            self.set(opcode=OP_CALL)
+            yield 1
+            self.assertEqual(self.out('is_call'), 1)
+        self.run_sim()
 
     def test_cmp(self):
-        self.set(opcode=OP_CMP)
-        self.tick()
-        self.assertEqual(self.out('is_cmp'), 1)
-        self.assertEqual(self.out('alu_op'), ALU_SUB)
-        self.assertEqual(self.out('reg_we'), 0)
+        @self.initial
+        def stim():
+            self.set(opcode=OP_CMP)
+            yield 1
+            self.assertEqual(self.out('is_cmp'), 1)
+            self.assertEqual(self.out('alu_op'), ALU_SUB)
+            self.assertEqual(self.out('reg_we'), 0)
+        self.run_sim()
 
     def test_lui(self):
-        self.set(opcode=OP_LUI)
-        self.tick()
-        self.assertEqual(self.out('alu_op'), ALU_LUI)
+        @self.initial
+        def stim():
+            self.set(opcode=OP_LUI)
+            yield 1
+            self.assertEqual(self.out('alu_op'), ALU_LUI)
+        self.run_sim()
 
     def test_iret(self):
-        self.set(opcode=OP_IRET)
-        self.tick()
-        self.assertEqual(self.out('is_iret'), 1)
+        @self.initial
+        def stim():
+            self.set(opcode=OP_IRET)
+            yield 1
+            self.assertEqual(self.out('is_iret'), 1)
+        self.run_sim()
 
 
 class TestDecode(VeripyTestCase):
@@ -96,56 +132,79 @@ class TestDecode(VeripyTestCase):
         return Decode()
 
     def test_field_extraction(self):
-        # ADD r3, r5, r2 → opcode=5, rd=3, rs1=5, rs2=2
-        self.set(instr=instr(OP_ADD, rd=3, rs1=5, rs2=2))
-        self.tick()
-        self.assertEqual(self.out('rd_addr'), 3)
-        self.assertEqual(self.out('rs1_addr'), 5)
-        self.assertEqual(self.out('rs2_addr'), 2)
-        self.assertEqual(self.out('reg_we'), 1)
+        @self.initial
+        def stim():
+            self.set(instr=instr(OP_ADD, rd=3, rs1=5, rs2=2))
+            yield 1
+            self.assertEqual(self.out('rd_addr'), 3)
+            self.assertEqual(self.out('rs1_addr'), 5)
+            self.assertEqual(self.out('rs2_addr'), 2)
+            self.assertEqual(self.out('reg_we'), 1)
+        self.run_sim()
 
     def test_rs1_remap_addi(self):
-        # ADDI r3, imm → rs1 should read from rd field (3)
-        self.set(instr=instr(OP_ADDI, rd=3, rs1=7, imm=5))
-        self.tick()
-        self.assertEqual(self.out('rs1_addr'), 3)  # remapped from rd
+        @self.initial
+        def stim():
+            self.set(instr=instr(OP_ADDI, rd=3, rs1=7, imm=5))
+            yield 1
+            self.assertEqual(self.out('rs1_addr'), 3)
+        self.run_sim()
 
     def test_rs1_remap_jmp(self):
-        self.set(instr=instr(OP_JMP, rd=5))
-        self.tick()
-        self.assertEqual(self.out('rs1_addr'), 5)  # remapped from rd
+        @self.initial
+        def stim():
+            self.set(instr=instr(OP_JMP, rd=5))
+            yield 1
+            self.assertEqual(self.out('rs1_addr'), 5)
+        self.run_sim()
 
     def test_rs2_remap_store(self):
-        # STORE reads data from rd via rs2
-        self.set(instr=instr(OP_STORE, rd=4, rs1=2, imm=10))
-        self.tick()
-        self.assertEqual(self.out('rs2_addr'), 4)  # remapped from rd
+        @self.initial
+        def stim():
+            self.set(instr=instr(OP_STORE, rd=4, rs1=2, imm=10))
+            yield 1
+            self.assertEqual(self.out('rs2_addr'), 4)
+        self.run_sim()
 
     def test_immediate_zero_extend(self):
-        self.set(instr=instr(OP_LI, rd=1, imm=0xAB))
-        self.tick()
-        self.assertEqual(self.out('immediate'), 0x00AB)
+        @self.initial
+        def stim():
+            self.set(instr=instr(OP_LI, rd=1, imm=0xAB))
+            yield 1
+            self.assertEqual(self.out('immediate'), 0x00AB)
+        self.run_sim()
 
     def test_branch_offset_positive(self):
-        self.set(instr=instr(OP_BRCC, rd=0, imm=0x10))
-        self.tick()
-        self.assertEqual(self.out('branch_offset'), 0x0010)
+        @self.initial
+        def stim():
+            self.set(instr=instr(OP_BRCC, rd=0, imm=0x10))
+            yield 1
+            self.assertEqual(self.out('branch_offset'), 0x0010)
+        self.run_sim()
 
     def test_branch_offset_negative(self):
-        self.set(instr=instr(OP_BRCC, rd=0, imm=0xFC))  # -4
-        self.tick()
-        self.assertEqual(self.out('branch_offset'), 0xFFFC)
+        @self.initial
+        def stim():
+            self.set(instr=instr(OP_BRCC, rd=0, imm=0xFC))
+            yield 1
+            self.assertEqual(self.out('branch_offset'), 0xFFFC)
+        self.run_sim()
 
     def test_branch_cond(self):
-        # BRcc with cond=5 in instr[10:8]
-        self.set(instr=instr(OP_BRCC, rd=5, imm=2))
-        self.tick()
-        self.assertEqual(self.out('branch_cond'), 5)
+        @self.initial
+        def stim():
+            self.set(instr=instr(OP_BRCC, rd=5, imm=2))
+            yield 1
+            self.assertEqual(self.out('branch_cond'), 5)
+        self.run_sim()
 
     def test_control_passthrough(self):
-        self.set(instr=instr(OP_LOAD, rd=1, rs1=2, imm=4))
-        self.tick()
-        self.assertEqual(self.out('reg_we'), 1)
-        self.assertEqual(self.out('mem_re'), 1)
-        self.assertEqual(self.out('mem_to_reg'), 1)
-        self.assertEqual(self.out('use_imm'), 1)
+        @self.initial
+        def stim():
+            self.set(instr=instr(OP_LOAD, rd=1, rs1=2, imm=4))
+            yield 1
+            self.assertEqual(self.out('reg_we'), 1)
+            self.assertEqual(self.out('mem_re'), 1)
+            self.assertEqual(self.out('mem_to_reg'), 1)
+            self.assertEqual(self.out('use_imm'), 1)
+        self.run_sim()

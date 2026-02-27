@@ -71,30 +71,61 @@ class TestRegFileDualPath(VeripyTestCase):
         return RegFile(width=8, depth=4)
 
     def test_write_and_read(self):
-        # Write r1, then read it back
-        self.set(we=1, waddr=1, wdata=42, raddr1=1, raddr2=1)
-        self.tick()
-        self.set(we=0)
-        self.tick()
-        self.assertEqual(self.out('rdata1'), 42)
+        @self.always
+        def clock():
+            self.set(clock=0)
+            yield 5
+            self.set(clock=1)
+            yield 5
+
+        @self.initial
+        def stim():
+            self.set(we=1, waddr=1, wdata=42, raddr1=1, raddr2=1)
+            yield 10
+            self.set(we=0)
+            yield 10
+            self.assertEqual(self.out('rdata1'), 42)
+
+        self.run_sim()
 
     def test_r0_write_ignored(self):
-        # r0 reads as 0 (initialized), write attempt is guarded
-        self.set(we=1, waddr=0, wdata=0xFF, raddr1=0, raddr2=0)
-        self.tick()
-        self.set(we=0)
-        self.tick()
-        self.assertEqual(self.out('rdata1'), 0)
+        @self.always
+        def clock():
+            self.set(clock=0)
+            yield 5
+            self.set(clock=1)
+            yield 5
+
+        @self.initial
+        def stim():
+            self.set(we=1, waddr=0, wdata=0xFF, raddr1=0, raddr2=0)
+            yield 10
+            self.set(we=0)
+            yield 10
+            self.assertEqual(self.out('rdata1'), 0)
+
+        self.run_sim()
 
     def test_two_ports_independent(self):
-        self.set(we=1, waddr=1, wdata=10, raddr1=1, raddr2=1)
-        self.tick()
-        self.set(waddr=2, wdata=20, raddr1=1, raddr2=2)
-        self.tick()
-        self.set(we=0)
-        self.tick()
-        self.assertEqual(self.out('rdata1'), 10)
-        self.assertEqual(self.out('rdata2'), 20)
+        @self.always
+        def clock():
+            self.set(clock=0)
+            yield 5
+            self.set(clock=1)
+            yield 5
+
+        @self.initial
+        def stim():
+            self.set(we=1, waddr=1, wdata=10, raddr1=1, raddr2=1)
+            yield 10
+            self.set(waddr=2, wdata=20, raddr1=1, raddr2=2)
+            yield 10
+            self.set(we=0)
+            yield 10
+            self.assertEqual(self.out('rdata1'), 10)
+            self.assertEqual(self.out('rdata2'), 20)
+
+        self.run_sim()
 
 
 if __name__ == '__main__':

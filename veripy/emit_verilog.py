@@ -54,8 +54,8 @@ class VerilogEmitter:
         lines += self._emit_submodule_instances()
         for method in self.mod._comb_blocks:
             lines += self._emit_comb(method)
-        for clk, method in self.mod._posedge_blocks:
-            lines += self._emit_posedge(clk, method)
+        for edges, method in self.mod._always_blocks:
+            lines += self._emit_always(edges, method)
         lines.append('endmodule')
         return '\n'.join(lines)
 
@@ -210,12 +210,14 @@ class VerilogEmitter:
         return lines
 
     # --- posedge blocks → always @(posedge clk) ---
-    def _emit_posedge(self, clk, method):
+    def _emit_always(self, edges, method):
+        """Emit always @(sensitivity list) block."""
+        sens = ' or '.join(f'{e.kind} {e.signal.name}' for e in edges)
         tree = self._get_func_ast(method)
         self._current_func = method; self._locals = {}
         self._reg_locals = self._scan_reg_locals(tree)
         lines = self._reg_local_decls(1)
-        lines += [f'    always @(posedge {clk.name}) begin']
+        lines += [f'    always @({sens}) begin']
         lines += self._stmts_to_v(tree.body, indent=2)
         lines += ['    end', '']
         self._current_func = None

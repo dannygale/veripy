@@ -1,13 +1,14 @@
 """Module base class: defines the structure for simulation and Verilog emission."""
 
-from .signal import Signal, Mem
+from .signal import Signal, Mem, Edge, SensitivityList, posedge as _posedge
 
 
 class Module:
     """Base class for hardware modules.
 
     Subclasses define signals in __init__, then register combinational
-    and sequential blocks via @self.comb and @self.posedge decorators.
+    and sequential blocks via @self.comb, @self.posedge, @self.negedge,
+    or @self.always decorators.
     Sub-modules are any Module-typed attributes (self.alu = ALU(...)).
     """
 
@@ -23,10 +24,9 @@ class Module:
         object.__setattr__(self, name, value)
 
     def __init__(self, params=None):
-        self._posedge_blocks = []
+        self._always_blocks = []   # [(edges_list, method), ...]
         self._comb_blocks = []
-        self._params = params or {}  # {'n': 8} → parameter n = 8
-        # Auto-name signals and signal arrays from attribute names
+        self._params = params or {}
         for attr in dir(self):
             val = getattr(self, attr)
             if isinstance(val, Signal) and not val.name:
@@ -34,12 +34,32 @@ class Module:
             elif isinstance(val, Mem) and not val.name:
                 val.name = attr
 
-    def posedge(self, clock_signal):
-        """Decorator: register a method as a posedge-triggered always block."""
+    def always(self, sensitivity):
+        """Decorator: register a method with an explicit sensitivity list.
+
+        Usage:
+            @self.always(posedge(self.clk) | negedge(self.rst))
+            def logic(): ...
+        """
+        if isinstance(sensitivity, Edge):
+            edges = [sensitivity]
+        elif isinstance(sensitivity, SensitivityList):
+            edges = sensitivity.edges
+        else:
+            raise TypeError(f"Expected Edge or SensitivityList, got {type(sensitivity)}")
         def decorator(method):
-            self._posedge_blocks.append((clock_signal, method))
+            self._always_blocks.append((edges, method))
             return method
         return decorator
+
+    def posedge(self, clock_signal):
+        """Decorator: sugar for @self.always(posedge(clk))."""
+        return self.always(_posedge(clock_signal))
+
+    def negedge(self, clock_signal):
+        """Decorator: sugar for @self.always(negedge(clk))."""
+        from .signal import negedge as _negedge
+        return self.always(_negedge(clock_signal))
 
     def comb(self, method):
         """Decorator: register a method as combinational logic."""
@@ -57,7 +77,7 @@ class Module:
                 subs[k] = v
         return subs
 
-    # --- simulation ---
+    # --- signal discovery ---
     def _signals(self):
         sigs = {}
         for k in dir(self):
@@ -70,7 +90,9 @@ class Module:
         return {k: getattr(self, k) for k in dir(self)
                 if isinstance(getattr(self, k), Mem)}
 
-    def _tick_signals(self):
+    # --- simulation helpers (used by SimEngine) ---
+    def _apply_nba(self):
+        """Apply non-blocking assignments (NBA region)."""
         for sig in self._signals().values():
             sig._tick()
         for mem in self._mems().values():
@@ -79,55 +101,74 @@ class Module:
     def _settle_comb(self):
         """Settle combinational logic: parent → children → parent."""
         subs = self._submodules()
-        # Parent comb drives child inputs
         for method in self._comb_blocks:
             method()
-        self._tick_signals()
+        self._apply_nba()
         for sub in subs.values():
-            sub._tick_signals()
-        # Child comb computes outputs
+            sub._apply_nba()
         for sub in subs.values():
             for method in sub._comb_blocks:
                 method()
-            sub._tick_signals()
-        # Parent comb reads child outputs
+            sub._apply_nba()
         for method in self._comb_blocks:
             method()
-        self._tick_signals()
+        self._apply_nba()
 
-    def tick(self):
-        """Advance one clock cycle.
+    def _snapshot_prev(self):
+        """Save current signal values for edge detection."""
+        for sig in self._signals().values():
+            sig._prev_val = sig._val
+        for sub in self._submodules().values():
+            for sig in sub._signals().values():
+                sig._prev_val = sig._val
 
-        1. Settle comb (so posedge sees current values)
-        2. Posedge (parent + children capture settled values)
-        3. Apply register updates
-        4. Settle comb again (propagate new register values)
-        """
-        subs = self._submodules()
-
-        # Phase 1: settle comb before clock edge
-        self._settle_comb()
-
-        # Phase 2: posedge (parent + children)
-        for _clk, method in self._posedge_blocks:
-            method()
-        for sub in subs.values():
-            for _clk, method in sub._posedge_blocks:
-                method()
-
-        # Phase 3: apply register updates
-        self._tick_signals()
-        for sub in subs.values():
-            sub._tick_signals()
-
-        # Phase 4: settle comb with new register values
-        self._settle_comb()
-
-    def simulate(self, cycles):
-        for _ in range(cycles):
-            self.tick()
+    def _check_edges(self):
+        """Return list of (edges, method) for blocks whose sensitivity triggered."""
+        triggered = []
+        for edges, method in self._always_blocks:
+            if _edges_match(edges):
+                triggered.append((edges, method))
+        for sub in self._submodules().values():
+            for edges, method in sub._always_blocks:
+                if _edges_match(edges):
+                    triggered.append((edges, method))
+        return triggered
 
     # --- Verilog generation ---
     def to_verilog(self, module_name=None):
         from .emit_verilog import VerilogEmitter
         return VerilogEmitter(self, module_name).emit()
+
+    # --- convenience for direct sim / unit tests ---
+    def tick(self):
+        """Advance one clock cycle. Fires all always blocks unconditionally.
+
+        For proper edge-driven simulation, use SimEngine instead.
+        """
+        subs = self._submodules()
+        self._settle_comb()
+        for _edges, method in self._always_blocks:
+            method()
+        for sub in subs.values():
+            for _edges, method in sub._always_blocks:
+                method()
+        self._apply_nba()
+        for sub in subs.values():
+            sub._apply_nba()
+        self._settle_comb()
+
+    def simulate(self, cycles):
+        """Run tick() for N cycles."""
+        for _ in range(cycles):
+            self.tick()
+
+
+def _edges_match(edges):
+    """Check if any edge in the list triggered (prev→current transition)."""
+    for edge in edges:
+        sig = edge.signal
+        if edge.kind == 'posedge' and sig._prev_val == 0 and sig._val != 0:
+            return True
+        if edge.kind == 'negedge' and sig._prev_val != 0 and sig._val == 0:
+            return True
+    return False

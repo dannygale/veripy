@@ -5,6 +5,48 @@ For Verilog generation, the AST of methods using signals is parsed directly.
 """
 
 
+# --- Edge types for sensitivity lists ---
+
+class Edge:
+    """A single edge specifier: posedge(sig) or negedge(sig)."""
+    __slots__ = ('signal', 'kind')
+
+    def __init__(self, signal, kind):
+        self.signal = signal
+        self.kind = kind  # 'posedge' or 'negedge'
+
+    def __or__(self, other):
+        if isinstance(other, Edge):
+            return SensitivityList([self, other])
+        if isinstance(other, SensitivityList):
+            return SensitivityList([self] + other.edges)
+        return NotImplemented
+
+
+class SensitivityList:
+    """Multiple edges combined with |."""
+    __slots__ = ('edges',)
+
+    def __init__(self, edges):
+        self.edges = list(edges)
+
+    def __or__(self, other):
+        if isinstance(other, Edge):
+            return SensitivityList(self.edges + [other])
+        if isinstance(other, SensitivityList):
+            return SensitivityList(self.edges + other.edges)
+        return NotImplemented
+
+
+def posedge(signal):
+    """Create a posedge specifier for use in sensitivity lists."""
+    return Edge(signal, 'posedge')
+
+def negedge(signal):
+    """Create a negedge specifier for use in sensitivity lists."""
+    return Edge(signal, 'negedge')
+
+
 class Signal:
     """A named, width-constrained hardware value."""
 
@@ -15,6 +57,7 @@ class Signal:
         self._kind = _kind          # 'input', 'output', 'reg', 'wire'
         self._mask = (1 << width) - 1
         self._val = reset & self._mask
+        self._prev_val = self._val  # for edge detection
         self._next = None           # pending non-blocking assignment
 
     # --- value access ---

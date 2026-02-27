@@ -2,27 +2,39 @@
 
 import unittest, subprocess, tempfile, os
 from .signal import Signal, Mem
+from .sim import SimEngine
 
 
 class VeripyTestCase(unittest.TestCase):
-    """Test case that runs each test against both Python sim and iverilog.
+    """Event-driven dual-path test case.
 
-    Subclass and override create_module(). Use set(), tick(), out() in tests.
-    Each test_* method automatically runs twice (Python, then Verilog) and
-    asserts all outputs match on every cycle.
+    Subclass and override create_module(). Define testbench blocks with
+    @self.always and @self.initial, drive signals with self.set(),
+    read outputs with self.out(), and call self.run() to execute.
 
         class TestCounter(VeripyTestCase):
             def create_module(self):
                 return Counter(4)
 
             def test_counting(self):
-                self.set(reset=1, enable=1)
-                self.tick()
-                self.assertEqual(self.out('count'), 0)
-                self.set(reset=0)
-                for _ in range(5):
-                    self.tick()
-                self.assertEqual(self.out('count'), 5)
+                @self.always
+                def clock():
+                    self.set(clock=0)
+                    yield 5
+                    self.set(clock=1)
+                    yield 5
+
+                @self.initial
+                def stimulus():
+                    self.set(reset=1, enable=1)
+                    yield 10
+                    self.assertEqual(self.out('count'), 0)
+                    self.set(reset=0)
+                    for _ in range(5):
+                        yield 10
+                    self.assertEqual(self.out('count'), 5)
+
+                self.run()
     """
 
     def create_module(self):
@@ -38,43 +50,49 @@ class VeripyTestCase(unittest.TestCase):
     # --- test API ---
 
     def set(self, **kwargs):
-        """Set input signal values (sticky until changed)."""
-        if self._backend == 'python':
-            self._input_state.update(kwargs)
-
-    def tick(self):
-        """Advance one clock cycle."""
-        self._cycle += 1
-        if self._backend == 'python':
-            for name, val in self._input_state.items():
-                getattr(self._mod, name)._val = val
-            self._mod.tick()
-            self._trace_inputs.append(dict(self._input_state))
-            self._py_outputs.append(
-                {n: int(getattr(self._mod, n)) for n in self._output_names})
+        """Set input signal values."""
+        for name, val in kwargs.items():
+            getattr(self._mod, name)._val = val
+        self._trace_sets.append((self._engine.time, dict(kwargs)))
 
     def out(self, name):
-        """Read an output signal's current value."""
-        if self._backend == 'python':
-            return int(getattr(self._mod, name))
-        return self._rtl_outputs[self._cycle][name]
+        """Read an output signal's current value and record for comparison."""
+        val = int(getattr(self._mod, name))
+        t = self._engine.time
+        if t not in self._py_outputs:
+            self._py_outputs[t] = {}
+        self._py_outputs[t][name] = val
+        return val
+
+    def run_sim(self):
+        """Run the event-driven simulation."""
+        self._engine.run()
+
+    def always(self, fn):
+        """Register a generator function as an always block."""
+        self._engine.always(fn)
+        self._tb_always.append(fn)
+        return fn
+
+    def initial(self, fn):
+        """Register a generator function as an initial block."""
+        self._engine.initial(fn)
+        self._tb_initial.append(fn)
+        return fn
 
     # --- internals ---
 
-    def _begin(self, backend):
-        self._backend = backend
-        self._cycle = -1
-        if backend == 'python':
-            self._mod = self.create_module()
-            self._input_state = {}
-            self._trace_inputs = []
-            self._py_outputs = []
-            self._output_names = sorted(
-                k for k in dir(self._mod)
-                if isinstance(getattr(self._mod, k), Signal)
-                and getattr(self._mod, k)._kind == 'output')
-            clk_list = self._mod._posedge_blocks
-            self._clock = clk_list[0][0] if clk_list else None
+    def _begin(self):
+        self._mod = self.create_module()
+        self._engine = SimEngine(self._mod)
+        self._trace_sets = []      # [(time, {name: val}), ...]
+        self._py_outputs = {}      # {time: {name: val}}
+        self._tb_always = []       # always block functions (for re-run)
+        self._tb_initial = []      # initial block functions (for re-run)
+        self._output_names = sorted(
+            k for k in dir(self._mod)
+            if isinstance(getattr(self._mod, k), Signal)
+            and getattr(self._mod, k)._kind == 'output')
 
     def _run_iverilog(self):
         """Generate testbench from recorded trace, compile, run, parse."""
@@ -82,52 +100,59 @@ class VeripyTestCase(unittest.TestCase):
         module_name = type(mod).__name__.lower()
         sigs = {k: getattr(mod, k) for k in dir(mod)
                 if isinstance(getattr(mod, k), Signal)}
-        clk_name = self._clock.name if self._clock is not None else None
 
         # Verilog source
         from .emit_verilog import VerilogEmitter
         emitter = VerilogEmitter(mod, module_name)
         verilog_src = emitter.emit_all() if mod._submodules() else emitter.emit()
 
-        # Testbench
-        driven = set(self._trace_inputs[0].keys()) if self._trace_inputs else set()
-        extra = sorted(k for k, s in sigs.items()
-                       if s._kind == 'input' and k not in driven and k != clk_name)
-
+        # Build testbench from trace
         tb = ['`timescale 1ns/1ps', 'module tb;']
-        if clk_name:
-            tb.append(f'    reg {clk_name};')
-        for name in sorted(driven) + extra:
-            s = sigs[name]
-            w = f'[{s.width-1}:0] ' if s.width > 1 else ''
-            tb.append(f'    reg {w}{name};')
+
+        # Declare all input signals as regs
+        for name, sig in sorted(sigs.items()):
+            if sig._kind == 'input':
+                w = f'[{sig.width-1}:0] ' if sig.width > 1 else ''
+                tb.append(f'    reg {w}{name};')
+
+        # Declare all output signals as wires
         for name in self._output_names:
-            s = sigs[name]
-            w = f'[{s.width-1}:0] ' if s.width > 1 else ''
+            sig = sigs[name]
+            w = f'[{sig.width-1}:0] ' if sig.width > 1 else ''
             tb.append(f'    wire {w}{name};')
 
+        # Instantiate DUT
         ports = []
-        if clk_name:
-            ports.append(f'.{clk_name}({clk_name})')
-        for name in sorted(driven) + extra + self._output_names:
-            ports.append(f'.{name}({name})')
+        for name, sig in sorted(sigs.items()):
+            if sig._kind in ('input', 'output'):
+                ports.append(f'.{name}({name})')
         tb.append(f'    {module_name} dut({", ".join(ports)});')
 
-        if clk_name:
-            tb.append(f'    initial {clk_name} = 0;')
-            tb.append(f'    always #5 {clk_name} = ~{clk_name};')
-
+        # Generate initial block from trace
         tb.append('    initial begin')
-        for cyc, inp in enumerate(self._trace_inputs):
-            for name in sorted(inp):
-                tb.append(f'        {name} = {inp[name]};')
-            if clk_name:
-                tb.append(f'        @(posedge {clk_name}); #1;')
-            else:
-                tb.append('        #10;')
-            fmt = ' '.join(f'{n}=%0d' for n in self._output_names)
-            args = ', '.join(self._output_names)
-            tb.append(f'        $display("@{cyc} {fmt}", {args});')
+
+        # Group sets by time, interleave with delays and output reads
+        check_times = sorted(self._py_outputs.keys())
+        all_times = sorted(set(t for t, _ in self._trace_sets) | set(check_times))
+
+        prev_time = 0
+        for t in all_times:
+            if t > prev_time:
+                tb.append(f'        #{t - prev_time};')
+                prev_time = t
+
+            # Apply signal changes at this time
+            for st, changes in self._trace_sets:
+                if st == t:
+                    for name in sorted(changes):
+                        tb.append(f'        {name} = {changes[name]};')
+
+            # Emit $display for output reads at this time
+            if t in self._py_outputs:
+                fmt = ' '.join(f'{n}=%0d' for n in sorted(self._py_outputs[t]))
+                args = ', '.join(sorted(self._py_outputs[t]))
+                tb.append(f'        $display("@{t} {fmt}", {args});')
+
         tb.append('        $finish;')
         tb.append('    end')
         tb.append('endmodule')
@@ -145,53 +170,47 @@ class VeripyTestCase(unittest.TestCase):
             r = subprocess.run(['iverilog', '-o', sim_f, tb_f, dut_f],
                                capture_output=True, text=True)
             if r.returncode != 0:
-                self.fail(f"iverilog compilation failed:\n{r.stderr}")
+                self.fail(f"iverilog compilation failed:\n{r.stderr}\n\nTestbench:\n" +
+                          '\n'.join(tb))
 
             r = subprocess.run(['vvp', sim_f], capture_output=True, text=True)
             if r.returncode != 0:
                 self.fail(f"vvp failed:\n{r.stderr}")
 
         # Parse output
-        n = len(self._trace_inputs)
-        self._rtl_outputs = [{} for _ in range(n)]
+        self._rtl_outputs = {}
         for line in r.stdout.strip().split('\n'):
             if not line.startswith('@'):
                 continue
             parts = line.split()
-            cyc = int(parts[0][1:])
+            t = int(parts[0][1:])
+            self._rtl_outputs[t] = {}
             for part in parts[1:]:
                 name, val = part.split('=')
-                self._rtl_outputs[cyc][name] = None if val == 'x' else int(val)
+                self._rtl_outputs[t][name] = None if val == 'x' else int(val)
 
     def _assert_traces_match(self):
-        for cyc in range(len(self._py_outputs)):
-            for name in self._output_names:
-                pv = self._py_outputs[cyc][name]
-                rv = self._rtl_outputs[cyc][name]
+        for t, py_vals in sorted(self._py_outputs.items()):
+            rtl_vals = self._rtl_outputs.get(t, {})
+            for name, pv in py_vals.items():
+                rv = rtl_vals.get(name)
                 self.assertEqual(pv, rv,
-                    f"Sim/RTL mismatch cycle {cyc}, '{name}': "
+                    f"Sim/RTL mismatch at t={t}, '{name}': "
                     f"Python={pv}, Verilog={rv}")
 
 
 def _wrap_dual(fn):
-    """Wrap a test method to run against both Python sim and iverilog."""
+    """Wrap a test method to run Python sim then compare with iverilog."""
     def wrapper(self):
-        # Pass 1: Python sim
-        self._begin('python')
+        # Pass 1: Python sim (assertions run inside initial blocks)
+        self._begin()
         with self.subTest(backend='python'):
             fn(self)
 
-        # Run iverilog with recorded stimulus
+        # Pass 2: generate Verilog testbench, run iverilog, compare
         self._run_iverilog()
-
-        # Assert all outputs match on every cycle
         with self.subTest(backend='sim_vs_rtl'):
             self._assert_traces_match()
-
-        # Pass 2: same assertions against Verilog outputs
-        self._begin('verilog')
-        with self.subTest(backend='verilog'):
-            fn(self)
 
     wrapper.__name__ = fn.__name__
     wrapper.__qualname__ = fn.__qualname__
