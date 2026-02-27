@@ -68,3 +68,50 @@ class TestCover(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+"""Tests for timing annotations and SDC output."""
+
+
+class TestSDC(unittest.TestCase):
+    def _make_module(self):
+        class M(Module):
+            def __init__(self):
+                self.clk   = Input()
+                self.reset = Input()
+                self.d     = Input(8)
+                self.q     = Output(8)
+                self.r     = Register(8)
+                super().__init__()
+                self.create_clock(self.clk, period_ns=10)
+                self.max_delay(self.d, self.q, ns=5)
+                self.false_path(self.reset, self.q)
+                @self.comb
+                def drive():
+                    self.q = self.r
+                @self.posedge(self.clk)
+                def logic():
+                    if self.reset:
+                        self.r = 0
+                    else:
+                        self.r = self.d
+        return M()
+
+    def test_create_clock(self):
+        sdc = self._make_module().to_sdc()
+        self.assertIn('create_clock -period 10 [get_ports clk]', sdc)
+
+    def test_max_delay(self):
+        sdc = self._make_module().to_sdc()
+        self.assertIn('set_max_delay 5 -from [get_ports d] -to [get_ports q]', sdc)
+
+    def test_false_path(self):
+        sdc = self._make_module().to_sdc()
+        self.assertIn('set_false_path -from [get_ports reset] -to [get_ports q]', sdc)
+
+    def test_no_timing_empty_sdc(self):
+        class Empty(Module):
+            def __init__(self):
+                self.d = Input()
+                super().__init__()
+        self.assertEqual(Empty().to_sdc(), '')

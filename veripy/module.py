@@ -28,6 +28,7 @@ class Module:
         self._comb_blocks = []
         self._assertions = []      # [(clock_signal, func), ...]
         self._covers = []          # [(clock_signal, func, hit), ...]
+        self._timing = []          # [(constraint_type, kwargs), ...]
         if params is not None:
             self._params = params
         else:
@@ -110,6 +111,33 @@ class Module:
             self._covers.append((clock, func, [False]))
             return func
         return decorator
+
+    def create_clock(self, signal, period_ns):
+        """Declare a clock with the given period (ns)."""
+        self._timing.append(('create_clock', signal.name, period_ns))
+
+    def max_delay(self, from_signal, to_signal, ns):
+        """Set a max delay constraint between two signals."""
+        self._timing.append(('max_delay', from_signal.name, to_signal.name, ns))
+
+    def false_path(self, from_signal, to_signal):
+        """Declare a false path between two signals."""
+        self._timing.append(('false_path', from_signal.name, to_signal.name))
+
+    def to_sdc(self):
+        """Generate SDC timing constraints from annotations."""
+        lines = []
+        for c in self._timing:
+            if c[0] == 'create_clock':
+                _, name, period = c
+                lines.append(f'create_clock -period {period} [get_ports {name}]')
+            elif c[0] == 'max_delay':
+                _, fr, to, ns = c
+                lines.append(f'set_max_delay {ns} -from [get_ports {fr}] -to [get_ports {to}]')
+            elif c[0] == 'false_path':
+                _, fr, to = c
+                lines.append(f'set_false_path -from [get_ports {fr}] -to [get_ports {to}]')
+        return '\n'.join(lines)
 
     def fsm(self, clock, reset, states):
         """Decorator: define an FSM with states and transitions.
