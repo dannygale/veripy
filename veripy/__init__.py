@@ -9,4 +9,5 @@ from .context import (comb, posedge as posedge_dec, negedge as negedge_dec,
                       always, fsm, assert_always, cover, pipeline,
                       create_clock, max_delay, false_path)
 from .emit_verilog import VerilogEmitter
+from .cdc import Synchronizer, AsyncFIFO
 from .verify import VeripyTestCase

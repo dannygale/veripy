@@ -271,3 +271,69 @@ def peripheral():
 ```
 
 Signals are flattened with the interface name as prefix in Verilog: `bus_awaddr`, `bus_awvalid`, etc.
+
+
+## CDC
+
+Cross clock domain signals must be synchronized. VeriPy provides two primitives and lint detection.
+
+### CDC Lint
+
+The lint pass automatically detects unsynchronized register reads across clock domains:
+
+```python
+from veripy.lint import lint
+
+warnings = lint(my_design)
+# warning: CDC: register 'reg_fast' (clocked by fast_clk) read in block clocked by slow_clk
+```
+
+No annotations needed — domains are inferred from `@posedge` blocks.
+
+### Synchronizer
+
+Multi-stage flip-flop chain for single-bit or bus synchronization:
+
+```python
+from veripy import Synchronizer
+
+@module
+def design():
+    fast_clk = Input()
+    slow_clk = Input()
+    rst      = Input()
+    d        = Input(8)
+    q        = Output(8)
+    reg_fast = Register(8)
+    sync     = Synchronizer(width=8, stages=2)
+
+    @posedge(fast_clk)
+    def fast():
+        reg_fast = d
+
+    @comb
+    def wire():
+        sync.clk = slow_clk
+        sync.rst = rst
+        sync.d   = reg_fast
+
+    @comb
+    def out():
+        q = sync.q
+```
+
+Data propagates through the synchronizer in N clock cycles (one per stage). Using a `Synchronizer` suppresses the CDC lint warning for that path.
+
+### AsyncFIFO
+
+Gray-code pointer FIFO for bulk data transfer across clock domains:
+
+```python
+from veripy import AsyncFIFO
+
+fifo = AsyncFIFO(width=8, depth=16)  # depth must be power of 2
+# Write side: fifo.wclk, fifo.wrst, fifo.wen, fifo.wdata, fifo.full
+# Read side:  fifo.rclk, fifo.rrst, fifo.ren, fifo.rdata, fifo.empty
+```
+
+Gray-code pointers ensure only one bit changes per clock cycle during pointer synchronization, preventing metastability-induced corruption.

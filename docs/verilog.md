@@ -55,6 +55,7 @@ Detects:
 - Multi-driven signals
 - Missing reset on sequential blocks
 - Unused signals
+- Clock domain crossing violations (unsynchronized register reads across `@posedge` blocks on different clocks)
 
 From Python:
 

@@ -103,7 +103,8 @@ veripy lint <file.py>               # static checks
 - **Timing constraints** — SDC output co-located with logic ([docs](docs/guide.md#timing-constraints))
 - **Interface bundles** — reusable signal groups ([docs](docs/guide.md#interfaces))
 - **Verilog import** — convert existing RTL to VeriPy ([docs](docs/verilog.md))
-- **Lint** — undriven outputs, multi-driven signals, missing reset, unused signals ([docs](docs/verilog.md#lint))
+- **Lint** — undriven outputs, multi-driven signals, missing reset, unused signals, CDC violations ([docs](docs/verilog.md#lint))
+- **CDC primitives** — `Synchronizer`, `AsyncFIFO` with gray-code pointers ([docs](docs/guide.md#cdc))
 - **Event-driven simulation** — `SimEngine` with proper Verilog scheduling ([docs](docs/testing.md#simengine))
 
 ## Documentation
