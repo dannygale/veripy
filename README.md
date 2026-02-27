@@ -34,10 +34,10 @@ Simulate in Python:
 
 ```python
 c = Counter(n=4)
-c.enable._val = 1
-c.reset._val = 1
+c.enable.set(1)
+c.reset.set(1)
 c.tick()
-c.reset._val = 0
+c.reset.set(0)
 for _ in range(5):
     c.tick()
 print(c.count)  # 5
@@ -149,7 +149,7 @@ Bit slicing with `[hi:lo]`:
 
 ```python
 data = Signal(8)
-data._val = 0xAB
+data.set(0xAB)
 upper = data[7:4]   # 0xA
 lower = data[3:0]   # 0xB
 data[7:4] = 0xF     # data becomes 0xFB
@@ -214,10 +214,10 @@ sim = SimEngine(counter)
 
 @sim.initial
 def stimulus():
-    counter.reset._val = 1
-    counter.enable._val = 1
+    counter.reset.set(1)
+    counter.enable.set(1)
     yield 1
-    counter.reset._val = 0
+    counter.reset.set(0)
     for _ in range(5):
         yield 1
     assert int(counter.count) == 5

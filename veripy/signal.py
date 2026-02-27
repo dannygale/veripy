@@ -70,6 +70,10 @@ class Signal:
     def val(self):
         return self._val
 
+    def set(self, value):
+        """Immediately set the signal value (for testbenches)."""
+        self._val = self._int(value) & self._mask
+
     # --- simulation operators (return plain ints) ---
     def __add__(self, o):       return (self._val + self._int(o)) & self._mask
     def __radd__(self, o):      return (self._int(o) + self._val) & self._mask
