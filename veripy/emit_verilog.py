@@ -2,7 +2,12 @@
 
 import ast
 import inspect
+import re
 import textwrap
+
+
+def _to_snake(name):
+    return re.sub(r'(?<=[a-z0-9])(?=[A-Z])', '_', name).lower()
 
 from .signal import Signal, Mem
 
@@ -31,6 +36,7 @@ class VerilogEmitter:
         self._current_func = None
         self._locals = {}  # local variable → AST expression (inline substitution)
         self._reg_locals = {}  # Register locals → width
+        self._always_driven_wires = set()  # computed in emit()
         self.signals = {}
         self.mems = {}
         self.submodules = {}
@@ -49,6 +55,7 @@ class VerilogEmitter:
                 self.submodules[k] = v
 
     def emit(self):
+        self._always_driven_wires = self._comb_always_targets()
         lines = []
         lines += self._emit_header()
         lines += self._emit_internals()
@@ -63,8 +70,12 @@ class VerilogEmitter:
     def emit_all(self):
         """Emit this module + all sub-module definitions."""
         parts = []
+        seen = set()
         for sub_name, sub in self.submodules.items():
-            parts.append(sub.to_verilog(module_name=sub_name))
+            mod_type = _to_snake(type(sub).__name__)
+            if mod_type not in seen:
+                parts.append(sub.to_verilog(module_name=mod_type))
+                seen.add(mod_type)
         parts.append(self.emit())
         return '\n\n'.join(parts)
 
@@ -111,15 +122,17 @@ class VerilogEmitter:
                 sig = getattr(sub, port_name)
                 if isinstance(sig, Signal) and sig._kind in ('input', 'output'):
                     w = self._width_str(sig)
-                    lines.append(f'    wire {w}{sub_name}_{port_name};')
+                    wire_name = f'{sub_name}_{port_name}'
+                    kind = 'reg ' if wire_name in self._always_driven_wires else 'wire'
+                    lines.append(f'    {kind} {w}{wire_name};')
         lines.append('')
         return lines
 
     def _emit_submodule_instances(self):
         lines = []
         for sub_name, sub in sorted(self.submodules.items()):
-            mod_type = sub_name  # instance type = attribute name (matches emit_all)
-            inst_name = f'{sub_name}_inst'
+            mod_type = _to_snake(type(sub).__name__)
+            inst_name = sub_name
             ports = []
             for port_name in sorted(dir(sub)):
                 sig = getattr(sub, port_name)
@@ -188,15 +201,69 @@ class VerilogEmitter:
             lines.append(f'{pad}reg{ws} {name};')
         return lines
 
+    def _comb_always_targets(self):
+        """Return set of signal names assigned inside always @(*) comb blocks."""
+        targets = set()
+        for method in self.mod._comb_blocks:
+            tree = self._get_func_ast(method)
+            if not all(self._is_nba(s) for s in tree.body):
+                self._current_func = method; self._locals = {}; self._reg_locals = {}
+                targets |= self._collect_targets(tree)
+                self._current_func = None
+        return targets
+
+    def _collect_targets(self, tree):
+        """Collect all self.xxx and self.sub.port assignment targets in an AST."""
+        targets = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for t in node.targets:
+                    name = self._target_name(t)
+                    if name:
+                        targets.add(name)
+        return targets
+
+    def _target_name(self, node):
+        """Extract signal name from an assignment target (self.x or self.sub.port)."""
+        if isinstance(node, ast.Attribute) and self._is_self(node.value):
+            return node.attr
+        if (isinstance(node, ast.Attribute) and
+            isinstance(node.value, ast.Attribute) and
+            self._is_self(node.value.value)):
+            sub_name = node.value.attr
+            if sub_name in self.submodules:
+                return f'{sub_name}_{node.attr}'
+        return None
+
+    def _needs_always_target(self, target_name):
+        """Check if a target name requires always @(*) instead of assign."""
+        if target_name in self.signals and self.signals[target_name]._kind == 'reg':
+            return True
+        if target_name in self._always_driven_wires:
+            return True
+        return False
+
     def _emit_comb(self, method):
         tree = self._get_func_ast(method)
-        # Simple: all statements are bare assigns → use assign
+        # Simple: all statements are bare assigns → split by target type
         if all(self._is_nba(s) for s in tree.body):
             self._current_func = method; self._locals = {}; self._reg_locals = {}
-            lines = []
+            assigns = []
+            always_stmts = []
             for stmt in tree.body:
                 t, v = self._extract_nba(stmt)
+                if self._needs_always_target(t):
+                    always_stmts.append((t, v))
+                else:
+                    assigns.append((t, v))
+            lines = []
+            for t, v in assigns:
                 lines.append(f'    assign {t} = {v};')
+            if always_stmts:
+                lines.append('    always @(*) begin')
+                for t, v in always_stmts:
+                    lines.append(f'        {t} = {v};')
+                lines.append('    end')
             lines.append('')
             self._current_func = None
             return lines

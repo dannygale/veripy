@@ -12,15 +12,14 @@ import unittest
 import re
 
 from .module import Module
-from .emit_verilog import VerilogEmitter
-
-
-def _to_snake(name):
-    return re.sub(r'(?<=[a-z0-9])(?=[A-Z])', '_', name).lower()
+from .emit_verilog import VerilogEmitter, _to_snake
 
 
 def _load_modules(path, module_name=None, params=None):
     """Import a Python file and return [(name, instance)] of Module subclasses."""
+    parent_dir = os.path.dirname(os.path.abspath(path))
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
     spec = importlib.util.spec_from_file_location("_user_module", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
