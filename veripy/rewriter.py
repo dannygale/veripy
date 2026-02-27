@@ -31,7 +31,9 @@ class _SignalAssignRewriter(ast.NodeTransformer):
     def visit_AugAssign(self, node):
         # x += expr → x._assign(x <op> expr)
         if isinstance(node.target, ast.Name) and node.target.id in self.signal_names:
-            binop = ast.BinOp(left=node.target, op=node.op, right=node.value)
+            binop = ast.BinOp(
+                left=ast.Name(id=node.target.id, ctx=ast.Load()),
+                op=node.op, right=node.value)
             call = ast.Call(
                 func=ast.Attribute(value=ast.Name(id=node.target.id, ctx=ast.Load()),
                                    attr='_assign', ctx=ast.Load()),
@@ -59,9 +61,15 @@ class _SignalAssignRewriter(ast.NodeTransformer):
         # x[i] = expr where x is a signal
         if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
             if target.value.id in self.signal_names:
+                # Deep-copy slice and fix any Store contexts to Load
+                import copy
+                fixed_slice = copy.deepcopy(target.slice)
+                for node in ast.walk(fixed_slice) if not isinstance(fixed_slice, (int, str)) else []:
+                    if hasattr(node, 'ctx') and isinstance(node.ctx, ast.Store):
+                        node.ctx = ast.Load()
                 subscript = ast.Subscript(
                     value=ast.Name(id=target.value.id, ctx=ast.Load()),
-                    slice=target.slice, ctx=ast.Load())
+                    slice=fixed_slice, ctx=ast.Load())
                 return ast.Call(
                     func=ast.Attribute(value=subscript, attr='_assign', ctx=ast.Load()),
                     args=[value], keywords=[])
