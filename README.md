@@ -168,6 +168,23 @@ class Datapath(Module):
 
 The emitter creates wires for each sub-module port and generates an instance with port connections. Use `emit_all()` to emit both parent and child definitions.
 
+Sub-modules with `_params` get parameter overrides on the instance, so the same module type can be reused with different configurations:
+
+```python
+self.l1 = Cache(size=1024)
+self.l1._params = {'size': 1024}
+
+self.l2 = Cache(size=4096)
+self.l2._params = {'size': 4096}
+```
+
+Emits:
+
+```verilog
+cache #(.size(1024)) l1 ( ... );
+cache #(.size(4096)) l2 ( ... );
+```
+
 ## Signal Operations
 
 Signals support bit slicing, concatenation, and ternary selection — in both simulation and Verilog output.

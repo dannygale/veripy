@@ -178,6 +178,45 @@ class TestConstantFolding(unittest.TestCase):
         self.assertIsNone(self.emitter._try_fold(node))
 
 
+class TestSubmoduleParamOverride(unittest.TestCase):
+    def test_param_override_on_instance(self):
+        """Sub-modules with _params emit #(.param(value)) on the instance."""
+        class Inner(Module):
+            def __init__(self, size=1024):
+                self.d = Input(8)
+                self.q = Output(8)
+                super().__init__()
+                @self.comb
+                def drive():
+                    self.q = self.d
+
+        class Outer(Module):
+            def __init__(self):
+                self.d = Input(8)
+                self.q = Output(8)
+                self.a = Inner(size=1024)
+                self.a._params = {'size': 1024}
+                self.b = Inner(size=4096)
+                self.b._params = {'size': 4096}
+                super().__init__()
+                @self.comb
+                def wire():
+                    self.a.d = self.d
+                    self.b.d = self.d
+                    self.q = self.a.q
+
+        v = VerilogEmitter(Outer(), 'outer').emit()
+        self.assertIn('#(.size(1024)) a', v)
+        self.assertIn('#(.size(4096)) b', v)
+
+    def test_no_params_no_hash(self):
+        """Sub-modules without _params emit plain instance."""
+        from examples.datapath import Datapath
+        v = VerilogEmitter(Datapath(), 'datapath').emit()
+        self.assertNotIn('#(', v)
+        self.assertIn('alu alu (', v)
+
+
 class TestParamHeader(unittest.TestCase):
     def test_param_in_header(self):
         m = ParamModule(width=16)
