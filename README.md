@@ -7,6 +7,76 @@ Write your hardware modules once in Python. VeriPy lets you simulate them native
 ## Quick Example
 
 ```python
+from veripy import module, Input, Output, Register
+from veripy.context import comb, posedge
+
+@module
+def counter(width=8):
+    clock   = Input()
+    reset   = Input()
+    enable  = Input()
+    count   = Output(width)
+    cnt     = Register(width)
+
+    @comb
+    def drive_output():
+        count = cnt
+
+    @posedge(clock)
+    def increment():
+        if reset:
+            cnt = 0
+        elif enable:
+            cnt = cnt + 1
+```
+
+Simulate in Python:
+
+```python
+c = counter(width=4)
+c.enable.set(1)
+c.reset.set(1)
+c.tick()
+c.reset.set(0)
+for _ in range(5):
+    c.tick()
+print(c.count)  # 5
+```
+
+Generate Verilog:
+
+```
+$ veripy build examples/counter.py -p width=4
+module counter #(
+    parameter width = 4
+) (
+    input clock,
+    input enable,
+    input reset,
+    output [3:0] count
+);
+
+    reg [3:0] cnt;
+
+    assign count = cnt;
+
+    always @(posedge clock) begin
+        if (reset) begin
+            cnt <= 0;
+        end else
+        if (enable) begin
+            cnt <= (cnt + 1);
+        end
+    end
+
+endmodule
+```
+
+## Class-Based API
+
+VeriPy also supports a class-based API for modules:
+
+```python
 from veripy import Module, Input, Output, Register
 
 class Counter(Module):
@@ -30,33 +100,7 @@ class Counter(Module):
                 self.counter = self.counter + 1
 ```
 
-Simulate in Python:
-
-```python
-c = Counter(n=4)
-c.enable.set(1)
-c.reset.set(1)
-c.tick()
-c.reset.set(0)
-for _ in range(5):
-    c.tick()
-print(c.count)  # 5
-```
-
-Generate Verilog:
-
-```
-$ veripy build examples/counter.py -p n=4
-module counter (
-    input clock,
-    input enable,
-    input reset,
-    output [3:0] count
-);
-
-    reg [3:0] counter;
-
-    assign count = counter;
+Both APIs produce identical simulation results and Verilog output. The `@module` decorator eliminates `self.` boilerplate and reads closer to Verilog pseudocode. The class-based API gives full control over `__init__` for advanced use cases.
 
     always @(posedge clock) begin
         if (reset) begin

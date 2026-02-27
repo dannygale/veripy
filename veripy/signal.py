@@ -51,6 +51,10 @@ class Signal:
     """A named, width-constrained hardware value."""
 
     def __init__(self, width=1, *, name='', reset=0, _kind='wire'):
+        from .parameter import is_param
+        self._width_param = width if is_param(width) else None
+        if self._width_param is not None:
+            width = width.default
         self.width = width
         self.name = name
         self.reset = reset
@@ -59,6 +63,14 @@ class Signal:
         self._val = reset & self._mask
         self._prev_val = self._val  # for edge detection
         self._next = None           # pending non-blocking assignment
+
+    def _clone(self, param_values):
+        """Create a resolved copy with concrete width."""
+        if self._width_param is not None:
+            width = self._width_param.resolve(param_values)
+        else:
+            width = self.width
+        return Signal(width, name=self.name, reset=self.reset, _kind=self._kind)
 
     # --- value access ---
     def _int(self, other):
@@ -272,12 +284,28 @@ class Mem:
     """
 
     def __init__(self, depth, width=1):
+        from .parameter import is_param
+        self._width_param = width if is_param(width) else None
+        self._depth_param = depth if is_param(depth) else None
+        if self._width_param is not None:
+            width = width.default
+        if self._depth_param is not None:
+            depth = depth.default
         self.depth = depth
         self.width = width
         self.name = ''
         self._mask = (1 << width) - 1
         self._data = [0] * depth
         self._pending_write = None  # (addr, value)
+
+    def _clone(self, param_values):
+        """Create a resolved copy with concrete dimensions."""
+        from .parameter import is_param
+        width = self._width_param.resolve(param_values) if self._width_param else self.width
+        depth = self._depth_param.resolve(param_values) if self._depth_param else self.depth
+        m = Mem(depth, width)
+        m.name = self.name
+        return m
 
     def __getitem__(self, addr):
         """Combinational read."""

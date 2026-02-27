@@ -1,6 +1,30 @@
 """Module base class: defines the structure for simulation and Verilog emission."""
 
 from .signal import Signal, Mem, Edge, SensitivityList, Interface, Register, posedge as _posedge
+from .parameter import Parameter, ParamExpr, is_param
+
+
+class DeferredModule:
+    """Placeholder for a sub-module whose parameters aren't resolved yet."""
+    __slots__ = ('cls', 'args', 'kwargs')
+
+    def __init__(self, cls, args, kwargs):
+        self.cls = cls
+        self.args = args
+        self.kwargs = kwargs
+
+
+def _resolve_deferred(deferred, param_values):
+    """Instantiate a DeferredModule with resolved parameter values."""
+    def _resolve_val(v):
+        if isinstance(v, Parameter):
+            return param_values[v.name]
+        if isinstance(v, ParamExpr):
+            return v.resolve(param_values)
+        return v
+    args = tuple(_resolve_val(a) for a in deferred.args)
+    kwargs = {k: _resolve_val(v) for k, v in deferred.kwargs.items()}
+    return deferred.cls(*args, **kwargs)
 
 
 class Module:
@@ -11,6 +35,13 @@ class Module:
     or @self.always decorators.
     Sub-modules are any Module-typed attributes (self.alu = ALU(...)).
     """
+
+    def __new__(cls, *args, **kwargs):
+        has_param = any(is_param(v) for v in args) or \
+                    any(is_param(v) for v in kwargs.values())
+        if has_param:
+            return DeferredModule(cls, args, kwargs)
+        return super().__new__(cls)
 
     def __setattr__(self, name, value):
         if not name.startswith('_'):

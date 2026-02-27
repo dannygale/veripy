@@ -646,8 +646,13 @@ class VerilogEmitter:
         raise SyntaxError(f'Expected constant, got {ast.dump(node)}')
 
     def _get_func_ast(self, func):
-        src = inspect.getsource(func)
-        src = textwrap.dedent(src)
+        # Use stored self-prefixed source if available (@module API)
+        emit_src = getattr(func, '_veripy_emit_source', None)
+        if emit_src:
+            src = emit_src
+        else:
+            src = inspect.getsource(func)
+            src = textwrap.dedent(src)
         tree = ast.parse(src)
         func_def = tree.body[0]
         if isinstance(func_def, ast.FunctionDef):
