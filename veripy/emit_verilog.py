@@ -30,6 +30,7 @@ class VerilogEmitter:
         self.name = module_name or type(module).__name__.lower()
         self._current_func = None
         self._locals = {}  # local variable → AST expression (inline substitution)
+        self._reg_locals = {}  # Register locals → width
         self.signals = {}
         self.mems = {}
         self.submodules = {}
