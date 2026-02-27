@@ -177,13 +177,16 @@ class Module:
             pipe = self.pipeline(self.clock, self.reset, width=16)
             pipe.stage(lambda: self.a + self.b)        # stage 0
             pipe.stage(lambda prev: prev * 2)          # stage 1
-            pipe.stage(lambda prev: prev & 0xFF)       # stage 2
 
             @self.comb
             def output():
                 self.out = pipe.result
         """
-        return _Pipeline(self, clock, reset, width)
+        p = _Pipeline(self, clock, reset, width)
+        if not hasattr(self, '_pipelines'):
+            self._pipelines = []
+        self._pipelines.append(p)
+        return p
 
     def fsm(self, clock, reset, states):
         """Decorator: define an FSM with states and transitions.
@@ -315,6 +318,9 @@ class Module:
 
     # --- Verilog generation ---
     def to_verilog(self, module_name=None):
+        # Finalize any pipelines before emission
+        for p in getattr(self, '_pipelines', []):
+            p._finalize()
         from .emit_verilog import VerilogEmitter
         return VerilogEmitter(self, module_name).emit()
 
@@ -412,6 +418,20 @@ class _Pipeline:
                         reg._val = int(func())
                     else:
                         reg._val = int(func(vals[i - 1]))
+
+        # Generate emitter-compatible source for the advance block
+        reset_name = reset.name if isinstance(reset, Signal) else 'reset'
+        lines = ['def _pipe_advance(self):']
+        lines.append(f'    if self.{reset_name}:')
+        for i in range(len(stages)):
+            lines.append(f'        self._pipe_stage{i} = 0')
+        lines.append('    else:')
+        for i in range(len(stages)):
+            if i == 0:
+                lines.append(f'        self._pipe_stage0 = self._pipe_stage0')
+            else:
+                lines.append(f'        self._pipe_stage{i} = self._pipe_stage{i - 1}')
+        _pipe_advance._veripy_emit_source = '\n'.join(lines)
 
     @property
     def result(self):

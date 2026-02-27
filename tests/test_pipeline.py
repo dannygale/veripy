@@ -3,6 +3,49 @@ import unittest
 from veripy import Module, Input, Output, Register
 
 
+class TestPipelineVerilog(unittest.TestCase):
+    """Pipeline Verilog emission."""
+
+    def _make_pipe(self):
+        class Pipe(Module):
+            def __init__(self, width=8):
+                self.clock = Input()
+                self.reset = Input()
+                self.a     = Input(width)
+                self.b     = Input(width)
+                self.out   = Output(width)
+                super().__init__()
+                pipe = self.pipeline(self.clock, self.reset, width=width)
+                pipe.stage(lambda: int(self.a) + int(self.b))
+                pipe.stage(lambda prev: int(prev) * 2)
+                @self.comb
+                def output():
+                    self.out = pipe.result
+        return Pipe()
+
+    def test_reg_declarations(self):
+        v = self._make_pipe().to_verilog()
+        self.assertIn('reg [7:0] _pipe_stage0', v)
+        self.assertIn('reg [7:0] _pipe_stage1', v)
+
+    def test_posedge_block(self):
+        v = self._make_pipe().to_verilog()
+        self.assertIn('always @(posedge clock)', v)
+
+    def test_reset_logic(self):
+        v = self._make_pipe().to_verilog()
+        self.assertIn('_pipe_stage0 <= 0', v)
+        self.assertIn('_pipe_stage1 <= 0', v)
+
+    def test_stage_chain(self):
+        v = self._make_pipe().to_verilog()
+        self.assertIn('_pipe_stage1 <= _pipe_stage0', v)
+
+    def test_output_wired(self):
+        v = self._make_pipe().to_verilog()
+        self.assertIn('assign out = _pipe_stage1', v)
+
+
 class TestPipeline(unittest.TestCase):
     def _make_pipe(self):
         class Pipe(Module):

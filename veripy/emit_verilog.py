@@ -503,6 +503,17 @@ class VerilogEmitter:
         if isinstance(node, ast.Attribute) and self._is_self(node.value):
             return node.attr
 
+        # Resolve attribute access on closure variables (e.g. pipe.result → _pipe_stage1)
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if self._current_func:
+                try:
+                    obj = self._resolve_name(node.value.id)
+                    val = getattr(obj, node.attr, None)
+                    if isinstance(val, Signal):
+                        return val.name
+                except SyntaxError:
+                    pass
+
         if isinstance(node, ast.BinOp):
             # Try constant folding, but skip if a param is involved
             try:
