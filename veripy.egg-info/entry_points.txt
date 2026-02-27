@@ -1,0 +1,2 @@
+[console_scripts]
+veripy = veripy.cli:main

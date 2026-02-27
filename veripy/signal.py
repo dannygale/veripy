@@ -158,21 +158,6 @@ def Register(width=1, reset=0):
     return Signal(width, reset=reset, _kind='reg')
 
 
-class SignalArray(list):
-    """A fixed-size array of signals. Emits as Verilog memory/register array."""
-
-    def __init__(self, depth, width=1, *, reset=0, _kind='reg'):
-        self.depth = depth
-        self.width = width
-        self.name = ''
-        signals = [Signal(width, reset=reset, _kind=_kind) for _ in range(depth)]
-        super().__init__(signals)
-
-    def _name_elements(self, name):
-        self.name = name
-        for i, s in enumerate(self):
-            s.name = f'{name}[{i}]'
-
 
 class Mem:
     """Memory array: indexed read (combinational) and write (scheduled).

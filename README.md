@@ -128,7 +128,6 @@ $ veripy test tests/ -v
 | `Output(width)` | Output port |
 | `Register(width)` | Clocked register (updates on posedge) |
 | `Signal(width)` | Internal wire |
-| `SignalArray(width, depth)` | Array of signals |
 | `Mem(width, depth)` | Memory array with `.write(addr, data)` |
 
 ## Module Structure

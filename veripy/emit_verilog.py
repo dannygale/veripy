@@ -4,7 +4,7 @@ import ast
 import inspect
 import textwrap
 
-from .signal import Signal, SignalArray, Mem
+from .signal import Signal, Mem
 
 
 # Python AST op → Verilog operator
@@ -31,14 +31,11 @@ class VerilogEmitter:
         self._current_func = None
         self._locals = {}  # local variable → AST expression (inline substitution)
         self.signals = {}
-        self.arrays = {}
         self.mems = {}
         self.submodules = {}
         for k in dir(module):
             v = getattr(module, k)
-            if isinstance(v, SignalArray):
-                self.arrays[k] = v
-            elif isinstance(v, Mem):
+            if isinstance(v, Mem):
                 self.mems[k] = v
             elif isinstance(v, Signal):
                 self.signals[k] = v
@@ -96,9 +93,6 @@ class VerilogEmitter:
                 continue
             w = self._width_str(sig)
             lines.append(f'    reg {w}{name};')
-        for name, arr in sorted(self.arrays.items()):
-            w = self._width_str(arr[0])
-            lines.append(f'    reg {w}{name} [0:{arr.depth - 1}];')
         for name, mem in sorted(self.mems.items()):
             w = f'[{mem.width - 1}:0] ' if mem.width > 1 else ''
             lines.append(f'    reg {w}{name} [0:{mem.depth - 1}];')

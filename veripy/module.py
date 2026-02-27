@@ -1,6 +1,6 @@
 """Module base class: defines the structure for simulation and Verilog emission."""
 
-from .signal import Signal, SignalArray, Mem
+from .signal import Signal, Mem
 
 
 class Module:
@@ -31,8 +31,6 @@ class Module:
             val = getattr(self, attr)
             if isinstance(val, Signal) and not val.name:
                 val.name = attr
-            elif isinstance(val, SignalArray) and not val.name:
-                val._name_elements(attr)
             elif isinstance(val, Mem) and not val.name:
                 val.name = attr
 
@@ -66,9 +64,6 @@ class Module:
             v = getattr(self, k)
             if isinstance(v, Signal):
                 sigs[k] = v
-            elif isinstance(v, SignalArray):
-                for i, s in enumerate(v):
-                    sigs[f'{k}[{i}]'] = s
         return sigs
 
     def _mems(self):
