@@ -139,7 +139,7 @@ class Signal:
             hi = key.start if key.start is not None else self.width - 1
             lo = key.stop if key.stop is not None else 0
             return _SliceProxy(self, hi, lo)
-        return (self._val >> key) & 1
+        return _SliceProxy(self, key, key)
 
     def __setitem__(self, key, value):
         if isinstance(key, slice):
