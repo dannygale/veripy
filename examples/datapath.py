@@ -61,7 +61,6 @@ class Datapath(Module):
 
 
 if __name__ == '__main__':
-    from veripy.emit_verilog import VerilogEmitter
     from veripy.sim import SimEngine
 
     d = Datapath(width=8)
@@ -81,4 +80,6 @@ if __name__ == '__main__':
     sim.run()
 
     print("\n=== Generated Verilog (all modules) ===")
-    print(VerilogEmitter(d).emit_all())
+    print(d.alu.to_verilog())
+    print()
+    print(d.to_verilog())

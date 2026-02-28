@@ -130,13 +130,20 @@ class TestDatapathVerilog(unittest.TestCase):
 
 
 class TestEmitAll(unittest.TestCase):
-    def test_emit_all_includes_both(self):
-        from veripy.emit_verilog import VerilogEmitter
+    def test_hierarchy_compiles(self):
         d = Datapath(width=8)
-        full = VerilogEmitter(d).emit_all()
-        self.assertIn('module alu', full)
-        self.assertIn('module datapath', full)
-        self.assertLess(full.index('module alu'), full.index('module datapath'))
+        top = d.to_verilog()
+        sub = d.alu.to_verilog()
+        self.assertIn('module alu', sub)
+        self.assertIn('module datapath', top)
+        import subprocess, tempfile, os
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = os.path.join(tmpdir, "check.v")
+            out = os.path.join(tmpdir, "check.out")
+            with open(src, "w") as f:
+                f.write(sub + '\n\n' + top)
+            r = subprocess.run(["iverilog", "-o", out, src], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
 
 
 if __name__ == '__main__':

@@ -102,28 +102,23 @@ class VeripyTestCase(unittest.TestCase):
         sigs = {k: getattr(mod, k) for k in dir(mod)
                 if isinstance(getattr(mod, k), Signal)}
 
-        # Verilog source
-        from .lower import lower_module
-        from .backend_verilog import emit_verilog
+        # Verilog source — one to_verilog() per module, concatenated for iverilog
         from .emit_verilog import _to_snake
-        if mod._submodules():
-            parts = []
-            seen = set()
-            def _collect(m, mname):
-                if mname in seen:
-                    return
-                seen.add(mname)
-                factory = getattr(type(m), '_veripy_factory', None)
-                fresh = factory() if factory else type(m)()
-                for sn, sub in fresh._submodules().items():
-                    _collect(sub, _to_snake(type(sub).__name__))
-                parts.append(emit_verilog(lower_module(fresh, mname)))
-            for sn, sub in mod._submodules().items():
+        parts = []
+        seen = set()
+        def _collect(m, mname):
+            if mname in seen:
+                return
+            seen.add(mname)
+            factory = getattr(type(m), '_veripy_factory', None)
+            fresh = factory() if factory else type(m)()
+            for sn, sub in fresh._submodules().items():
                 _collect(sub, _to_snake(type(sub).__name__))
-            parts.append(emit_verilog(lower_module(mod, module_name)))
-            verilog_src = '\n\n'.join(parts)
-        else:
-            verilog_src = emit_verilog(lower_module(mod, module_name))
+            parts.append(fresh.to_verilog(mname))
+        for sn, sub in mod._submodules().items():
+            _collect(sub, _to_snake(type(sub).__name__))
+        parts.append(mod.to_verilog(module_name))
+        verilog_src = '\n\n'.join(parts)
 
         # Build testbench from trace
         tb = ['`timescale 1ns/1ps', 'module tb;']

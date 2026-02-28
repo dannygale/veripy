@@ -160,6 +160,7 @@ class Decode(Module):
 
 
 if __name__ == '__main__':
-    from veripy.emit_verilog import VerilogEmitter
     d = Decode()
-    print(VerilogEmitter(d, 'decode').emit_all())
+    print(d.ctrl.to_verilog('control_unit'))
+    print()
+    print(d.to_verilog('decode'))

@@ -252,13 +252,13 @@ class TestVerilogEmission(unittest.TestCase):
         self.assertIn('out = (a + b)', v)
         self.assertIn('out = (a - b)', v)
 
-    def test_datapath_emit_all(self):
-        from veripy.emit_verilog import VerilogEmitter
+    def test_datapath_hierarchy(self):
         d = datapath(width=8)
-        v = VerilogEmitter(d).emit_all()
-        self.assertIn('module simple_alu', v)
-        self.assertIn('module datapath', v)
-        self.assertIn('simple_alu #(.width(width)) alu', v)
+        top = d.to_verilog()
+        sub = d.alu.to_verilog()
+        self.assertIn('module datapath', top)
+        self.assertIn('simple_alu #(.width(width)) alu', top)
+        self.assertIn('module simple_alu', sub)
 
 
 class TestClassBasedUnchanged(unittest.TestCase):
