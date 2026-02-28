@@ -1,7 +1,7 @@
 """Dual-path test case: write one test, verify Python sim and iverilog agree."""
 
 import unittest, subprocess, tempfile, os
-from .signal import Signal, Mem
+from .signal import Signal, Mem, Interface
 from .sim import SimEngine
 
 
@@ -124,8 +124,14 @@ class VeripyTestCase(unittest.TestCase):
 
         mod = self._mod
         module_name = type(mod).__name__.lower()
-        sigs = {k: getattr(mod, k) for k in dir(mod)
-                if isinstance(getattr(mod, k), Signal)}
+        sigs = {}
+        for k in dir(mod):
+            v = getattr(mod, k)
+            if isinstance(v, Signal):
+                sigs[k] = v
+            elif isinstance(v, Interface):
+                for sn in v._signals():
+                    sigs[f'{k}_{sn}'] = getattr(v, sn)
 
         # ── DUT Verilog ──────────────────────────────────────────────
         parts = []

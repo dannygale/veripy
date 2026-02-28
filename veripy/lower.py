@@ -82,6 +82,17 @@ class _Lowerer:
     def _is_self(self, node):
         return isinstance(node, ast.Name) and node.id == 'self'
 
+    def _resolve_closure(self, name):
+        """Look up a name in the current function's closure/globals."""
+        func = self._func
+        if func and hasattr(func, '__code__') and func.__closure__:
+            for i, n in enumerate(func.__code__.co_freevars):
+                if n == name:
+                    return func.__closure__[i].cell_contents
+        if func and hasattr(func, '__globals__') and name in func.__globals__:
+            return func.__globals__[name]
+        return None
+
     def _is_self_target(self, node):
         if isinstance(node, ast.Subscript):
             return self._is_self_target(node.value)
@@ -153,6 +164,8 @@ class _Lowerer:
                     return Param(r[1])
                 if r[0] == 'const':
                     return Const(r[1])
+                if r[0] == 'obj' and isinstance(r[1], Signal):
+                    return Sig(r[1].name)
             except SyntaxError:
                 pass
             return Sig(name)
@@ -328,6 +341,13 @@ class _Lowerer:
                 if mem_name in self.mems and len(call.args) == 2:
                     return [MemWrite(mem_name, self._expr(call.args[0]),
                                      self._expr(call.args[1]), blocking)]
+
+            # closure_var._assign(val) — e.g. state_reg._assign(0)
+            if (isinstance(func, ast.Attribute) and func.attr == '_assign'
+                    and isinstance(func.value, ast.Name) and len(call.args) == 1):
+                sig = self._resolve_closure(func.value.id)
+                if isinstance(sig, Signal):
+                    return [Assign(sig.name, self._expr(call.args[0]), blocking)]
 
         return []  # skip unrecognized (docstrings, etc.)
 

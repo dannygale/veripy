@@ -70,6 +70,38 @@ class TestSpiFifoFlags(VeripyTestCase):
             self.assertEqual(int(m.tx_ready), 1)
 
 
+class TestSpiMultiTransfer(VeripyTestCase):
+    """Send multiple bytes back-to-back, verify each completes."""
+
+    def create_module(self):
+        return SpiController(width=8, fifo_depth=4, clk_div=2)
+
+    def test_multi_byte(self):
+        m = self._mod
+
+        @self.always
+        def clock():
+            self.set(clock=0); yield T
+            self.set(clock=1); yield T
+
+        @self.initial
+        def stim():
+            m.reset.set(1); m.tx_valid.set(0); m.tx_data.set(0); m.spi.miso.set(0)
+            yield T * 2
+            m.reset.set(0)
+            yield T * 2
+
+            for i in range(10):
+                m.tx_data.set(i & 255); m.tx_valid.set(1)
+                yield T * 2
+                m.tx_valid.set(0)
+                for _ in range(200):
+                    yield T * 2
+                    if int(m.rx_valid):
+                        self.out('rx_data')
+                        break
+
+
 class TestSpiCompiles(unittest.TestCase):
     """Verify emitted Verilog compiles with iverilog."""
 
