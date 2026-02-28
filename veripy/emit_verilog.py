@@ -123,9 +123,8 @@ class VerilogEmitter:
             lines.append('    end')
         # Wires for sub-module ports
         for sub_name, sub in sorted(self.submodules.items()):
-            for port_name in sorted(dir(sub)):
-                sig = getattr(sub, port_name)
-                if isinstance(sig, Signal) and sig._kind in ('input', 'output'):
+            for port_name, sig in sorted(sub._signals().items()):
+                if sig._kind in ('input', 'output'):
                     w = self._width_str(sig)
                     wire_name = f'{sub_name}_{port_name}'
                     kind = 'reg ' if wire_name in self._always_driven_wires else 'wire'
@@ -139,9 +138,8 @@ class VerilogEmitter:
             mod_type = _to_snake(type(sub).__name__)
             inst_name = sub_name
             ports = []
-            for port_name in sorted(dir(sub)):
-                sig = getattr(sub, port_name)
-                if isinstance(sig, Signal) and sig._kind in ('input', 'output'):
+            for port_name, sig in sorted(sub._signals().items()):
+                if sig._kind in ('input', 'output'):
                     ports.append(f'.{port_name}({sub_name}_{port_name})')
             if sub._params:
                 param_list = ', '.join(f'.{k}({v})' for k, v in sub._params.items())
