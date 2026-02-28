@@ -17,7 +17,7 @@ _BIN_OPS = {
     ast.Add: '+', ast.Sub: '-', ast.Mult: '*',
     ast.BitAnd: '&', ast.BitOr: '|', ast.BitXor: '^',
     ast.LShift: '<<', ast.RShift: '>>',
-    ast.Mod: '%',
+    ast.Mod: '%', ast.FloorDiv: '/',
 }
 _CMP_OPS = {
     ast.Eq: '==', ast.NotEq: '!=',
@@ -61,6 +61,7 @@ class VerilogEmitter:
 
     def emit(self):
         self._always_driven_wires = self._comb_always_targets()
+        self._all_reg_locals = {}  # collected across all blocks
         lines = []
         lines += self._emit_header()
         lines += self._emit_internals()
@@ -185,23 +186,25 @@ class VerilogEmitter:
 
     # --- comb blocks → assign or always @(*) ---
     def _scan_reg_locals(self, tree):
-        """Pre-scan for `name = Register(width)` — returns {name: width}."""
+        """Pre-scan for local variable declarations — returns {name: width}."""
         regs = {}
         for node in ast.walk(tree):
             if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                    and isinstance(node.targets[0], ast.Name)
-                    and isinstance(node.value, ast.Call)
-                    and isinstance(node.value.func, ast.Name)
-                    and node.value.func.id == 'Register'):
+                    and isinstance(node.targets[0], ast.Name)):
                 name = node.targets[0].id
-                arg = node.value.args[0] if node.value.args else None
-                if arg is None:
-                    width = 1
-                elif isinstance(arg, ast.Constant):
-                    width = arg.value
-                else:
-                    width = self._const_eval(arg)
-                regs[name] = width
+                if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id == 'Register':
+                    arg = node.value.args[0] if node.value.args else None
+                    if arg is None:
+                        regs[name] = 1
+                    elif isinstance(arg, ast.Constant):
+                        regs[name] = arg.value
+                    else:
+                        try:
+                            regs[name] = self._const_eval(arg)
+                        except (SyntaxError, RecursionError):
+                            regs[name] = 32
+                elif name not in regs:
+                    regs[name] = 32  # plain local — default width
         return regs
 
     def _reg_local_decls(self, indent):
@@ -209,6 +212,9 @@ class VerilogEmitter:
         pad = '    ' * indent
         lines = []
         for name, w in self._reg_locals.items():
+            if name in self._all_reg_locals:
+                continue
+            self._all_reg_locals[name] = w
             ws = f' [{w-1}:0]' if w > 1 else ''
             lines.append(f'{pad}reg{ws} {name};')
         return lines
@@ -340,8 +346,11 @@ class VerilogEmitter:
                     v = self._expr(stmt.value)
                     lines.append(f'{pad}{name} = {v};')
                 else:
-                    # Plain local — record for inline substitution
-                    self._locals[name] = stmt.value
+                    # Plain local — emit as reg assignment (avoid inline blowup)
+                    if name not in self._reg_locals:
+                        self._reg_locals[name] = 32
+                    v = self._expr(stmt.value)
+                    lines.append(f'{pad}{name} = {v};')
             elif isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and self._is_self_target(stmt.targets[0]):
                 t = self._expr(stmt.targets[0])
                 v = self._expr(stmt.value)
