@@ -76,7 +76,7 @@ class TestSpiMultiTransfer(VeripyTestCase):
     def create_module(self):
         return SpiController(width=8, fifo_depth=4, clk_div=2)
 
-    def test_multi_byte(self):
+    def _run_n_transfers(self, n):
         m = self._mod
 
         @self.always
@@ -91,7 +91,7 @@ class TestSpiMultiTransfer(VeripyTestCase):
             m.reset.set(0)
             yield T * 2
 
-            for i in range(10):
+            for i in range(n):
                 m.tx_data.set(i & 255); m.tx_valid.set(1)
                 yield T * 2
                 m.tx_valid.set(0)
@@ -100,6 +100,15 @@ class TestSpiMultiTransfer(VeripyTestCase):
                     if int(m.rx_valid):
                         self.out('rx_data')
                         break
+
+    def test_10_transfers(self):
+        self._run_n_transfers(10)
+
+    def test_100_transfers(self):
+        self._run_n_transfers(100)
+
+    def test_1000_transfers(self):
+        self._run_n_transfers(1000)
 
 
 class TestSpiCompiles(unittest.TestCase):
