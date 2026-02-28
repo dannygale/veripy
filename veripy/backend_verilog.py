@@ -6,8 +6,8 @@ Pure pattern matching on IR nodes — no Python AST, no name resolution.
 from .ir import (
     Const, Param, Sig, BinOp, UnaryOp, Compare, BoolOp, Mux,
     Slice, Index, Concat,
-    Assign, SliceAssign, If, Case, MemWrite,
-    ContAssign, CombBlock, SeqBlock,
+    Assign, SliceAssign, If, Case, MemWrite, Delay, Display, Finish,
+    ContAssign, CombBlock, SeqBlock, InitialBlock, AlwaysBlock,
     IRModule,
 )
 
@@ -20,6 +20,8 @@ def emit_verilog(ir: IRModule) -> str:
     _emit_comb_blocks(ir, lines)
     _emit_assigns(ir, lines)
     _emit_seq_blocks(ir, lines)
+    _emit_initial_blocks(ir, lines)
+    _emit_always_blocks(ir, lines)
     lines.append('')
     lines.append('endmodule')
     return '\n'.join(lines)
@@ -183,6 +185,38 @@ def _emit_stmt(stmt, lines, indent=2):
                 _emit_stmt(s, lines, indent + 2)
             lines.append(f'{pad}    end')
         lines.append(f'{pad}endcase')
+
+    elif isinstance(stmt, Delay):
+        lines.append(f'{pad}#{_expr(stmt.value)};')
+
+    elif isinstance(stmt, Display):
+        args = ', '.join(_expr(a) for a in stmt.args)
+        lines.append(f'{pad}$display("{stmt.fmt}", {args});')
+
+    elif isinstance(stmt, Finish):
+        lines.append(f'{pad}$finish;')
+
+
+# ── Initial blocks ───────────────────────────────────────────────────
+
+def _emit_initial_blocks(ir, lines):
+    for blk in ir.initial_blocks:
+        lines.append('')
+        lines.append('    initial begin')
+        for s in blk.stmts:
+            _emit_stmt(s, lines, indent=2)
+        lines.append('    end')
+
+
+# ── Always blocks (free-running) ─────────────────────────────────────
+
+def _emit_always_blocks(ir, lines):
+    for blk in ir.always_blocks:
+        lines.append('')
+        lines.append('    always begin')
+        for s in blk.stmts:
+            _emit_stmt(s, lines, indent=2)
+        lines.append('    end')
 
 
 # ── Expression emission ──────────────────────────────────────────────

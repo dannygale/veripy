@@ -103,6 +103,19 @@ class MemWrite(Stmt):
     data: Expr
     blocking: bool = True
 
+@dataclass
+class Delay(Stmt):
+    value: Expr
+
+@dataclass
+class Display(Stmt):
+    fmt: str
+    args: list       # list[Expr]
+
+@dataclass
+class Finish(Stmt):
+    pass
+
 
 # ── Blocks ───────────────────────────────────────────────────────────
 
@@ -121,6 +134,14 @@ class SeqBlock:
     edges: list      # list[(str, str)]  — [('posedge', 'clock'), ...]
     stmts: list      # list[Stmt]
     locals: dict = field(default_factory=dict)  # name → width (for reg declarations)
+
+@dataclass
+class InitialBlock:
+    stmts: list      # list[Stmt]
+
+@dataclass
+class AlwaysBlock:
+    stmts: list      # list[Stmt]
 
 
 # ── Declarations ─────────────────────────────────────────────────────
@@ -170,3 +191,5 @@ class IRModule:
     assigns: list = field(default_factory=list)       # list[ContAssign]
     comb_blocks: list = field(default_factory=list)   # list[CombBlock]
     seq_blocks: list = field(default_factory=list)    # list[SeqBlock]
+    initial_blocks: list = field(default_factory=list) # list[InitialBlock]
+    always_blocks: list = field(default_factory=list)  # list[AlwaysBlock]

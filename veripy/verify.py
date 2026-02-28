@@ -5,6 +5,18 @@ from .signal import Signal, Mem
 from .sim import SimEngine
 
 
+def _collect_locals(stmts, declared, regs):
+    """Scan IR stmts for Assign targets not in declared → add RegDecl."""
+    from .ir import Assign, If, RegDecl
+    for stmt in stmts:
+        if isinstance(stmt, Assign) and stmt.target not in declared:
+            declared.add(stmt.target)
+            regs.append(RegDecl(stmt.target, 32))
+        elif isinstance(stmt, If):
+            _collect_locals(stmt.then_body, declared, regs)
+            _collect_locals(stmt.else_body, declared, regs)
+
+
 class VeripyTestCase(unittest.TestCase):
     """Event-driven dual-path test case.
 
@@ -96,14 +108,19 @@ class VeripyTestCase(unittest.TestCase):
             and getattr(self._mod, k)._kind == 'output')
 
     def _run_iverilog(self):
-        """Generate testbench from recorded trace, compile, run, parse."""
+        """Lower testbench blocks to Verilog, compile with iverilog, run, parse."""
+        from .lower import lower_tb_block
+        from .ir import (IRModule, InitialBlock, AlwaysBlock, Finish, Display,
+                         Port, WireDecl, RegDecl, Instance)
+        from .backend_verilog import emit_verilog
+        from .emit_verilog import _to_snake
+
         mod = self._mod
         module_name = type(mod).__name__.lower()
         sigs = {k: getattr(mod, k) for k in dir(mod)
                 if isinstance(getattr(mod, k), Signal)}
 
-        # Verilog source — one to_verilog() per module, concatenated for iverilog
-        from .emit_verilog import _to_snake
+        # ── DUT Verilog ──────────────────────────────────────────────
         parts = []
         seen = set()
         def _collect(m, mname):
@@ -120,58 +137,60 @@ class VeripyTestCase(unittest.TestCase):
         parts.append(mod.to_verilog(module_name))
         verilog_src = '\n\n'.join(parts)
 
-        # Build testbench from trace
-        tb = ['`timescale 1ns/1ps', 'module tb;']
+        # ── Detect module variable name from closures ────────────────
+        mod_var = None
+        for fn in self._tb_initial + self._tb_always:
+            if hasattr(fn, '__code__') and fn.__closure__:
+                for i, name in enumerate(fn.__code__.co_freevars):
+                    cell_val = fn.__closure__[i].cell_contents
+                    if cell_val is mod:
+                        mod_var = name
+                        break
+            if mod_var:
+                break
+        if mod_var is None:
+            mod_var = 'm'  # fallback
 
-        # Declare all input signals as regs
+        # ── Lower testbench blocks ───────────────────────────────────
+        tb_ir = IRModule(name='tb')
+
+        # Declare input signals as regs, outputs as wires
+        declared = set()
         for name, sig in sorted(sigs.items()):
             if sig._kind == 'input':
-                w = f'[{sig.width-1}:0] ' if sig.width > 1 else ''
-                tb.append(f'    reg {w}{name};')
+                tb_ir.regs.append(RegDecl(name, sig.width))
+                declared.add(name)
+            elif sig._kind == 'output':
+                tb_ir.wires.append(WireDecl(name, sig.width))
+                declared.add(name)
 
-        # Declare all output signals as wires
-        for name in self._output_names:
-            sig = sigs[name]
-            w = f'[{sig.width-1}:0] ' if sig.width > 1 else ''
-            tb.append(f'    wire {w}{name};')
+        # DUT instance
+        inst_ports = [(name, name) for name, sig in sorted(sigs.items())
+                      if sig._kind in ('input', 'output')]
+        tb_ir.instances.append(Instance(module_name, 'dut', {}, inst_ports))
 
-        # Instantiate DUT
-        ports = []
-        for name, sig in sorted(sigs.items()):
-            if sig._kind in ('input', 'output'):
-                ports.append(f'.{name}({name})')
-        tb.append(f'    {module_name} dut({", ".join(ports)});')
+        # Lower all blocks
+        all_stmts = []
+        for fn in self._tb_always:
+            stmts = lower_tb_block(fn, mod, mod_var, self._output_names)
+            tb_ir.always_blocks.append(AlwaysBlock(stmts))
+            all_stmts.extend(stmts)
 
-        # Generate initial block from trace
-        tb.append('    initial begin')
+        for fn in self._tb_initial:
+            stmts = lower_tb_block(fn, mod, mod_var, self._output_names)
+            stmts.append(Finish())
+            tb_ir.initial_blocks.append(InitialBlock(stmts))
+            all_stmts.extend(stmts)
 
-        # Group sets by time, interleave with delays and output reads
-        check_times = sorted(self._py_outputs.keys())
-        all_times = sorted(set(t for t, _ in self._trace_sets) | set(check_times))
+        # Scan lowered stmts for local variables that need reg declarations
+        from .ir import Assign as IRAssign
+        _collect_locals(all_stmts, declared, tb_ir.regs)
 
-        prev_time = 0
-        for t in all_times:
-            if t > prev_time:
-                tb.append(f'        #{t - prev_time};')
-                prev_time = t
+        tb_verilog = emit_verilog(tb_ir)
+        # Prepend timescale
+        tb_verilog = '`timescale 1ns/1ns\n' + tb_verilog
 
-            # Apply signal changes at this time
-            for st, changes in self._trace_sets:
-                if st == t:
-                    for name in sorted(changes):
-                        tb.append(f'        {name} = {changes[name]};')
-
-            # Emit $display for output reads at this time
-            if t in self._py_outputs:
-                fmt = ' '.join(f'{n}=%0d' for n in sorted(self._py_outputs[t]))
-                args = ', '.join(sorted(self._py_outputs[t]))
-                tb.append(f'        $display("@{t} {fmt}", {args});')
-
-        tb.append('        $finish;')
-        tb.append('    end')
-        tb.append('endmodule')
-
-        # Compile and run
+        # ── Compile and run ──────────────────────────────────────────
         with tempfile.TemporaryDirectory() as tmpdir:
             dut_f = os.path.join(tmpdir, f'{module_name}.v')
             tb_f = os.path.join(tmpdir, 'tb.v')
@@ -179,13 +198,12 @@ class VeripyTestCase(unittest.TestCase):
             with open(dut_f, 'w') as f:
                 f.write(verilog_src)
             with open(tb_f, 'w') as f:
-                f.write('\n'.join(tb))
+                f.write(tb_verilog)
 
             r = subprocess.run(['iverilog', '-o', sim_f, tb_f, dut_f],
                                capture_output=True, text=True)
             if r.returncode != 0:
-                self.fail(f"iverilog compilation failed:\n{r.stderr}\n\nTestbench:\n" +
-                          '\n'.join(tb))
+                self.fail(f"iverilog compilation failed:\n{r.stderr}\n\nTestbench:\n{tb_verilog}")
 
             r = subprocess.run(['vvp', sim_f], capture_output=True, text=True)
             if r.returncode != 0:
@@ -198,7 +216,8 @@ class VeripyTestCase(unittest.TestCase):
                 continue
             parts = line.split()
             t = int(parts[0][1:])
-            self._rtl_outputs[t] = {}
+            if t not in self._rtl_outputs:
+                self._rtl_outputs[t] = {}
             for part in parts[1:]:
                 name, val = part.split('=')
                 self._rtl_outputs[t][name] = None if val == 'x' else int(val)

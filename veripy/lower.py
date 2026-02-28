@@ -11,8 +11,8 @@ import textwrap
 from .ir import (
     Expr, Const, Param, Sig, BinOp, UnaryOp, Compare, BoolOp, Mux,
     Slice, Index, Concat,
-    Stmt, Assign, SliceAssign, If, Case, MemWrite,
-    ContAssign, CombBlock, SeqBlock,
+    Stmt, Assign, SliceAssign, If, Case, MemWrite, Delay, Display, Finish,
+    ContAssign, CombBlock, SeqBlock, InitialBlock, AlwaysBlock,
     Port, WireDecl, RegDecl, MemDecl, Instance, IRModule,
 )
 from .signal import Signal, Mem, Interface
@@ -801,3 +801,380 @@ def _collect_assign_targets(stmt, targets):
         if stmt.default:
             for s in stmt.default:
                 _collect_assign_targets(s, targets)
+
+
+# ── Testbench lowering ───────────────────────────────────────────────
+
+class _TBLowerer:
+    """Lowers testbench @always/@initial blocks to IR.
+
+    Unlike _Lowerer (which resolves self.signal), this handles:
+    - m.signal / m.iface.signal references (module variable)
+    - self.set(name=val) → blocking assign
+    - m.signal.set(val) → blocking assign
+    - yield expr → Delay
+    - self.out('name') → Display
+    - int(expr) → strip wrapper
+    - self.assertEqual/assertTrue → skip
+    """
+
+    def __init__(self, mod, mod_var_name, output_names):
+        self.mod = mod
+        self.mod_var = mod_var_name  # e.g. 'm'
+        self.output_names = output_names
+        self._func = None
+        self._tc_var = 'self'  # default, updated by _detect_tc_var
+        # Build signal name map: flat name for each signal
+        self._sig_names = {}
+        for k in dir(mod):
+            v = getattr(mod, k)
+            if isinstance(v, Signal):
+                self._sig_names[k] = k
+            elif isinstance(v, Interface):
+                for sn in v._signals():
+                    self._sig_names[f'{k}.{sn}'] = f'{k}_{sn}'
+
+    def lower(self, func):
+        """Lower a testbench function → list[Stmt]."""
+        self._func = func
+        self._local_dicts = {}  # name → dict value (for d = _defaults(); d.update(); self.set(**d))
+        # Detect test case variable name from closure
+        if hasattr(func, '__code__') and func.__closure__:
+            for i, name in enumerate(func.__code__.co_freevars):
+                val = func.__closure__[i].cell_contents
+                if hasattr(val, '_mod') and hasattr(val, 'out'):  # VeripyTestCase
+                    self._tc_var = name
+                    break
+        src = textwrap.dedent(inspect.getsource(func))
+        tree = ast.parse(src)
+        func_def = tree.body[0]
+        return self._stmts(func_def.body)
+
+    def _stmts(self, nodes):
+        out = []
+        for node in nodes:
+            out.extend(self._stmt(node))
+        return out
+
+    def _stmt(self, node):
+        # yield expr → Delay
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Yield):
+            return [Delay(self._expr(node.value.value))]
+
+        # self.set(name=val, ...) → blocking assigns
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            call = node.value
+            if self._is_tc_method(call, 'set'):
+                stmts = []
+                for kw in call.keywords:
+                    if kw.arg is None:
+                        # **kwargs — try to evaluate and expand
+                        val = self._try_eval(kw.value)
+                        if val is None and isinstance(kw.value, ast.Name):
+                            val = self._local_dicts.get(kw.value.id)
+                        if isinstance(val, dict):
+                            for k, v in val.items():
+                                stmts.append(Assign(k, Const(v), blocking=True))
+                        continue
+                    stmts.append(Assign(kw.arg, self._expr(kw.value), blocking=True))
+                return stmts
+
+            # m.signal.set(val) or m.iface.signal.set(val)
+            sig_name = self._is_sig_set(call)
+            if sig_name:
+                return [Assign(sig_name, self._expr(call.args[0]), blocking=True)]
+
+            # d.update(key=val, ...) — mutate tracked local dict
+            if (isinstance(call.func, ast.Attribute) and call.func.attr == 'update'
+                    and isinstance(call.func.value, ast.Name)
+                    and call.func.value.id in self._local_dicts):
+                d = self._local_dicts[call.func.value.id]
+                for kw in call.keywords:
+                    if kw.arg is not None:
+                        try:
+                            d[kw.arg] = self._const_eval(kw.value)
+                        except SyntaxError:
+                            pass
+                return []
+
+            # self.assertEqual / self.assertTrue / self.assertXxx → extract self.out calls
+            if self._is_tc_method_any(call, ('assertEqual', 'assertTrue',
+                                              'assertFalse', 'assertIn')):
+                return self._extract_out_displays(call)
+
+            # self.out('name') as statement → Display
+            if self._is_tc_method(call, 'out') and call.args:
+                return [self._make_display(call.args[0].value)]
+
+        # if/elif/else
+        if isinstance(node, ast.If):
+            return [If(
+                self._expr(node.test),
+                self._stmts(node.body),
+                self._stmts(node.orelse) if node.orelse else [],
+            )]
+
+        # for _ in range(N)
+        if isinstance(node, ast.For):
+            return self._lower_for(node)
+
+        # Local variable assignment: x = expr
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                # Try to evaluate as dict for d = _defaults() pattern
+                val = self._try_eval(node.value)
+                if isinstance(val, dict):
+                    self._local_dicts[target.id] = val
+                    return []
+                return [Assign(target.id, self._expr(node.value), blocking=True)]
+            # m.signal = val (shouldn't happen in testbenches, but handle it)
+            sig_name = self._resolve_sig_ref(target)
+            if sig_name:
+                return [Assign(sig_name, self._expr(node.value), blocking=True)]
+
+        # break → skip (handled by for loop unrolling)
+        if isinstance(node, ast.Break):
+            return []
+
+        return []  # skip unrecognized
+
+    def _expr(self, node):
+        if isinstance(node, ast.Constant):
+            v = node.value
+            if isinstance(v, bool):
+                return Const(1 if v else 0)
+            return Const(v)
+
+        if isinstance(node, ast.Name):
+            name = node.id
+            # Try to resolve via closure/globals
+            val = self._resolve_name(name)
+            if val is not None:
+                if isinstance(val, (int, float)):
+                    return Const(val)
+                # Could be a signal name
+            if name in self._sig_names:
+                return Sig(name)
+            return Sig(name)  # local variable
+
+        # int(expr) → strip wrapper
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == 'int' and len(node.args) == 1):
+            return self._expr(node.args[0])
+
+        # Function call with all-constant args → evaluate
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            fn = self._resolve_name(node.func.id)
+            if callable(fn):
+                try:
+                    args = [self._const_eval(a) for a in node.args]
+                    kwargs = {kw.arg: self._const_eval(kw.value) for kw in node.keywords}
+                    return Const(fn(*args, **kwargs))
+                except (SyntaxError, TypeError):
+                    pass
+
+        # self.out('name') in expression context → signal ref
+        if isinstance(node, ast.Call) and self._is_tc_method(node, 'out') and node.args:
+            name = node.args[0].value
+            return Sig(name)
+
+        # m.signal or m.iface.signal
+        sig_name = self._resolve_sig_ref(node)
+        if sig_name:
+            return Sig(sig_name)
+
+        # not expr
+        if isinstance(node, ast.UnaryOp):
+            op = _UNARY_OPS.get(type(node.op))
+            if op:
+                return UnaryOp(op, self._expr(node.operand))
+
+        # binary ops
+        if isinstance(node, ast.BinOp):
+            op = _BIN_OPS.get(type(node.op))
+            if op:
+                return BinOp(op, self._expr(node.left), self._expr(node.right))
+
+        # comparisons
+        if isinstance(node, ast.Compare) and len(node.ops) == 1:
+            op = _CMP_OPS.get(type(node.ops[0]))
+            if op:
+                return Compare(op, self._expr(node.left), self._expr(node.comparators[0]))
+
+        # bool ops
+        if isinstance(node, ast.BoolOp):
+            op = _BOOL_OPS.get(type(node.op))
+            if op:
+                return BoolOp(op, [self._expr(v) for v in node.values])
+
+        # ternary: a if cond else b
+        if isinstance(node, ast.IfExp):
+            return Mux(self._expr(node.test), self._expr(node.body), self._expr(node.orelse))
+
+        raise SyntaxError(f'TB: unsupported expression: {ast.dump(node)}')
+
+    def _resolve_name(self, name):
+        """Resolve a bare name via closure/globals. Returns value or None."""
+        func = self._func
+        if func and hasattr(func, '__code__'):
+            code = func.__code__
+            if name in code.co_freevars and func.__closure__:
+                idx = code.co_freevars.index(name)
+                return func.__closure__[idx].cell_contents
+            if hasattr(func, '__globals__') and name in func.__globals__:
+                return func.__globals__[name]
+        return None
+
+    def _try_eval(self, node):
+        """Try to evaluate an AST node to a Python value."""
+        if isinstance(node, ast.Name):
+            return self._resolve_name(node.id)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            fn = self._resolve_name(node.func.id)
+            if callable(fn):
+                try:
+                    args = [self._try_eval(a) for a in node.args]
+                    kwargs = {kw.arg: self._try_eval(kw.value) for kw in node.keywords}
+                    return fn(*args, **kwargs)
+                except Exception:
+                    pass
+        if isinstance(node, ast.Constant):
+            return node.value
+        return None
+
+    def _resolve_sig_ref(self, node):
+        """Resolve m.signal or m.iface.signal to flat signal name."""        # m.iface.signal
+        if (isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Attribute)
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id == self.mod_var):
+            iface = node.value.attr
+            key = f'{iface}.{node.attr}'
+            return self._sig_names.get(key)
+        # m.signal
+        if (isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == self.mod_var):
+            return self._sig_names.get(node.attr)
+        return None
+
+    def _is_sig_set(self, call):
+        """Check if call is m.signal.set(val) or m.iface.signal.set(val)."""
+        if not (isinstance(call.func, ast.Attribute) and call.func.attr == 'set'
+                and len(call.args) == 1):
+            return None
+        return self._resolve_sig_ref(call.func.value)
+
+    def _is_tc_method(self, call, name):
+        """Check if call is <tc_var>.name(...)."""
+        return (isinstance(call.func, ast.Attribute)
+                and call.func.attr == name
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == self._tc_var)
+
+    def _is_tc_method_any(self, call, names):
+        return (isinstance(call.func, ast.Attribute)
+                and call.func.attr in names
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == self._tc_var)
+
+    def _make_display(self, name):
+        return Display(f"@%0t {name}=%0d", [Sig('$time'), Sig(name)])
+
+    def _extract_out_displays(self, call):
+        """Extract self.out('name') calls from assertion args → Display stmts."""
+        stmts = []
+        for arg in call.args:
+            if (isinstance(arg, ast.Call) and self._is_tc_method(arg, 'out')
+                    and arg.args):
+                stmts.append(self._make_display(arg.args[0].value))
+        return stmts
+
+    def _lower_for(self, node):
+        """Unroll for loop, handling break via flag."""
+        if not (isinstance(node.iter, ast.Call)
+                and isinstance(node.iter.func, ast.Name)
+                and node.iter.func.id == 'range'):
+            raise SyntaxError('TB: only for ... in range(...) supported')
+        args = node.iter.args
+        if len(args) == 1:
+            start, stop = 0, self._const_eval(args[0])
+        elif len(args) == 2:
+            start, stop = self._const_eval(args[0]), self._const_eval(args[1])
+        else:
+            start, stop = self._const_eval(args[0]), self._const_eval(args[1])
+
+        var = node.target.id
+        has_break = any(isinstance(n, ast.Break) for n in ast.walk(ast.Module(body=node.body, type_ignores=[])))
+
+        out = []
+        if has_break:
+            # Use a flag variable to simulate break
+            flag = f'_brk'
+            out.append(Assign(flag, Const(0), blocking=True))
+            for val in range(start, stop):
+                body = self._stmts(self._subst_var(node.body, var, val, has_break, flag))
+                out.append(If(Compare('==', Sig(flag), Const(0)), body, []))
+        else:
+            for val in range(start, stop):
+                body = self._stmts(self._subst_var(node.body, var, val, False, None))
+                out.extend(body)
+        return out
+
+    def _subst_var(self, stmts, var_name, val, has_break, flag):
+        import copy
+        stmts = copy.deepcopy(stmts)
+        for node in ast.walk(ast.Module(body=stmts, type_ignores=[])):
+            for field, child in ast.iter_fields(node):
+                if isinstance(child, ast.Name) and child.id == var_name:
+                    setattr(node, field, ast.Constant(value=val))
+                elif isinstance(child, list):
+                    for i, item in enumerate(child):
+                        if isinstance(item, ast.Name) and item.id == var_name:
+                            child[i] = ast.Constant(value=val)
+        # Replace break with flag set
+        if has_break:
+            self._replace_break(stmts, flag)
+        return stmts
+
+    def _replace_break(self, nodes, flag):
+        for i, node in enumerate(nodes):
+            if isinstance(node, ast.Break):
+                nodes[i] = ast.Assign(
+                    targets=[ast.Name(id=flag, ctx=ast.Store())],
+                    value=ast.Constant(value=1))
+            elif isinstance(node, ast.If):
+                self._replace_break(node.body, flag)
+                self._replace_break(node.orelse, flag)
+
+    def _const_eval(self, node):
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.Name):
+            val = self._resolve_name(node.id)
+            if isinstance(val, (int, float)):
+                return val
+        if isinstance(node, ast.BinOp):
+            l = self._const_eval(node.left)
+            r = self._const_eval(node.right)
+            ops = {ast.Add: lambda a,b: a+b, ast.Sub: lambda a,b: a-b,
+                   ast.Mult: lambda a,b: a*b}
+            fn = ops.get(type(node.op))
+            if fn:
+                return fn(l, r)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            return -self._const_eval(node.operand)
+        raise SyntaxError(f'TB: not constant: {ast.dump(node)}')
+
+
+def lower_tb_block(func, mod, mod_var_name, output_names):
+    """Lower a testbench function → list[Stmt].
+
+    func: the @always or @initial generator function
+    mod: the Module instance (for signal discovery)
+    mod_var_name: variable name used to reference the module (e.g. 'm')
+    output_names: list of output signal names to record
+    """
+    lowerer = _TBLowerer(mod, mod_var_name, output_names)
+    return lowerer.lower(func)
