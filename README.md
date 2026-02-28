@@ -61,16 +61,34 @@ class Counter(Module):
 Both APIs produce identical simulation results and Verilog output. Use whichever you prefer — `@module` is more concise, the class-based API gives full control over `__init__`.
 
 ```python
-c = counter(width=4)       # or Counter(width=4)
-c.enable.set(1)
-c.reset.set(1)
-c.tick()
-c.reset.set(0)
-for _ in range(5):
-    c.tick()
-print(c.count)              # 5
-print(c.to_verilog())       # synthesizable Verilog
+from veripy import VeripyTestCase
+
+class TestCounter(VeripyTestCase):
+    def create_module(self):
+        return counter(width=4)       # or Counter(width=4)
+
+    def test_counting(self):
+        @self.always
+        def clock():
+            self.set(clock=0)
+            yield 5
+            self.set(clock=1)
+            yield 5
+
+        @self.initial
+        def stimulus():
+            self.set(reset=1, enable=1)
+            yield 10
+            self.assertEqual(self.out('count'), 0)
+            self.set(reset=0)
+            for _ in range(5):
+                yield 10
+            self.assertEqual(self.out('count'), 5)
+
+        self.run_sim()
 ```
+
+Each `test_*` method automatically runs twice: once in Python simulation, once through iverilog — outputs are compared cycle-by-cycle.
 
 ## Installation
 
