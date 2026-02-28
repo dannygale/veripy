@@ -462,6 +462,12 @@ class _Lowerer:
         """Lower a @comb block → list of ContAssign and/or CombBlock."""
         self._func = method
         self._reg_locals = {}
+
+        # FSM comb blocks need special handling
+        fsm_info = getattr(method, '_fsm_info', None)
+        if fsm_info:
+            return self._lower_fsm_comb(method, fsm_info, always_driven)
+
         tree = self._get_func_ast(method)
 
         # Simple: all statements are bare self.x = expr
@@ -549,6 +555,79 @@ class _Lowerer:
             if obj:
                 return (node.attr, obj)
         return None
+
+    def _lower_fsm_comb(self, method, fsm_info, always_driven):
+        """Lower an FSM comb block: state param → _fsm_state, return → _fsm_next."""
+        wrapped = getattr(method, '__wrapped__', method)
+        self._func = wrapped  # use wrapped func for name resolution (has state globals)
+        tree = self._get_func_ast(wrapped)
+
+        # The function has a 'state' parameter — map it to _fsm_state
+        state_param = tree.args.args[0].arg if tree.args.args else 'state'
+        state_vals = fsm_info['state_vals']
+
+        # Rewrite AST: replace state param refs with _fsm_state,
+        # resolve state constants, convert return → _fsm_next assignment
+        import copy
+        body = copy.deepcopy(tree.body)
+        self._fsm_rewrite(body, state_param, state_vals)
+
+        self._reg_locals = {}
+        stmts = self._stmts(body, blocking=True)
+        # Add default: _fsm_next = _fsm_state
+        stmts.insert(0, Assign('_fsm_next', Sig('_fsm_state'), blocking=True))
+        self._func = None
+        return [CombBlock(stmts)]
+
+    def _fsm_rewrite(self, nodes, state_param, state_vals):
+        """In-place AST rewrite for FSM: state param → self._fsm_state,
+        state names → constants, return X → self._fsm_next = X."""
+        for i, node in enumerate(nodes):
+            if isinstance(node, ast.Return):
+                # return X → self._fsm_next = X
+                val = node.value if node.value else ast.Name(id=state_param, ctx=ast.Load())
+                nodes[i] = ast.Assign(
+                    targets=[ast.Attribute(
+                        value=ast.Name(id='self', ctx=ast.Load()),
+                        attr='_fsm_next', ctx=ast.Store())],
+                    value=val)
+                self._fsm_rewrite_expr(nodes[i].value, state_param, state_vals)
+            elif isinstance(node, ast.If):
+                self._fsm_rewrite_expr(node.test, state_param, state_vals)
+                self._fsm_rewrite(node.body, state_param, state_vals)
+                self._fsm_rewrite(node.orelse, state_param, state_vals)
+            elif isinstance(node, ast.Assign):
+                for t in node.targets:
+                    self._fsm_rewrite_expr(t, state_param, state_vals)
+                self._fsm_rewrite_expr(node.value, state_param, state_vals)
+            elif isinstance(node, ast.Expr):
+                self._fsm_rewrite_expr(node.value, state_param, state_vals)
+
+    def _fsm_rewrite_expr(self, node, state_param, state_vals):
+        """Rewrite Name refs: state_param → self._fsm_state, state names → Constant."""
+        for field, child in ast.iter_fields(node):
+            if isinstance(child, ast.Name):
+                if child.id == state_param:
+                    # Replace with self._fsm_state
+                    new = ast.Attribute(
+                        value=ast.Name(id='self', ctx=ast.Load()),
+                        attr='_fsm_state', ctx=ast.Load())
+                    setattr(node, field, new)
+                elif child.id in state_vals:
+                    setattr(node, field, ast.Constant(value=state_vals[child.id]))
+            elif isinstance(child, list):
+                for j, item in enumerate(child):
+                    if isinstance(item, ast.Name):
+                        if item.id == state_param:
+                            child[j] = ast.Attribute(
+                                value=ast.Name(id='self', ctx=ast.Load()),
+                                attr='_fsm_state', ctx=ast.Load())
+                        elif item.id in state_vals:
+                            child[j] = ast.Constant(value=state_vals[item.id])
+                    elif isinstance(item, ast.AST):
+                        self._fsm_rewrite_expr(item, state_param, state_vals)
+            elif isinstance(child, ast.AST):
+                self._fsm_rewrite_expr(child, state_param, state_vals)
 
     def lower_always(self, edges, method):
         """Lower a @posedge/@always block → SeqBlock."""
