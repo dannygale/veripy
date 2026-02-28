@@ -224,9 +224,16 @@ def cmd_profile(args):
             tc._run_iverilog()
             iv_time = time.perf_counter() - t0
 
+            # verify correctness
+            try:
+                tc._assert_traces_match()
+                status = ''
+            except AssertionError as e:
+                status = ' MISMATCH'
+
             ratio = iv_time / py_time if py_time > 0.001 else float('inf')
             winner = 'python' if py_time < iv_time else 'iverilog'
-            rows.append((label, py_time, iv_time, ratio, winner))
+            rows.append((label, py_time, iv_time, ratio, winner, status))
 
     if not rows:
         sys.exit("error: no matching test methods found")
@@ -234,8 +241,8 @@ def cmd_profile(args):
     w = max(len(r[0]) for r in rows)
     print(f"\n{'Test':<{w}}    Python    iverilog   Ratio  Winner")
     print('-' * (w + 45))
-    for label, py_t, iv_t, ratio, winner in rows:
-        print(f'{label:<{w}}  {py_t:8.4f}s  {iv_t:8.4f}s  {ratio:5.1f}x  {winner}')
+    for label, py_t, iv_t, ratio, winner, status in rows:
+        print(f'{label:<{w}}  {py_t:8.4f}s  {iv_t:8.4f}s  {ratio:5.1f}x  {winner}{status}')
     print()
 
 
