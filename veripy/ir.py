@@ -1,0 +1,171 @@
+"""Hardware IR — decouples Python AST from Verilog generation."""
+
+from dataclasses import dataclass, field
+from typing import Union
+
+
+# ── Expressions ──────────────────────────────────────────────────────
+
+class Expr:
+    """Base class for IR expressions."""
+
+@dataclass
+class Const(Expr):
+    value: int
+
+@dataclass
+class Param(Expr):
+    name: str
+
+@dataclass
+class Sig(Expr):
+    name: str
+
+@dataclass
+class BinOp(Expr):
+    op: str          # '+', '-', '*', '/', '%', '&', '|', '^', '<<', '>>', '>>>'
+    left: Expr
+    right: Expr
+
+@dataclass
+class UnaryOp(Expr):
+    op: str          # '~', '!'
+    operand: Expr
+
+@dataclass
+class Compare(Expr):
+    op: str          # '==', '!=', '<', '>', '<=', '>='
+    left: Expr
+    right: Expr
+
+@dataclass
+class BoolOp(Expr):
+    op: str          # '&&', '||'
+    values: list
+
+@dataclass
+class Mux(Expr):
+    sel: Expr
+    true_val: Expr
+    false_val: Expr
+
+@dataclass
+class Slice(Expr):
+    signal: Expr
+    hi: Expr
+    lo: Expr
+
+@dataclass
+class Index(Expr):
+    signal: Expr
+    idx: Expr
+
+@dataclass
+class Concat(Expr):
+    parts: list      # list[Expr], MSB first
+
+
+# ── Statements ───────────────────────────────────────────────────────
+
+class Stmt:
+    """Base class for IR statements."""
+
+@dataclass
+class Assign(Stmt):
+    target: str
+    value: Expr
+    blocking: bool = True
+
+@dataclass
+class SliceAssign(Stmt):
+    target: str
+    hi: Expr
+    lo: Expr
+    value: Expr
+    blocking: bool = True
+
+@dataclass
+class If(Stmt):
+    cond: Expr
+    then_body: list  # list[Stmt]
+    else_body: list  # list[Stmt]
+
+@dataclass
+class Case(Stmt):
+    sel: Expr
+    cases: list      # list[(Expr, list[Stmt])]
+    default: list    # list[Stmt] | None
+
+@dataclass
+class MemWrite(Stmt):
+    mem: str
+    addr: Expr
+    data: Expr
+    blocking: bool = True
+
+
+# ── Blocks ───────────────────────────────────────────────────────────
+
+@dataclass
+class ContAssign:
+    target: str
+    value: Expr
+
+@dataclass
+class CombBlock:
+    stmts: list      # list[Stmt]
+    locals: dict = field(default_factory=dict)  # name → width (for reg declarations)
+
+@dataclass
+class SeqBlock:
+    edges: list      # list[(str, str)]  — [('posedge', 'clock'), ...]
+    stmts: list      # list[Stmt]
+
+
+# ── Declarations ─────────────────────────────────────────────────────
+
+@dataclass
+class Port:
+    name: str
+    direction: str   # 'input' | 'output'
+    width: Union[int, str]  # int or param expression string
+    is_reg: bool = False
+
+@dataclass
+class WireDecl:
+    name: str
+    width: Union[int, str]
+
+@dataclass
+class RegDecl:
+    name: str
+    width: Union[int, str]
+
+@dataclass
+class MemDecl:
+    name: str
+    depth: int
+    width: Union[int, str]
+
+@dataclass
+class Instance:
+    mod_type: str
+    inst_name: str
+    params: dict     # param_name → value (int or str for param refs)
+    ports: list      # list[(port_name, wire_name)]
+
+
+# ── Module ───────────────────────────────────────────────────────────
+
+@dataclass
+class IRModule:
+    name: str
+    params: dict = field(default_factory=dict)       # name → default value
+    ports: list = field(default_factory=list)         # list[Port]
+    wires: list = field(default_factory=list)         # list[WireDecl]
+    regs: list = field(default_factory=list)          # list[RegDecl]
+    mems: list = field(default_factory=list)          # list[MemDecl]
+    instances: list = field(default_factory=list)     # list[Instance]
+    assigns: list = field(default_factory=list)       # list[ContAssign]
+    comb_blocks: list = field(default_factory=list)   # list[CombBlock]
+    seq_blocks: list = field(default_factory=list)    # list[SeqBlock]
