@@ -231,7 +231,7 @@ def cmd_profile(args):
             except AssertionError as e:
                 status = ' MISMATCH'
 
-            ratio = iv_time / py_time if py_time > 0.001 else float('inf')
+            ratio = py_time / iv_time if iv_time > 0.001 else float('inf')
             winner = 'python' if py_time < iv_time else 'iverilog'
             rows.append((label, py_time, iv_time, ratio, winner, status))
 
