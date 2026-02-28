@@ -636,13 +636,10 @@ class VerilogEmitter:
         l_sub, l_iface, l_obj = lhs
         r_sub, r_iface, r_obj = rhs
         pairs = []
-        for name, r_sig in r_obj._signals().items():
-            l_sig = l_obj._signals().get(name)
-            if l_sig is None:
-                continue
-            if r_sig._kind == 'output' and l_sig._kind == 'input':
+        for name, direction in Interface._match(l_obj, r_obj):
+            if direction == 'r2l':
                 pairs.append((f'{l_sub}_{l_iface}_{name}', f'{r_sub}_{r_iface}_{name}'))
-            elif r_sig._kind == 'input' and l_sig._kind == 'output':
+            else:
                 pairs.append((f'{r_sub}_{r_iface}_{name}', f'{l_sub}_{l_iface}_{name}'))
         return pairs
 

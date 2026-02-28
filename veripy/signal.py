@@ -231,41 +231,45 @@ def Register(width=1, reset=0):
 class Interface:
     """Base class for reusable signal bundles.
 
-    Define signals as class attributes (static) or override __init__ with
-    parameters (dynamic).  Signals are accessed as self.bus.signal in Python
-    and emitted as bus_signal in Verilog.
+    Define signals using Input/Output (like Module ports). Signals are
+    accessed as self.bus.signal in Python and emitted as bus_signal in Verilog.
 
     Static usage:
         class AXILite(Interface):
-            awaddr  = ('input', 32)
-            awvalid = ('input', 1)
-            awready = ('output', 1)
+            awaddr  = Input(32)
+            awvalid = Input(1)
+            awready = Output(1)
 
     Parameterized usage:
         class AXILite(Interface):
             def __init__(self, data_width=32, addr_width=32):
-                self.awaddr  = ('input', addr_width)
-                self.awvalid = ('input', 1)
-                self.awready = ('output', 1)
-                self.wdata   = ('output', data_width)
+                self.awaddr  = Input(addr_width)
+                self.awvalid = Input(1)
+                self.wdata   = Output(data_width)
                 super().__init__()
     """
 
+    @staticmethod
+    def _sig_def(val):
+        """Extract (kind, width) from a Signal or legacy tuple, or return None."""
+        if isinstance(val, Signal) and val._kind in ('input', 'output'):
+            return val._kind, val.width
+        if isinstance(val, tuple) and len(val) == 2 and val[0] in ('input', 'output'):
+            return val
+        return None
+
     def __init__(self):
-        # Collect signal defs from class-level AND instance-level tuples
         defs = {}
         for name in dir(type(self)):
-            val = getattr(type(self), name)
-            if isinstance(val, tuple) and len(val) == 2 and val[0] in ('input', 'output'):
-                defs[name] = val
-        # Instance-level tuples (set by subclass __init__ before super().__init__)
+            d = self._sig_def(getattr(type(self), name))
+            if d:
+                defs[name] = d
         for name in list(vars(self)):
-            val = vars(self)[name]
-            if isinstance(val, tuple) and len(val) == 2 and val[0] in ('input', 'output'):
-                defs[name] = val
+            d = self._sig_def(vars(self)[name])
+            if d:
+                defs[name] = d
         for name, (kind, width) in defs.items():
-            sig = Signal(width, _kind=kind, name=name)
-            object.__setattr__(self, name, sig)
+            object.__setattr__(self, name, Signal(width, _kind=kind, name=name))
 
     def __setattr__(self, name, value):
         try:
@@ -280,6 +284,32 @@ class Interface:
     def _signals(self):
         return {k: v for k in dir(self)
                 if not k.startswith('_') and isinstance((v := getattr(self, k)), Signal)}
+
+    @staticmethod
+    def _match(lhs, rhs):
+        """Return [(signal_name, 'l2r'|'r2l'), ...] for matching signals. Raises on errors."""
+        if hasattr(lhs, '_connects_to') and not isinstance(rhs, lhs._connects_to):
+            raise TypeError(f"Cannot connect {type(lhs).__name__} to {type(rhs).__name__}")
+        if hasattr(rhs, '_connects_to') and not isinstance(lhs, rhs._connects_to):
+            raise TypeError(f"Cannot connect {type(rhs).__name__} to {type(lhs).__name__}")
+        pairs = []
+        l_sigs, r_sigs = lhs._signals(), rhs._signals()
+        for name, r_sig in r_sigs.items():
+            l_sig = l_sigs.get(name)
+            if l_sig is None:
+                continue
+            if r_sig._kind == l_sig._kind:
+                raise TypeError(
+                    f"Signal '{name}' is {r_sig._kind} on both "
+                    f"{type(lhs).__name__} and {type(rhs).__name__}")
+            if r_sig._kind == 'output':
+                pairs.append((name, 'r2l'))
+            else:
+                pairs.append((name, 'l2r'))
+        if not pairs:
+            raise TypeError(
+                f"No matching signals between {type(lhs).__name__} and {type(rhs).__name__}")
+        return pairs
 
 
 
