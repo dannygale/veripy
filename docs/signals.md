@@ -88,7 +88,7 @@ val = regs[addr]              # combinational read
 regs.write(addr, data)        # scheduled write (applied on tick)
 ```
 
-In `@posedge` blocks, `mem.write(addr, data)` emits `mem[addr] <= data`.
+In `@always(posedge(...))` blocks, `mem.write(addr, data)` emits `mem[addr] <= data`.
 
 ## Non-Blocking Assignment
 
@@ -99,4 +99,4 @@ sig._assign(value)   # schedule next-cycle update
 sig._tick()          # apply pending update
 ```
 
-This is handled automatically by `@comb`/`@posedge` blocks and `module.tick()`. You rarely need to call these directly.
+This is handled automatically by `@comb`/`@always` blocks and `SimEngine`. You rarely need to call these directly.

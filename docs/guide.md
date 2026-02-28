@@ -5,8 +5,8 @@ The `@module` decorator is the recommended way to define hardware modules in Ver
 ## Basics
 
 ```python
-from veripy import module, Input, Output, Register
-from veripy.context import comb, posedge
+from veripy import module, Input, Output, Register, posedge
+from veripy.context import comb, always
 
 @module
 def counter(width=8):
@@ -20,7 +20,7 @@ def counter(width=8):
     def drive():
         count = cnt
 
-    @posedge(clock)
+    @always(posedge(clock))
     def increment():
         if reset:
             cnt = 0
@@ -28,19 +28,30 @@ def counter(width=8):
             cnt = cnt + 1
 ```
 
-Function arguments become Verilog parameters. Signals are local variables — no `self.` needed. Assignments to signals inside `@comb` and `@posedge` blocks are automatically rewritten to drive the signal.
+Function arguments become Verilog parameters. Signals are local variables — no `self.` needed. Assignments to signals inside `@comb` and `@always` blocks are automatically rewritten to drive the signal.
 
 ```python
+from veripy.sim import SimEngine
+
 c = counter(width=4)
-c.enable.set(1)
-c.tick()
-print(int(c.count))
+sim = SimEngine(c)
+sim.clock(c.clock, 10)
+
+@sim.initial
+def demo():
+    c.reset.set(1); c.enable.set(1); yield 10
+    c.reset.set(0)
+    for _ in range(5):
+        yield 10
+    print(int(c.count))
+
+sim.run()
 print(c.to_verilog())
 ```
 
 ## How Assignment Rewriting Works
 
-Inside `@comb` and `@posedge` blocks, VeriPy rewrites assignments to known signal names:
+Inside `@comb` and `@always` blocks, VeriPy rewrites assignments to known signal names:
 
 ```python
 count = cnt          # → count._assign(cnt)     (drives the signal)
@@ -86,10 +97,10 @@ def drive():
 
 Simple assignments emit `assign`. Control flow emits `always @(*)`.
 
-### `@posedge(signal)` — Sequential Logic
+### `@always(posedge(signal))` — Sequential Logic
 
 ```python
-@posedge(clock)
+@always(posedge(clock))
 def increment():
     if reset:
         cnt = 0
@@ -99,12 +110,12 @@ def increment():
 
 Emits `always @(posedge clock)` with non-blocking assignments (`<=`).
 
-### `@negedge(signal)` — Falling Edge
+### `@always(negedge(signal))` — Falling Edge
 
 ```python
-from veripy.context import negedge
+from veripy import negedge
 
-@negedge(clock)
+@always(negedge(clock))
 def capture():
     q = d
 ```
@@ -112,8 +123,8 @@ def capture():
 ### `@always(sensitivity)` — Multi-Edge Sensitivity
 
 ```python
-from veripy.context import always
 from veripy import posedge, negedge
+from veripy.context import always
 
 @always(posedge(clock) | negedge(rst_n))
 def async_reset():
@@ -145,7 +156,7 @@ def datapath(width=16):
         result = alu.out
 ```
 
-Sub-modules with parameters emit `#(.param(value))` overrides in Verilog. Use `VerilogEmitter(m).emit_all()` to emit both parent and child definitions.
+Sub-modules with parameters emit `#(.param(value))` overrides in Verilog. Each module emits its own `.v` file via `to_verilog()`.
 
 ## FSM
 
@@ -188,7 +199,7 @@ def safe_counter():
     count = Output(4)
     cnt   = Register(4)
 
-    @posedge(clock)
+    @always(posedge(clock))
     def inc():
         cnt = cnt + 1
 
@@ -338,7 +349,7 @@ warnings = lint(my_design)
 # warning: CDC: register 'reg_fast' (clocked by fast_clk) read in block clocked by slow_clk
 ```
 
-No annotations needed — domains are inferred from `@posedge` blocks.
+No annotations needed — domains are inferred from `@always(posedge(...))` blocks.
 
 ### Synchronizer
 
@@ -357,7 +368,7 @@ def design():
     reg_fast = Register(8)
     sync     = Synchronizer(width=8, stages=2)
 
-    @posedge(fast_clk)
+    @always(posedge(fast_clk))
     def fast():
         reg_fast = d
 

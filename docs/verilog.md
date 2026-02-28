@@ -6,8 +6,10 @@
 c = counter(width=4)
 print(c.to_verilog())                      # single module
 
-from veripy.emit_verilog import VerilogEmitter
-print(VerilogEmitter(c).emit_all())         # hierarchical (sub-modules + parent)
+# For hierarchical designs, each sub-module emits independently:
+d = datapath(width=8)
+print(d.alu.to_verilog())                  # sub-module
+print(d.to_verilog())                      # parent
 ```
 
 CLI:
@@ -55,7 +57,7 @@ Detects:
 - Multi-driven signals
 - Missing reset on sequential blocks
 - Unused signals
-- Clock domain crossing violations (unsynchronized register reads across `@posedge` blocks on different clocks)
+- Clock domain crossing violations (unsynchronized register reads across `@always(posedge(...))` blocks on different clocks)
 
 From Python:
 
