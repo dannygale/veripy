@@ -12,13 +12,20 @@ class TestCounter(VeripyTestCase):
         return counter(width=4)
 
     def test_counting(self):
-        self.set(reset=1, enable=1)
-        self.tick()
-        self.assertEqual(self.out('count'), 0)
-        self.set(reset=0)
-        for _ in range(5):
-            self.tick()
-        self.assertEqual(self.out('count'), 5)
+        @self.always
+        def clock():
+            self.set(clock=0); yield 5
+            self.set(clock=1); yield 5
+
+        @self.initial
+        def stimulus():
+            self.set(reset=1, enable=1)
+            yield 10
+            self.assertEqual(self.out('count'), 0)
+            self.set(reset=0)
+            for _ in range(5):
+                yield 10
+            self.assertEqual(self.out('count'), 5)
 ```
 
 Each `test_*` method runs three ways:
@@ -39,21 +46,22 @@ from veripy.sim import SimEngine
 
 c = counter(width=4)
 sim = SimEngine(c)
+sim.clock(c.clock, 10)
 
 @sim.initial
 def stimulus():
     c.reset.set(1)
     c.enable.set(1)
-    yield 1
+    yield 10
     c.reset.set(0)
     for _ in range(5):
-        yield 1
+        yield 10
     assert int(c.count) == 5
 
 sim.run()
 ```
 
-`@sim.initial` blocks run once. `@sim.always` blocks restart on completion. `yield N` advances N time units. Simulation ends when all initial blocks finish or `sim.finish()` is called.
+`@sim.initial` blocks run once. `@sim.always` blocks restart on completion. `yield N` advances N time units. `sim.clock(signal, period)` generates a free-running clock. Simulation ends when all initial blocks finish or `sim.finish()` is called.
 
 ## VCD Waveforms
 

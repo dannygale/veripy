@@ -9,8 +9,8 @@ Write your hardware modules once in Python. VeriPy lets you simulate them native
 ### `@module` (recommended)
 
 ```python
-from veripy import module, Input, Output, Register
-from veripy.context import comb, posedge
+from veripy import module, Input, Output, Register, posedge
+from veripy.context import comb, always
 
 @module
 def counter(width=8):
@@ -24,7 +24,7 @@ def counter(width=8):
     def drive_output():
         count = cnt
 
-    @posedge(clock)
+    @always(posedge(clock))
     def increment():
         if reset:
             cnt = 0
@@ -122,6 +122,24 @@ veripy lint <file.py>               # static checks
 - **Lint** — undriven outputs, multi-driven signals, missing reset, unused signals, CDC violations ([docs](docs/verilog.md#lint))
 - **CDC primitives** — `Synchronizer`, `AsyncFIFO` with gray-code pointers ([docs](docs/guide.md#cdc))
 - **Event-driven simulation** — `SimEngine` with proper Verilog scheduling ([docs](docs/testing.md#simengine))
+
+## Omnibus Example
+
+[`examples/spi_controller.py`](examples/spi_controller.py) — a pipelined SPI master with TX FIFO that exercises every major feature in one design:
+
+| Feature | Where |
+|---|---|
+| `@module` decorator | `sync_fifo` (FIFO sub-module) |
+| Class-based `Module` | `SpiController` |
+| FSM | 4-state SPI protocol (IDLE → LOAD → SHIFT → DONE) |
+| `Mem` | FIFO buffer storage |
+| `Interface` bundle | `SpiBus` (sclk, mosi, miso, cs_n) |
+| Sub-modules | FIFO instantiated inside controller |
+| Parametric widths | `width`, `fifo_depth`, `clk_div` |
+| `assert_always` | CS must be low during SHIFT |
+| `cover` | FIFO full reached |
+| Timing constraints | `create_clock`, `max_delay` → SDC |
+| Dual-path tests | [`tests/test_spi_controller.py`](tests/test_spi_controller.py) |
 
 ## Documentation
 

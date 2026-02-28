@@ -54,6 +54,9 @@ class Parameter:
     def resolve(self, param_values):
         return param_values[self.name]
 
+    def __int__(self):
+        return self.default
+
     def _binop(self, other, op, op_str):
         n = f'{_vname(self)}{op_str}{_vname(other)}'
         if isinstance(other, Parameter):

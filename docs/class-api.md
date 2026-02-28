@@ -151,6 +151,5 @@ class Peripheral(Module):
 ```python
 m = Counter(width=4)
 m.to_verilog()                          # single module Verilog
-VerilogEmitter(m).emit_all()            # hierarchical Verilog
 m.to_sdc()                             # SDC timing constraints
 ```
