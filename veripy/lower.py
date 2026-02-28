@@ -286,6 +286,9 @@ class _Lowerer:
                         stmt.value.func.id == 'Register'):
                         return []
                     return [Assign(name, self._expr(stmt.value), blocking=True)]
+                # Bare name that matches a known signal → treat as signal assign
+                if name in self.signals:
+                    return [Assign(name, self._expr(stmt.value), blocking)]
                 # Plain local — treat as reg
                 if name not in self._reg_locals:
                     self._reg_locals[name] = 32
@@ -686,6 +689,16 @@ def lower_module(module, module_name=None):
     for port in ir.ports:
         if port.direction == 'output' and (port.name in seq_targets or port.name in always_driven):
             port.is_reg = True
+
+    # Internal signals driven by continuous assign must be wire, not reg
+    cont_targets = {a.target for a in ir.assigns}
+    new_regs = []
+    for r in ir.regs:
+        if r.name in cont_targets:
+            ir.wires.append(WireDecl(r.name, r.width))
+        else:
+            new_regs.append(r)
+    ir.regs = new_regs
 
     return ir
 

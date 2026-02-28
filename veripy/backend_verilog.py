@@ -65,11 +65,14 @@ def _emit_internals(ir, lines):
         w = _width_decl(m.width)
         d = m.depth
         lines.append(f'    reg {w}{m.name} [0:{_sub1(d)}];')
-        # Initial block to zero-fill
+
+    if ir.mems:
         lines.append('    integer _i;')
         lines.append('    initial begin')
-        lines.append(f'        for (_i = 0; _i < {d}; _i = _i + 1)')
-        lines.append(f'            {m.name}[_i] = 0;')
+        for m in ir.mems:
+            d = m.depth
+            lines.append(f'        for (_i = 0; _i < {d}; _i = _i + 1)')
+            lines.append(f'            {m.name}[_i] = 0;')
         lines.append('    end')
 
 
