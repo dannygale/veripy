@@ -50,6 +50,15 @@ class Module:
                 if isinstance(existing, Signal):
                     existing._assign(value)
                     return
+                if isinstance(existing, Interface) and isinstance(value, Interface):
+                    for sig_name, dst in existing._signals().items():
+                        src = value._signals().get(sig_name)
+                        if src:
+                            if src._kind == 'output' and dst._kind == 'input':
+                                dst._assign(int(src))
+                            elif src._kind == 'input' and dst._kind == 'output':
+                                src._assign(int(dst))
+                    return
             except AttributeError:
                 pass
         object.__setattr__(self, name, value)

@@ -231,15 +231,26 @@ class VerilogEmitter:
         return targets
 
     def _target_name(self, node):
-        """Extract signal name from an assignment target (self.x or self.sub.port)."""
-        if isinstance(node, ast.Attribute) and self._is_self(node.value):
-            return node.attr
+        """Extract signal name from an assignment target (self.x, self.sub.port, or self.sub.iface.signal)."""
+        # self.sub.iface.signal → sub_iface_signal
+        if (isinstance(node, ast.Attribute) and
+            isinstance(node.value, ast.Attribute) and
+            isinstance(node.value.value, ast.Attribute) and
+            self._is_self(node.value.value.value)):
+            sub_name = node.value.value.attr
+            iface_name = node.value.attr
+            if sub_name in self.submodules:
+                return f'{sub_name}_{iface_name}_{node.attr}'
+        # self.sub.port → sub_port
         if (isinstance(node, ast.Attribute) and
             isinstance(node.value, ast.Attribute) and
             self._is_self(node.value.value)):
             sub_name = node.value.attr
             if sub_name in self.submodules or sub_name in self.interfaces:
                 return f'{sub_name}_{node.attr}'
+        # self.x → x
+        if isinstance(node, ast.Attribute) and self._is_self(node.value):
+            return node.attr
         return None
 
     def _needs_always_target(self, target_name):
@@ -258,6 +269,10 @@ class VerilogEmitter:
             assigns = []
             always_stmts = []
             for stmt in tree.body:
+                expanded = self._try_expand_iface_assign(stmt)
+                if expanded is not None:
+                    assigns.extend(expanded)
+                    continue
                 t, v = self._extract_nba(stmt)
                 if self._needs_always_target(t):
                     always_stmts.append((t, v))
@@ -489,6 +504,16 @@ class VerilogEmitter:
                     pass
             return node.id
 
+        # self.sub.iface.signal → sub_iface_signal
+        if (isinstance(node, ast.Attribute) and
+            isinstance(node.value, ast.Attribute) and
+            isinstance(node.value.value, ast.Attribute) and
+            self._is_self(node.value.value.value)):
+            sub_name = node.value.value.attr
+            iface_name = node.value.attr
+            if sub_name in self.submodules:
+                return f'{sub_name}_{iface_name}_{node.attr}'
+
         # self.sub.port → sub_port (sub-module port reference)
         if (isinstance(node, ast.Attribute) and
             isinstance(node.value, ast.Attribute) and
@@ -584,6 +609,42 @@ class VerilogEmitter:
             return f'(({cond}) ? {a} : {b})'
 
         raise SyntaxError(f'Unsupported expression: {ast.dump(node)}')
+
+    # --- interface bulk connect ---
+    def _resolve_sub_iface(self, node):
+        """If node is self.sub.iface, return (sub_name, iface_name, Interface). Else None."""
+        if (isinstance(node, ast.Attribute) and
+            isinstance(node.value, ast.Attribute) and
+            self._is_self(node.value.value)):
+            sub_name = node.value.attr
+            iface_name = node.attr
+            sub = self.submodules.get(sub_name)
+            if sub:
+                iface = getattr(sub, iface_name, None)
+                if isinstance(iface, Interface):
+                    return sub_name, iface_name, iface
+        return None
+
+    def _try_expand_iface_assign(self, stmt):
+        """Expand self.sub_a.iface = self.sub_b.iface into per-signal (target, value) pairs."""
+        if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1):
+            return None
+        lhs = self._resolve_sub_iface(stmt.targets[0])
+        rhs = self._resolve_sub_iface(stmt.value)
+        if not lhs or not rhs:
+            return None
+        l_sub, l_iface, l_obj = lhs
+        r_sub, r_iface, r_obj = rhs
+        pairs = []
+        for name, r_sig in r_obj._signals().items():
+            l_sig = l_obj._signals().get(name)
+            if l_sig is None:
+                continue
+            if r_sig._kind == 'output' and l_sig._kind == 'input':
+                pairs.append((f'{l_sub}_{l_iface}_{name}', f'{r_sub}_{r_iface}_{name}'))
+            elif r_sig._kind == 'input' and l_sig._kind == 'output':
+                pairs.append((f'{r_sub}_{r_iface}_{name}', f'{l_sub}_{l_iface}_{name}'))
+        return pairs
 
     # --- helpers ---
     def _is_nba(self, stmt):

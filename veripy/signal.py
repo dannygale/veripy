@@ -231,33 +231,41 @@ def Register(width=1, reset=0):
 class Interface:
     """Base class for reusable signal bundles.
 
-    Define signals as class attributes. Instantiate and assign to a Module
-    attribute to wire the whole bundle. Signals are accessed as self.bus.signal
-    in Python and emitted as bus_signal in Verilog.
+    Define signals as class attributes (static) or override __init__ with
+    parameters (dynamic).  Signals are accessed as self.bus.signal in Python
+    and emitted as bus_signal in Verilog.
 
-    Usage:
+    Static usage:
         class AXILite(Interface):
             awaddr  = ('input', 32)
             awvalid = ('input', 1)
             awready = ('output', 1)
 
-        class MyModule(Module):
-            def __init__(self):
-                self.bus = AXILite()
-                ...
-                @self.comb
-                def logic():
-                    self.bus.awready = 1
+    Parameterized usage:
+        class AXILite(Interface):
+            def __init__(self, data_width=32, addr_width=32):
+                self.awaddr  = ('input', addr_width)
+                self.awvalid = ('input', 1)
+                self.awready = ('output', 1)
+                self.wdata   = ('output', data_width)
+                super().__init__()
     """
 
     def __init__(self):
-        # Instantiate signals from class-level definitions
+        # Collect signal defs from class-level AND instance-level tuples
+        defs = {}
         for name in dir(type(self)):
             val = getattr(type(self), name)
             if isinstance(val, tuple) and len(val) == 2 and val[0] in ('input', 'output'):
-                kind, width = val
-                sig = Signal(width, _kind=kind, name=name)
-                object.__setattr__(self, name, sig)
+                defs[name] = val
+        # Instance-level tuples (set by subclass __init__ before super().__init__)
+        for name in list(vars(self)):
+            val = vars(self)[name]
+            if isinstance(val, tuple) and len(val) == 2 and val[0] in ('input', 'output'):
+                defs[name] = val
+        for name, (kind, width) in defs.items():
+            sig = Signal(width, _kind=kind, name=name)
+            object.__setattr__(self, name, sig)
 
     def __setattr__(self, name, value):
         try:
