@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=68.0", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "veripy-hdl"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Python HDL that simulates and generates Verilog from the same source"
 readme = "README.md"
 license = {text = "MIT"}
@@ -34,3 +34,5 @@ Issues = "https://github.com/dannygale/veripy/issues"
 
 [project.scripts]
 veripy = "veripy.cli:main"
+
+[tool.setuptools_scm]
