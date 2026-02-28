@@ -74,6 +74,8 @@ class Module:
         self._assertions = []      # [(clock_signal, func), ...]
         self._covers = []          # [(clock_signal, func, hit), ...]
         self._timing = []          # [(constraint_type, kwargs), ...]
+        self._behavioral = None    # optional behavioral model function
+        self._mode = 'sim'         # 'sim' or 'behavioral'
         if params is not None:
             self._params = params
         else:
@@ -201,6 +203,20 @@ class Module:
             self._pipelines = []
         self._pipelines.append(p)
         return p
+
+    def behavioral(self, func):
+        """Decorator: register a behavioral model for fast emulation.
+
+        The behavioral function replaces all comb/posedge blocks during
+        tick() when mode='behavioral'. It is never emitted as Verilog.
+
+        Usage:
+            @self.behavioral
+            def fast_model():
+                self.out = self.a * self.b
+        """
+        self._behavioral = func
+        return func
 
     def fsm(self, clock, reset, states):
         """Decorator: define an FSM with states and transitions.
@@ -340,10 +356,20 @@ class Module:
 
     # --- convenience for direct sim / unit tests ---
     def tick(self):
-        """Advance one clock cycle. Fires all always blocks unconditionally.
+        """Advance one clock cycle.
 
-        For proper edge-driven simulation, use SimEngine instead.
+        In 'sim' mode (default): runs comb + posedge blocks (cycle-accurate).
+        In 'behavioral' mode: runs the @behavioral function instead (fast emulation).
         """
+        if self._mode == 'behavioral' and self._behavioral is not None:
+            self._behavioral()
+            for sub in self._submodules().values():
+                if sub._mode == 'behavioral' and sub._behavioral is not None:
+                    sub._behavioral()
+                else:
+                    sub.tick()
+            return
+
         subs = self._submodules()
         self._settle_comb()
         for _edges, method in self._always_blocks:
