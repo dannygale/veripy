@@ -101,7 +101,7 @@ veripy lint <file.py>               # static checks
 - **Formal properties** — `assert_always`, `cover` ([docs](docs/guide.md#formal-properties))
 - **Pipelines** — explicit stage boundaries with automatic registers ([docs](docs/guide.md#pipelines))
 - **Timing constraints** — SDC output co-located with logic ([docs](docs/guide.md#timing-constraints))
-- **Interface bundles** — reusable signal groups ([docs](docs/guide.md#interfaces))
+- **Interface bundles** — reusable signal groups, parameterized widths, bulk connect ([docs](docs/guide.md#interfaces))
 - **Verilog import** — convert existing RTL to VeriPy ([docs](docs/verilog.md))
 - **Lint** — undriven outputs, multi-driven signals, missing reset, unused signals, CDC violations ([docs](docs/verilog.md#lint))
 - **CDC primitives** — `Synchronizer`, `AsyncFIFO` with gray-code pointers ([docs](docs/guide.md#cdc))

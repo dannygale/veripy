@@ -272,6 +272,56 @@ def peripheral():
 
 Signals are flattened with the interface name as prefix in Verilog: `bus_awaddr`, `bus_awvalid`, etc.
 
+### Parameterized Interfaces
+
+Override `__init__` to make widths configurable:
+
+```python
+class AXILite(Interface):
+    def __init__(self, data_width=32, addr_width=32):
+        self.awaddr  = ('input', addr_width)
+        self.awvalid = ('input', 1)
+        self.awready = ('output', 1)
+        self.wdata   = ('input', data_width)
+        self.wready  = ('output', 1)
+        super().__init__()
+
+@module
+def peripheral(data_width=32):
+    bus = AXILite(data_width=data_width)
+```
+
+Set signal tuples as instance attributes before calling `super().__init__()`.
+
+### 3-Level Attribute Resolution
+
+Sub-module interface signals resolve through three levels in comb blocks:
+
+```python
+@module
+def top():
+    sub_a = SubModuleA()
+    sub_b = SubModuleB()
+
+    @comb
+    def wire():
+        sub_a.bus.wdata = sub_b.bus.rdata  # emits: sub_a_bus_wdata = sub_b_bus_rdata
+```
+
+`self.sub.iface.signal` resolves to `sub_iface_signal` in both target and expression positions.
+
+### Bulk Interface Connect
+
+Assign one interface to another to wire all matching signals automatically:
+
+```python
+@comb
+def connect():
+    sub_a.bus = sub_b.bus  # expands to per-signal assigns
+```
+
+Matching is by signal name. Direction is respected: outputs on the source wire to inputs on the destination. This replaces tedious per-signal wiring when two sub-modules share the same interface type.
+
 
 ## CDC
 
