@@ -184,6 +184,61 @@ def cmd_lint(args):
     sys.exit(1 if found else 0)
 
 
+def cmd_profile(args):
+    """Run test case(s) and compare Python sim vs iverilog performance."""
+    import time
+    from .verify import VeripyTestCase
+
+    spec = importlib.util.spec_from_file_location("_profile_mod", args.file)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["_profile_mod"] = mod
+    spec.loader.exec_module(mod)
+
+    cases = []
+    for name, obj in inspect.getmembers(mod, inspect.isclass):
+        if issubclass(obj, VeripyTestCase) and obj is not VeripyTestCase:
+            cases.append((name, obj))
+    if not cases:
+        sys.exit(f"error: no VeripyTestCase subclasses found in {args.file}")
+
+    rows = []
+    for cls_name, cls in cases:
+        methods = [m for m in dir(cls) if m.startswith('test')]
+        if args.test:
+            methods = [m for m in methods if m == args.test or m == f'test_{args.test}']
+        for method_name in sorted(methods):
+            label = f'{cls_name}.{method_name}'
+            tc = cls(method_name)
+
+            # Python sim
+            tc._begin()
+            tc._ran_sim = False
+            t0 = time.perf_counter()
+            getattr(tc, method_name)()
+            if not tc._ran_sim:
+                tc.run_sim()
+            py_time = time.perf_counter() - t0
+
+            # iverilog
+            t0 = time.perf_counter()
+            tc._run_iverilog()
+            iv_time = time.perf_counter() - t0
+
+            ratio = iv_time / py_time if py_time > 0.001 else float('inf')
+            winner = 'python' if py_time < iv_time else 'iverilog'
+            rows.append((label, py_time, iv_time, ratio, winner))
+
+    if not rows:
+        sys.exit("error: no matching test methods found")
+
+    w = max(len(r[0]) for r in rows)
+    print(f"\n{'Test':<{w}}    Python    iverilog   Ratio  Winner")
+    print('-' * (w + 45))
+    for label, py_t, iv_t, ratio, winner in rows:
+        print(f'{label:<{w}}  {py_t:8.4f}s  {iv_t:8.4f}s  {ratio:5.1f}x  {winner}')
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser(prog="veripy", description="VeriPy HDL toolchain")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -210,8 +265,14 @@ def main():
     p_lint.add_argument("file", help="Python file containing Module subclass(es)")
     p_lint.add_argument("-m", "--module", help="Target a specific Module subclass by name")
 
+    # profile
+    p_prof = sub.add_parser("profile", help="Compare Python sim vs iverilog performance")
+    p_prof.add_argument("file", help="Test file containing VeripyTestCase subclass(es)")
+    p_prof.add_argument("-t", "--test", help="Run only this test method (e.g. test_nop)")
+
     args = parser.parse_args()
-    {"build": cmd_build, "test": cmd_test, "import": cmd_import, "lint": cmd_lint}[args.command](args)
+    {"build": cmd_build, "test": cmd_test, "import": cmd_import,
+     "lint": cmd_lint, "profile": cmd_profile}[args.command](args)
 
 
 if __name__ == "__main__":
