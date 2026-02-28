@@ -40,40 +40,6 @@ def comb(fn):
     return fn
 
 
-def posedge(signal):
-    """Standalone @posedge(signal) decorator — registers a sequential block on rising edge."""
-    edge = _posedge(signal) if not isinstance(signal, str) else signal
-
-    def decorator(fn):
-        ctx = _get_context()
-        if ctx is not None:
-            if isinstance(edge, str):
-                fn._veripy_posedge = edge
-            else:
-                ctx.always_blocks.append(([edge], fn))
-        else:
-            fn._veripy_posedge = edge
-        return fn
-    return decorator
-
-
-def negedge(signal):
-    """Standalone @negedge(signal) decorator — registers a sequential block on falling edge."""
-    edge = _negedge(signal) if not isinstance(signal, str) else signal
-
-    def decorator(fn):
-        ctx = _get_context()
-        if ctx is not None:
-            if isinstance(edge, str):
-                fn._veripy_negedge = edge
-            else:
-                ctx.always_blocks.append(([edge], fn))
-        else:
-            fn._veripy_negedge = edge
-        return fn
-    return decorator
-
-
 def always(sensitivity):
     """Standalone @always(sensitivity) decorator — multi-edge sensitivity list.
 

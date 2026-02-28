@@ -2,7 +2,8 @@
 import unittest
 
 from veripy.signal import Input, Output, Register, Mem
-from veripy.context import comb, posedge, negedge
+from veripy.context import comb, always
+from veripy import posedge, negedge
 from veripy.decorator import module
 from veripy.parameter import Parameter
 from veripy.sim import SimEngine
@@ -24,7 +25,7 @@ def counter(width=8):
     def drive():
         count = cnt
 
-    @posedge(clock)
+    @always(posedge(clock))
     def increment():
         if reset:
             cnt = 0
@@ -71,7 +72,7 @@ def negedge_latch():
     d     = Input(8)
     q     = Output(8)
 
-    @negedge(clock)
+    @always(negedge(clock))
     def capture():
         q = d
 
@@ -121,7 +122,7 @@ def aug_counter(width=8):
     def drive():
         count = cnt
 
-    @posedge(clock)
+    @always(posedge(clock))
     def increment():
         if enable:
             cnt += 1
@@ -137,7 +138,7 @@ def slice_writer():
     def drive():
         out = data
 
-    @posedge(clock)
+    @always(posedge(clock))
     def write_nibble():
         data[3:0] = 0xA
 

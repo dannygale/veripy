@@ -3,11 +3,11 @@ pipeline(), timing constraints, Interface."""
 import unittest
 
 from veripy.signal import Input, Output, Register, Signal, Interface
-from veripy.context import (comb, posedge, negedge, always, fsm,
+from veripy.context import (comb, always, fsm,
                             assert_always, cover, pipeline,
                             create_clock, max_delay, false_path)
+from veripy import posedge, negedge
 from veripy.decorator import module
-from veripy import posedge as posedge_edge, negedge as negedge_edge
 from veripy.sim import SimEngine
 
 T = 10
@@ -27,7 +27,7 @@ def async_reset_ff():
     def drive():
         q = reg
 
-    @always(posedge_edge(clk) | negedge_edge(rst_n))
+    @always(posedge(clk) | negedge(rst_n))
     def logic():
         if not rst_n:
             reg = 0
@@ -66,7 +66,7 @@ def bounded_counter():
     def drive():
         count = cnt
 
-    @posedge(clock)
+    @always(posedge(clock))
     def inc():
         cnt = cnt + 1
 

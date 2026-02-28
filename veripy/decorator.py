@@ -98,7 +98,7 @@ def module(func):
             def drive():
                 count = cnt
 
-            @posedge(clock)
+            @always(posedge(clock))
             def increment():
                 if reset:
                     cnt = 0
