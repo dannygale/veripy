@@ -846,6 +846,12 @@ class _TBLowerer:
                 if hasattr(val, '_mod') and hasattr(val, 'out'):  # VeripyTestCase
                     self._tc_var = name
                     break
+        # Also check globals (for top-level scripts where tc is a global)
+        if self._tc_var == 'self' and hasattr(func, '__globals__'):
+            for name, val in func.__globals__.items():
+                if hasattr(val, '_mod') and hasattr(val, 'out') and val._mod is self.mod:
+                    self._tc_var = name
+                    break
         src = textwrap.dedent(inspect.getsource(func))
         tree = ast.parse(src)
         func_def = tree.body[0]
