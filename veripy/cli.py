@@ -12,7 +12,7 @@ import unittest
 import re
 
 from .module import Module
-from .emit_verilog import VerilogEmitter, _to_snake
+from .emit_verilog import _to_snake
 
 
 def _load_modules(path, module_name=None, params=None):
@@ -95,8 +95,9 @@ def cmd_build(args):
             factory = getattr(type(sub), '_veripy_factory', None)
             fresh = factory() if factory else type(sub)()
             _collect(fresh, sub_snake)
-        e = VerilogEmitter(mod, mod_name)
-        all_modules.append((mod_name, e.emit()))
+        from .lower import lower_module
+        from .backend_verilog import emit_verilog as _emit_v
+        all_modules.append((mod_name, _emit_v(lower_module(mod, mod_name))))
 
     for name, instance in modules:
         _collect(instance, _to_snake(name))

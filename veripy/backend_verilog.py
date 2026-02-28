@@ -120,7 +120,9 @@ def _emit_comb_blocks(ir, lines):
 def _emit_seq_blocks(ir, lines):
     for blk in ir.seq_blocks:
         lines.append('')
-        sens = ', '.join(f'{kind} {sig}' for kind, sig in blk.edges)
+        for name, width in blk.locals.items():
+            lines.append(f'    reg {_width_decl(width)}{name};')
+        sens = ' or '.join(f'{kind} {sig}' for kind, sig in blk.edges)
         lines.append(f'    always @({sens}) begin')
         for s in blk.stmts:
             _emit_stmt(s, lines, indent=2)
@@ -205,7 +207,12 @@ def _expr(node) -> str:
         return f'({_expr(node.left)} {node.op} {_expr(node.right)})'
 
     if isinstance(node, BoolOp):
-        parts = [_expr(v) for v in node.values]
+        parts = []
+        for v in node.values:
+            s = _expr(v)
+            if isinstance(v, BoolOp):
+                s = f'({s})'
+            parts.append(s)
         return ' {op} '.format(op=node.op).join(parts)
 
     if isinstance(node, Mux):

@@ -353,8 +353,9 @@ class Module:
         # Finalize any pipelines before emission
         for p in getattr(self, '_pipelines', []):
             p._finalize()
-        from .emit_verilog import VerilogEmitter
-        return VerilogEmitter(self, module_name).emit()
+        from .lower import lower_module
+        from .backend_verilog import emit_verilog
+        return emit_verilog(lower_module(self, module_name))
 
     def _check_assertions(self):
         """Check assert_always properties and update cover points."""

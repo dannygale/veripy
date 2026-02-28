@@ -68,7 +68,9 @@ class _Lowerer:
                 val = func.__closure__[idx].cell_contents
                 if name in self.params:
                     return ('param', name, val)
-                return ('const', val)
+                if isinstance(val, (int, float)):
+                    return ('const', val)
+                return ('obj', val)
             if hasattr(func, '__globals__') and name in func.__globals__:
                 val = func.__globals__[name]
                 if isinstance(val, (int, float)):
@@ -552,9 +554,14 @@ class _Lowerer:
         tree = self._get_func_ast(method)
         self._reg_locals = self._scan_reg_locals(tree)
         stmts = self._stmts(tree.body, blocking=False)
+        locals_dict = {}
+        for name, w in self._reg_locals.items():
+            if name not in self._all_reg_locals:
+                self._all_reg_locals[name] = w
+                locals_dict[name] = w
         self._func = None
         edge_list = [(e.kind, e.signal.name) for e in edges]
-        return SeqBlock(edge_list, stmts)
+        return SeqBlock(edge_list, stmts, locals_dict)
 
     def collect_always_targets(self, comb_blocks):
         """Return set of signal names assigned inside always @(*) comb blocks."""

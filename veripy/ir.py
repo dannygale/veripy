@@ -120,6 +120,7 @@ class CombBlock:
 class SeqBlock:
     edges: list      # list[(str, str)]  — [('posedge', 'clock'), ...]
     stmts: list      # list[Stmt]
+    locals: dict = field(default_factory=dict)  # name → width (for reg declarations)
 
 
 # ── Declarations ─────────────────────────────────────────────────────
