@@ -75,14 +75,22 @@ class VerilogEmitter:
         return '\n'.join(lines)
 
     def emit_all(self):
-        """Emit this module + all sub-module definitions."""
+        """Emit this module + all sub-module definitions (recursive)."""
         parts = []
         seen = set()
+        def _collect(mod, mod_name):
+            if mod_name in seen:
+                return
+            seen.add(mod_name)
+            # Use a fresh instance for the definition (no _params overrides)
+            factory = getattr(type(mod), '_veripy_factory', None)
+            fresh = factory() if factory else type(mod)()
+            e = VerilogEmitter(fresh, mod_name)
+            for sub_name, sub in e.submodules.items():
+                _collect(sub, _to_snake(type(sub).__name__))
+            parts.append(e.emit())
         for sub_name, sub in self.submodules.items():
-            mod_type = _to_snake(type(sub).__name__)
-            if mod_type not in seen:
-                parts.append(sub.to_verilog(module_name=mod_type))
-                seen.add(mod_type)
+            _collect(sub, _to_snake(type(sub).__name__))
         parts.append(self.emit())
         return '\n\n'.join(parts)
 
@@ -222,7 +230,8 @@ class VerilogEmitter:
             if name in self._all_reg_locals:
                 continue
             self._all_reg_locals[name] = w
-            ws = f' [{w-1}:0]' if w > 1 else ''
+            wval = w.default if is_param(w) else w
+            ws = f' [{w}-1:0]' if is_param(w) else (f' [{w-1}:0]' if w > 1 else '')
             lines.append(f'{pad}reg{ws} {name};')
         return lines
 

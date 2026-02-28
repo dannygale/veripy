@@ -223,4 +223,5 @@ def module(func):
 
     factory.__name__ = func.__name__
     factory.__qualname__ = func.__qualname__
+    mod_cls._veripy_factory = factory
     return factory
