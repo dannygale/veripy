@@ -66,6 +66,7 @@ class VeripyTestCase(unittest.TestCase):
 
     def run_sim(self):
         """Run the event-driven simulation."""
+        self._ran_sim = True
         self._engine.run()
 
     def always(self, fn):
@@ -204,8 +205,11 @@ def _wrap_dual(fn):
     def wrapper(self):
         # Pass 1: Python sim (assertions run inside initial blocks)
         self._begin()
+        self._ran_sim = False
         with self.subTest(backend='python'):
             fn(self)
+            if not self._ran_sim:
+                self.run_sim()
 
         # Pass 2: generate Verilog testbench, run iverilog, compare
         self._run_iverilog()

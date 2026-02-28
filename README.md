@@ -84,8 +84,6 @@ class TestCounter(VeripyTestCase):
             for _ in range(5):
                 yield 10
             self.assertEqual(self.out('count'), 5)
-
-        self.run_sim()
 ```
 
 Each `test_*` method automatically runs twice: once in Python simulation, once through iverilog — outputs are compared cycle-by-cycle.
