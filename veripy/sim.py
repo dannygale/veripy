@@ -120,6 +120,7 @@ class SimEngine:
             self._vcd = VCDWriter(self._vcd_file, self.mod)
 
         try:
+            self.mod._init_sim_cache()
             self.mod._snapshot_prev()
             self.mod._settle_comb()
 
@@ -151,25 +152,75 @@ class SimEngine:
     def _process(self):
         """Verilog scheduling: active → detect edges → fire blocks → NBA → re-settle."""
         mod = self.mod
+        sig_list = mod._sig_list
+        mem_list = mod._mem_list
+        comb_blocks = mod._comb_blocks
+        sub_settle = mod._sub_settle_info
 
-        mod._settle_comb()
+        # --- settle comb (pass 1) ---
+        for method in comb_blocks:
+            method()
+        for sig in sig_list:
+            sig._tick()
+        for mem in mem_list:
+            mem._tick()
+        for sub_nba, sub_comb in sub_settle:
+            sub_nba()
+        for sub_nba, sub_comb in sub_settle:
+            for method in sub_comb:
+                method()
+            sub_nba()
+        # --- settle comb (pass 2) ---
+        for method in comb_blocks:
+            method()
+        for sig in sig_list:
+            sig._tick()
+        for mem in mem_list:
+            mem._tick()
 
+        # --- edge detection ---
         triggered = mod._check_edges()
 
         if triggered:
             for _edges, method in triggered:
                 method()
 
-            mod._apply_nba()
-            for sub in mod._submodules().values():
-                sub._apply_nba()
+            # NBA
+            for sig in sig_list:
+                sig._tick()
+            for mem in mem_list:
+                mem._tick()
+            for sub_nba, _ in sub_settle:
+                sub_nba()
 
-            mod._settle_comb()
+            # re-settle
+            for method in comb_blocks:
+                method()
+            for sig in sig_list:
+                sig._tick()
+            for mem in mem_list:
+                mem._tick()
+            for sub_nba, sub_comb in sub_settle:
+                sub_nba()
+            for sub_nba, sub_comb in sub_settle:
+                for method in sub_comb:
+                    method()
+                sub_nba()
+            for method in comb_blocks:
+                method()
+            for sig in sig_list:
+                sig._tick()
+            for mem in mem_list:
+                mem._tick()
 
-        if triggered:
             mod._check_assertions()
 
-        mod._snapshot_prev()
+        # --- snapshot ---
+        for sig in sig_list:
+            sig._prev_val = sig._val
+        for _, sub_sigs in mod._sub_sig_lists:
+            for sig in sub_sigs:
+                sig._prev_val = sig._val
 
         if self._vcd:
             self._vcd.record(self.time)

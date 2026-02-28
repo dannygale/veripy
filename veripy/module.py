@@ -275,6 +275,9 @@ class Module:
 
     # --- sub-module discovery ---
     def _submodules(self):
+        cached = getattr(self, '_cached_submodules', None)
+        if cached is not None:
+            return cached
         subs = {}
         for k in dir(self):
             if k.startswith('_'):
@@ -282,10 +285,14 @@ class Module:
             v = getattr(self, k)
             if isinstance(v, Module) and v is not self:
                 subs[k] = v
+        self._cached_submodules = subs
         return subs
 
     # --- signal discovery ---
     def _signals(self):
+        cached = getattr(self, '_cached_signals', None)
+        if cached is not None:
+            return cached
         sigs = {}
         for k in dir(self):
             v = getattr(self, k)
@@ -294,6 +301,7 @@ class Module:
             elif isinstance(v, Interface):
                 for sig_name, sig in v._signals().items():
                     sigs[f'{k}_{sig_name}'] = sig
+        self._cached_signals = sigs
         return sigs
 
     def _interfaces(self):
@@ -301,52 +309,84 @@ class Module:
                 if not k.startswith('_') and isinstance(getattr(self, k), Interface)}
 
     def _mems(self):
-        return {k: getattr(self, k) for k in dir(self)
+        cached = getattr(self, '_cached_mems', None)
+        if cached is not None:
+            return cached
+        mems = {k: getattr(self, k) for k in dir(self)
                 if isinstance(getattr(self, k), Mem)}
+        self._cached_mems = mems
+        return mems
 
     # --- simulation helpers (used by SimEngine) ---
+    def _ensure_sim_cache(self):
+        if not hasattr(self, '_sig_list'):
+            self._init_sim_cache()
+
     def _apply_nba(self):
         """Apply non-blocking assignments (NBA region)."""
-        for sig in self._signals().values():
+        for sig in self._sig_list:
             sig._tick()
-        for mem in self._mems().values():
+        for mem in self._mem_list:
             mem._tick()
 
     def _settle_comb(self):
         """Settle combinational logic: parent → children → parent."""
-        subs = self._submodules()
-        for method in self._comb_blocks:
+        self._ensure_sim_cache()
+        comb = self._comb_blocks
+        nba = self._apply_nba
+        for method in comb:
             method()
-        self._apply_nba()
-        for sub in subs.values():
-            sub._apply_nba()
-        for sub in subs.values():
-            for method in sub._comb_blocks:
+        nba()
+        for sub_nba, sub_comb in self._sub_settle_info:
+            sub_nba()
+        for sub_nba, sub_comb in self._sub_settle_info:
+            for method in sub_comb:
                 method()
-            sub._apply_nba()
-        for method in self._comb_blocks:
+            sub_nba()
+        for method in comb:
             method()
-        self._apply_nba()
+        nba()
 
     def _snapshot_prev(self):
         """Save current signal values for edge detection."""
-        for sig in self._signals().values():
+        self._ensure_sim_cache()
+        for sig in self._sig_list:
             sig._prev_val = sig._val
-        for sub in self._submodules().values():
-            for sig in sub._signals().values():
+        for _, sub_sigs in self._sub_sig_lists:
+            for sig in sub_sigs:
                 sig._prev_val = sig._val
 
     def _check_edges(self):
         """Return list of (edges, method) for blocks whose sensitivity triggered."""
+        self._ensure_sim_cache()
         triggered = []
         for edges, method in self._always_blocks:
             if _edges_match(edges):
                 triggered.append((edges, method))
-        for sub in self._submodules().values():
-            for edges, method in sub._always_blocks:
+        for _, sub_always in self._sub_always_lists:
+            for edges, method in sub_always:
                 if _edges_match(edges):
                     triggered.append((edges, method))
         return triggered
+
+    def _init_sim_cache(self):
+        """Pre-compute lists for the simulation hot path. Called once by SimEngine."""
+        self._sig_list = list(self._signals().values())
+        self._mem_list = list(self._mems().values())
+        subs = self._submodules()
+        self._sub_settle_info = [
+            (sub._apply_nba, sub._comb_blocks) for sub in subs.values()
+        ]
+        self._sub_sig_lists = [
+            (name, list(sub._signals().values())) for name, sub in subs.items()
+        ]
+        self._sub_always_lists = [
+            (name, sub._always_blocks) for name, sub in subs.items()
+        ]
+        # Init sub caches too
+        for sub in subs.values():
+            sub._sig_list = list(sub._signals().values())
+            sub._mem_list = list(sub._mems().values())
 
     # --- Verilog generation ---
     def to_verilog(self, module_name=None):

@@ -33,14 +33,14 @@ def bench_python(make_module, n_cycles, setup=None):
     """Run SimEngine for n_cycles, return elapsed seconds."""
     mod = make_module()
     sim = SimEngine(mod)
-    sim.clock(mod.clock, 1)
 
     @sim.initial
     def stim():
         if setup:
             setup(mod)
         for _ in range(n_cycles):
-            yield 2  # one full clock period
+            mod.clock.set(0); yield 1
+            mod.clock.set(1); yield 1
 
     start = time.perf_counter()
     sim.run()
@@ -129,20 +129,19 @@ def run_bench(name, make_module, cycle_counts, setup=None):
     p(f'\n{"=" * 60}')
     p(f'  {name}')
     p(f'{"=" * 60}')
-    p(f'{"Cycles":>10}  {"Python":>10}  {"iverilog":>12}  {"Ratio":>8}')
-    p(f'{"-"*10}  {"-"*10}  {"-"*12}  {"-"*8}')
+    p(f'{"Cycles":>10}  {"Python":>10}  {"vvp only":>10}  {"Ratio":>8}')
+    p(f'{"-"*10}  {"-"*10}  {"-"*10}  {"-"*8}')
 
     for n in cycle_counts:
         py = bench_python(make_module, n, setup)
         iv_compile, iv_run = bench_iverilog(make_module, n)
         if iv_run is None:
-            p(f'{n:>10}  {py:>10.4f}s  {"ERROR":>12}  {"N/A":>8}')
+            p(f'{n:>10}  {py:>10.4f}s  {"ERROR":>10}  {"N/A":>8}')
             continue
-        iv_total = iv_compile + iv_run
-        ratio = py / iv_total if iv_total > 0 else float('inf')
-        p(f'{n:>10}  {py:>10.4f}s  {iv_total:>10.4f}s  {ratio:>7.1f}x')
+        ratio = py / iv_run if iv_run > 0 else float('inf')
+        p(f'{n:>10}  {py:>10.4f}s  {iv_run:>10.4f}s  {ratio:>7.1f}x')
         p(f'{"":>10}  {fmt_rate(n, py):>10}  '
-              f'compile {iv_compile:.3f}s + run {iv_run:.3f}s')
+              f'iverilog compile {iv_compile:.3f}s')
 
 
 def spi_setup(mod):

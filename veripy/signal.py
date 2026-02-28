@@ -112,6 +112,7 @@ class Signal:
     def __bool__(self):         return self._val != 0
     def __int__(self):          return self._val
     def __index__(self):        return self._val
+    def __hash__(self):         return id(self)
     def __repr__(self):         return f"Signal({self.name}={self._val}, w={self.width})"
 
     # --- non-blocking assignment ---
