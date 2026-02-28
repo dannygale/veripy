@@ -77,6 +77,9 @@ class Module:
         self._behavioral = None    # optional behavioral model function
         if params is not None:
             self._params = params
+            for name, val in params.items():
+                if isinstance(val, Parameter) and val.name is None:
+                    val.name = name
         else:
             # Auto-capture constructor kwargs as Verilog parameters
             import inspect

@@ -247,7 +247,7 @@ class TestVerilogEmission(unittest.TestCase):
         a = simple_alu(width=16)
         v = a.to_verilog()
         self.assertIn('module simple_alu', v)
-        self.assertIn('[15:0] a', v)
+        self.assertIn('[width-1:0] a', v)
         self.assertIn('out = (a + b)', v)
         self.assertIn('out = (a - b)', v)
 
@@ -257,7 +257,7 @@ class TestVerilogEmission(unittest.TestCase):
         v = VerilogEmitter(d).emit_all()
         self.assertIn('module simple_alu', v)
         self.assertIn('module datapath', v)
-        self.assertIn('simple_alu #(.width(8)) alu', v)
+        self.assertIn('simple_alu #(.width(width)) alu', v)
 
 
 class TestClassBasedUnchanged(unittest.TestCase):
@@ -340,8 +340,8 @@ class TestParamExpr(unittest.TestCase):
     def test_param_expr_verilog(self):
         a = wide_alu(width=8)
         v = a.to_verilog()
-        self.assertIn('[8:0] carry', v)
-        self.assertIn('[6:0] half', v)
+        self.assertIn('[width+1-1:0] carry', v)
+        self.assertIn('[width-1-1:0] half', v)
 
 
 class TestFixedWidth(unittest.TestCase):

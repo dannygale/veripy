@@ -121,11 +121,23 @@ def module(func):
     def factory(**kwargs):
         resolved_params = {k: kwargs.get(k, v) for k, v in param_names.items()}
 
+        # Create Parameter objects so signals get _width_param
+        param_objs = {}
+        call_params = {}
+        for k, v in resolved_params.items():
+            if is_param(v):
+                call_params[k] = v
+            else:
+                p = Parameter(v)
+                p.name = k
+                param_objs[k] = p
+                call_params[k] = p
+
         ctx = ModuleContext()
         prev_ctx = _get_context()
         _set_context(ctx)
         try:
-            local_vars = rewritten_func(**resolved_params)
+            local_vars = rewritten_func(**call_params)
         finally:
             _set_context(prev_ctx)
 

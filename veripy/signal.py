@@ -253,7 +253,7 @@ class Interface:
     def _sig_def(val):
         """Extract (kind, width) from a Signal or legacy tuple, or return None."""
         if isinstance(val, Signal) and val._kind in ('input', 'output'):
-            return val._kind, val.width
+            return val._kind, val._width_param if val._width_param is not None else val.width
         if isinstance(val, tuple) and len(val) == 2 and val[0] in ('input', 'output'):
             return val
         return None

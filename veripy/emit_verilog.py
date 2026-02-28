@@ -10,6 +10,7 @@ def _to_snake(name):
     return re.sub(r'(?<=[a-z0-9])(?=[A-Z])', '_', name).lower()
 
 from .signal import Signal, Mem, Interface
+from .parameter import is_param
 
 
 # Python AST op → Verilog operator
@@ -91,7 +92,7 @@ class VerilogEmitter:
         params = self.mod._params
         if params:
             lines = [f'module {self.name} #(']
-            param_lines = [f'    parameter {name} = {val}' for name, val in params.items()]
+            param_lines = [f'    parameter {name} = {val.default if is_param(val) else val}' for name, val in params.items()]
             lines.append(',\n'.join(param_lines))
             lines.append(') (')
         else:
@@ -143,7 +144,11 @@ class VerilogEmitter:
                 if sig._kind in ('input', 'output'):
                     ports.append(f'.{port_name}({sub_name}_{port_name})')
             if sub._params:
-                param_list = ', '.join(f'.{k}({v})' for k, v in sub._params.items())
+                def _pval(v):
+                    if is_param(v):
+                        return v.name
+                    return v
+                param_list = ', '.join(f'.{k}({_pval(v)})' for k, v in sub._params.items())
                 lines.append(f'    {mod_type} #({param_list}) {inst_name} (')
             else:
                 lines.append(f'    {mod_type} {inst_name} (')
@@ -182,6 +187,8 @@ class VerilogEmitter:
     def _width_str(self, sig):
         if sig.width == 1:
             return ''
+        if sig._width_param is not None:
+            return f'[{sig._width_param.name}-1:0] '
         return f'[{sig.width - 1}:0] '
 
     # --- comb blocks → assign or always @(*) ---
