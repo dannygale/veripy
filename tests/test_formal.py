@@ -4,6 +4,9 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
 from veripy import Module, Input, Output, Register
+from veripy.sim import SimEngine
+
+T = 10
 
 
 class Counter(Module):
@@ -31,18 +34,30 @@ class TestAssertAlways(unittest.TestCase):
         @c.assert_always(c.clock)
         def always_true():
             return True
-        c.reset.set(1); c.tick(); c.reset.set(0)
-        c.enable.set(1)
-        c.simulate(5)  # should not raise
+        sim = SimEngine(c)
+        sim.clock(c.clock, T)
+        @sim.initial
+        def _():
+            c.reset.set(1); yield T; c.reset.set(0)
+            c.enable.set(1)
+            for _ in range(5):
+                yield T
+        sim.run()  # should not raise
 
     def test_failing_assertion(self):
         c = Counter(n=4)
         @c.assert_always(c.clock)
         def under_three():
             return c.count < 3
-        c.reset.set(1); c.enable.set(1); c.tick(); c.reset.set(0)
+        sim = SimEngine(c)
+        sim.clock(c.clock, T)
+        @sim.initial
+        def _():
+            c.reset.set(1); c.enable.set(1); yield T; c.reset.set(0)
+            for _ in range(10):
+                yield T
         with self.assertRaises(AssertionError) as ctx:
-            c.simulate(10)
+            sim.run()
         self.assertIn('under_three', str(ctx.exception))
 
 
@@ -52,8 +67,14 @@ class TestCover(unittest.TestCase):
         @c.cover(c.clock)
         def reaches_three():
             return c.count == 3
-        c.reset.set(1); c.enable.set(1); c.tick(); c.reset.set(0)
-        c.simulate(5)
+        sim = SimEngine(c)
+        sim.clock(c.clock, T)
+        @sim.initial
+        def _():
+            c.reset.set(1); c.enable.set(1); yield T; c.reset.set(0)
+            for _ in range(5):
+                yield T
+        sim.run()
         self.assertTrue(c._covers[0][2][0])
 
     def test_cover_not_hit(self):
@@ -61,8 +82,14 @@ class TestCover(unittest.TestCase):
         @c.cover(c.clock)
         def reaches_twenty():
             return c.count == 20  # impossible for 4-bit
-        c.reset.set(1); c.enable.set(1); c.tick(); c.reset.set(0)
-        c.simulate(5)
+        sim = SimEngine(c)
+        sim.clock(c.clock, T)
+        @sim.initial
+        def _():
+            c.reset.set(1); c.enable.set(1); yield T; c.reset.set(0)
+            for _ in range(5):
+                yield T
+        sim.run()
         self.assertFalse(c._covers[0][2][0])
 
 

@@ -62,18 +62,23 @@ class Datapath(Module):
 
 if __name__ == '__main__':
     from veripy.emit_verilog import VerilogEmitter
+    from veripy.sim import SimEngine
 
     d = Datapath(width=8)
-    d.reset._val = 1; d.tick(); d.reset._val = 0
+    sim = SimEngine(d)
+    sim.clock(d.clock, 10)
 
-    print("=== Simulation ===")
-    for i in range(6):
-        d.a._val = (i + 1) * 10
-        d.b._val = i + 1
-        d.op._val = i % 2
-        d.tick()
-        print(f"  cycle {i}: a={d.a._val:3d} b={d.b._val} op={'ADD' if d.op._val==0 else 'SUB'} "
-              f"alu={d.alu.result._val:3d} piped={d.piped._val:3d}")
+    @sim.initial
+    def demo():
+        d.reset.set(1); yield 10; d.reset.set(0)
+        print("=== Simulation ===")
+        for i in range(6):
+            d.a.set((i + 1) * 10); d.b.set(i + 1); d.op.set(i % 2)
+            yield 10
+            print(f"  cycle {i}: a={int(d.a):3d} b={int(d.b)} op={'ADD' if int(d.op)==0 else 'SUB'} "
+                  f"alu={int(d.alu.result):3d} piped={int(d.piped):3d}")
+
+    sim.run()
 
     print("\n=== Generated Verilog (all modules) ===")
     print(VerilogEmitter(d).emit_all())

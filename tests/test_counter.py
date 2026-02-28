@@ -4,61 +4,104 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
 from examples.counter import Counter
+from veripy.sim import SimEngine
+
+T = 10  # clock period
 
 
 class TestCounterSim(unittest.TestCase):
-    def setUp(self):
-        self.c = Counter(n=4)
-        self.c.enable._val = 1
-
-    def _reset(self, cycles=1):
-        self.c.reset._val = 1
-        for _ in range(cycles):
-            self.c.tick()
-        self.c.reset._val = 0
-
     def test_reset(self):
-        self._reset()
-        self.assertEqual(self.c.counter._val, 0)
-        self.assertEqual(self.c.count._val, 0)
+        c = Counter(n=4)
+        sim = SimEngine(c)
+        sim.clock(c.clock, T)
+        @sim.initial
+        def _():
+            c.enable.set(1); c.reset.set(1)
+            yield T
+            c.reset.set(0)
+            self.assertEqual(int(c.counter), 0)
+            self.assertEqual(int(c.count), 0)
+        sim.run()
 
     def test_counts_up(self):
-        self._reset()
-        for i in range(1, 6):
-            self.c.tick()
-            self.assertEqual(self.c.counter._val, i)
+        c = Counter(n=4)
+        sim = SimEngine(c)
+        sim.clock(c.clock, T)
+        @sim.initial
+        def _():
+            c.enable.set(1); c.reset.set(1)
+            yield T
+            c.reset.set(0)
+            for i in range(1, 6):
+                yield T
+                self.assertEqual(int(c.counter), i)
+        sim.run()
 
     def test_wraps_at_width(self):
-        self._reset()
-        self.c.simulate(15)
-        self.assertEqual(self.c.counter._val, 15)
-        self.c.tick()
-        self.assertEqual(self.c.counter._val, 0)  # 4-bit wrap
+        c = Counter(n=4)
+        sim = SimEngine(c)
+        sim.clock(c.clock, T)
+        @sim.initial
+        def _():
+            c.enable.set(1); c.reset.set(1)
+            yield T
+            c.reset.set(0)
+            for _ in range(15):
+                yield T
+            self.assertEqual(int(c.counter), 15)
+            yield T
+            self.assertEqual(int(c.counter), 0)
+        sim.run()
 
     def test_enable_gate(self):
-        self._reset()
-        self.c.tick()
-        self.assertEqual(self.c.counter._val, 1)
-        self.c.enable._val = 0
-        self.c.tick()
-        self.c.tick()
-        self.assertEqual(self.c.counter._val, 1)  # frozen
-        self.c.enable._val = 1
-        self.c.tick()
-        self.assertEqual(self.c.counter._val, 2)  # resumes
+        c = Counter(n=4)
+        sim = SimEngine(c)
+        sim.clock(c.clock, T)
+        @sim.initial
+        def _():
+            c.enable.set(1); c.reset.set(1)
+            yield T
+            c.reset.set(0)
+            yield T
+            self.assertEqual(int(c.counter), 1)
+            c.enable.set(0)
+            yield T; yield T
+            self.assertEqual(int(c.counter), 1)
+            c.enable.set(1)
+            yield T
+            self.assertEqual(int(c.counter), 2)
+        sim.run()
 
     def test_output_tracks_counter(self):
-        self._reset()
-        for _ in range(5):
-            self.c.tick()
-            self.assertEqual(self.c.count._val, self.c.counter._val)
+        c = Counter(n=4)
+        sim = SimEngine(c)
+        sim.clock(c.clock, T)
+        @sim.initial
+        def _():
+            c.enable.set(1); c.reset.set(1)
+            yield T
+            c.reset.set(0)
+            for _ in range(5):
+                yield T
+                self.assertEqual(int(c.count), int(c.counter))
+        sim.run()
 
     def test_reset_during_count(self):
-        self._reset()
-        self.c.simulate(5)
-        self.assertNotEqual(self.c.counter._val, 0)
-        self._reset()
-        self.assertEqual(self.c.counter._val, 0)
+        c = Counter(n=4)
+        sim = SimEngine(c)
+        sim.clock(c.clock, T)
+        @sim.initial
+        def _():
+            c.enable.set(1); c.reset.set(1)
+            yield T
+            c.reset.set(0)
+            for _ in range(5):
+                yield T
+            self.assertNotEqual(int(c.counter), 0)
+            c.reset.set(1)
+            yield T
+            self.assertEqual(int(c.counter), 0)
+        sim.run()
 
 
 class TestCounterVerilog(unittest.TestCase):

@@ -4,67 +4,98 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
 from examples.datapath import ALU, Datapath
+from veripy.sim import SimEngine
+
+T = 10
 
 
 class TestALUSim(unittest.TestCase):
-    def setUp(self):
-        self.alu = ALU(width=8)
+    """ALU is purely combinational — just settle, no clock needed."""
 
     def test_add(self):
-        self.alu.a._val = 10; self.alu.b._val = 20; self.alu.op._val = 0
-        self.alu.tick()
-        self.assertEqual(self.alu.result._val, 30)
+        alu = ALU(width=8)
+        alu.a.set(10); alu.b.set(20); alu.op.set(0)
+        alu._settle_comb()
+        self.assertEqual(int(alu.result), 30)
 
     def test_sub(self):
-        self.alu.a._val = 50; self.alu.b._val = 20; self.alu.op._val = 1
-        self.alu.tick()
-        self.assertEqual(self.alu.result._val, 30)
+        alu = ALU(width=8)
+        alu.a.set(50); alu.b.set(20); alu.op.set(1)
+        alu._settle_comb()
+        self.assertEqual(int(alu.result), 30)
 
     def test_default_zero(self):
-        self.alu.a._val = 99; self.alu.b._val = 99; self.alu.op._val = 15
-        self.alu.tick()
-        self.assertEqual(self.alu.result._val, 0)
+        alu = ALU(width=8)
+        alu.a.set(99); alu.b.set(99); alu.op.set(15)
+        alu._settle_comb()
+        self.assertEqual(int(alu.result), 0)
 
 
 class TestDatapathSim(unittest.TestCase):
-    def setUp(self):
-        self.d = Datapath(width=8)
-        self.d.reset._val = 1; self.d.tick(); self.d.reset._val = 0
-
     def test_alu_wiring(self):
-        """Parent inputs propagate to child ALU."""
-        self.d.a._val = 7; self.d.b._val = 3; self.d.op._val = 0
-        self.d.tick()
-        self.assertEqual(self.d.alu.result._val, 10)
+        d = Datapath(width=8)
+        sim = SimEngine(d)
+        sim.clock(d.clock, T)
+        @sim.initial
+        def _():
+            d.reset.set(1); yield T; d.reset.set(0)
+            d.a.set(7); d.b.set(3); d.op.set(0)
+            yield T
+            self.assertEqual(int(d.alu.result), 10)
+        sim.run()
 
     def test_pipeline_delay(self):
-        """Result appears one cycle after ALU computes."""
-        self.d.a._val = 10; self.d.b._val = 5; self.d.op._val = 0
-        self.d.tick()
-        # ALU computed 15 this cycle, piped captures it
-        self.assertEqual(self.d.piped._val, 15)
-        # Change inputs — piped still holds previous result until next tick
-        self.d.a._val = 100; self.d.b._val = 1; self.d.op._val = 0
-        alu_before_tick = self.d.alu.result._val  # still 15 from last settle
-        self.d.tick()
-        self.assertEqual(self.d.piped._val, 101)
+        d = Datapath(width=8)
+        sim = SimEngine(d)
+        sim.clock(d.clock, T)
+        @sim.initial
+        def _():
+            d.reset.set(1); yield T; d.reset.set(0)
+            d.a.set(10); d.b.set(5); d.op.set(0)
+            yield T
+            self.assertEqual(int(d.piped), 15)
+            d.a.set(100); d.b.set(1); d.op.set(0)
+            yield T
+            self.assertEqual(int(d.piped), 101)
+        sim.run()
 
     def test_reset_clears_piped(self):
-        self.d.a._val = 10; self.d.b._val = 5; self.d.op._val = 0
-        self.d.tick()
-        self.assertNotEqual(self.d.piped._val, 0)
-        self.d.reset._val = 1; self.d.tick()
-        self.assertEqual(self.d.piped._val, 0)
+        d = Datapath(width=8)
+        sim = SimEngine(d)
+        sim.clock(d.clock, T)
+        @sim.initial
+        def _():
+            d.reset.set(1); yield T; d.reset.set(0)
+            d.a.set(10); d.b.set(5); d.op.set(0)
+            yield T
+            self.assertNotEqual(int(d.piped), 0)
+            d.reset.set(1); yield T
+            self.assertEqual(int(d.piped), 0)
+        sim.run()
 
     def test_output_tracks_piped(self):
-        self.d.a._val = 20; self.d.b._val = 3; self.d.op._val = 1
-        self.d.tick()
-        self.assertEqual(self.d.result._val, self.d.piped._val)
+        d = Datapath(width=8)
+        sim = SimEngine(d)
+        sim.clock(d.clock, T)
+        @sim.initial
+        def _():
+            d.reset.set(1); yield T; d.reset.set(0)
+            d.a.set(20); d.b.set(3); d.op.set(1)
+            yield T
+            self.assertEqual(int(d.result), int(d.piped))
+        sim.run()
 
     def test_sub_through_pipeline(self):
-        self.d.a._val = 50; self.d.b._val = 8; self.d.op._val = 1
-        self.d.tick()
-        self.assertEqual(self.d.piped._val, 42)
+        d = Datapath(width=8)
+        sim = SimEngine(d)
+        sim.clock(d.clock, T)
+        @sim.initial
+        def _():
+            d.reset.set(1); yield T; d.reset.set(0)
+            d.a.set(50); d.b.set(8); d.op.set(1)
+            yield T
+            self.assertEqual(int(d.piped), 42)
+        sim.run()
 
 
 class TestDatapathVerilog(unittest.TestCase):
@@ -95,8 +126,6 @@ class TestDatapathVerilog(unittest.TestCase):
         self.assertIn('piped <= alu_result;', self.v)
 
     def test_no_alu_internals_in_parent(self):
-        """Parent should not contain ALU's always @(*) block."""
-        # The ALU's comb logic lives in the ALU module, not the parent
         self.assertNotIn('(a + b)', self.v)
 
 
@@ -107,7 +136,6 @@ class TestEmitAll(unittest.TestCase):
         full = VerilogEmitter(d).emit_all()
         self.assertIn('module alu', full)
         self.assertIn('module datapath', full)
-        # ALU definition should come before datapath
         self.assertLess(full.index('module alu'), full.index('module datapath'))
 
 

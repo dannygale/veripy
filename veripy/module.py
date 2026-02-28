@@ -75,7 +75,6 @@ class Module:
         self._covers = []          # [(clock_signal, func, hit), ...]
         self._timing = []          # [(constraint_type, kwargs), ...]
         self._behavioral = None    # optional behavioral model function
-        self._mode = 'sim'         # 'sim' or 'behavioral'
         if params is not None:
             self._params = params
         else:
@@ -353,40 +352,6 @@ class Module:
             p._finalize()
         from .emit_verilog import VerilogEmitter
         return VerilogEmitter(self, module_name).emit()
-
-    # --- convenience for direct sim / unit tests ---
-    def tick(self):
-        """Advance one clock cycle.
-
-        In 'sim' mode (default): runs comb + posedge blocks (cycle-accurate).
-        In 'behavioral' mode: runs the @behavioral function instead (fast emulation).
-        """
-        if self._mode == 'behavioral' and self._behavioral is not None:
-            self._behavioral()
-            for sub in self._submodules().values():
-                if sub._mode == 'behavioral' and sub._behavioral is not None:
-                    sub._behavioral()
-                else:
-                    sub.tick()
-            return
-
-        subs = self._submodules()
-        self._settle_comb()
-        for _edges, method in self._always_blocks:
-            method()
-        for sub in subs.values():
-            for _edges, method in sub._always_blocks:
-                method()
-        self._apply_nba()
-        for sub in subs.values():
-            sub._apply_nba()
-        self._settle_comb()
-        self._check_assertions()
-
-    def simulate(self, cycles):
-        """Run tick() for N cycles."""
-        for _ in range(cycles):
-            self.tick()
 
     def _check_assertions(self):
         """Check assert_always properties and update cover points."""

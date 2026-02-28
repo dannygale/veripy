@@ -99,6 +99,16 @@ class SimEngine:
         self._schedule(0, gen, fn)
         return fn
 
+    def clock(self, signal, period=10):
+        """Register a clock driver. Toggles signal every period/2 time units."""
+        half = period // 2
+        @self.always
+        def _clk():
+            signal.set(0)
+            yield half
+            signal.set(1)
+            yield half
+
     def finish(self):
         """Stop the simulation (like $finish)."""
         self._finished = True
@@ -156,7 +166,36 @@ class SimEngine:
 
             mod._settle_comb()
 
+        if triggered:
+            mod._check_assertions()
+
         mod._snapshot_prev()
 
         if self._vcd:
             self._vcd.record(self.time)
+
+
+class BehavioralSim:
+    """Fast behavioral simulator that runs @self.behavioral functions.
+
+    Falls back to cycle-accurate (_settle_comb + posedge) for modules
+    without a behavioral model.
+    """
+
+    def __init__(self, module):
+        self.mod = module
+
+    def step(self):
+        """Advance one step: call behavioral model or fall back to sim."""
+        mod = self.mod
+        if mod._behavioral is not None:
+            mod._behavioral()
+        else:
+            mod._settle_comb()
+            triggered = mod._check_edges()
+            if triggered:
+                for _edges, method in triggered:
+                    method()
+                mod._apply_nba()
+                mod._settle_comb()
+            mod._snapshot_prev()

@@ -29,12 +29,12 @@ class TestInterfaceSimulation(unittest.TestCase):
     def test_read_interface_signal(self):
         c = Consumer()
         c.bus.data.set(42)
-        c.tick()
+        c._settle_comb()
         self.assertEqual(int(c.out), 42)
 
     def test_write_interface_signal(self):
         c = Consumer()
-        c.tick()
+        c._settle_comb()
         self.assertEqual(int(c.bus.ready), 1)
 
     def test_signals_flattened(self):

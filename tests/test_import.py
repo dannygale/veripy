@@ -4,7 +4,9 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
 from veripy.import_verilog import import_verilog, import_project, parse, tokenize
+from veripy.sim import SimEngine
 
+T = 10
 
 COUNTER_V = """\
 module counter #(
@@ -157,13 +159,15 @@ class TestCodeGen(unittest.TestCase):
         exec(py, ns)
         Counter = ns['Counter']
         c = Counter(n=4)
-        c.enable.set(1)
-        c.reset.set(1)
-        c.tick()
-        c.reset.set(0)
-        for _ in range(5):
-            c.tick()
-        self.assertEqual(int(c.count), 5)
+        sim = SimEngine(c)
+        sim.clock(c.clock, T)
+        @sim.initial
+        def _():
+            c.enable.set(1); c.reset.set(1); yield T; c.reset.set(0)
+            for _ in range(5):
+                yield T
+            self.assertEqual(int(c.count), 5)
+        sim.run()
 
     def test_hierarchy_generates(self):
         py = import_verilog(HIER_V)
@@ -179,10 +183,15 @@ class TestCodeGen(unittest.TestCase):
         exec(py, ns)
         Datapath = ns['Datapath']
         d = Datapath(width=8)
-        d.a.set(10); d.b.set(3); d.op.set(0)
-        d.reset.set(1); d.tick(); d.reset.set(0)
-        d.tick()
-        self.assertEqual(int(d.result), 13)
+        sim = SimEngine(d)
+        sim.clock(d.clock, T)
+        @sim.initial
+        def _():
+            d.a.set(10); d.b.set(3); d.op.set(0)
+            d.reset.set(1); yield T; d.reset.set(0)
+            yield T
+            self.assertEqual(int(d.result), 13)
+        sim.run()
 
     def test_instance_wires_not_declared(self):
         py = import_verilog(HIER_V)
@@ -216,7 +225,7 @@ endmodule
         exec(import_verilog(self.PARAM_V), ns)
         m = ns['Alu'](width=16)
         m.a.set(1000); m.b.set(234)
-        m.tick()
+        m._settle_comb()
         self.assertEqual(int(m.result), 1234)
 
     def test_parametric_instance_override(self):
@@ -314,7 +323,6 @@ module top (
 endmodule
 """)
             result = import_project(d)
-            # Write to package and import
             for rel, src in result.items():
                 with open(os.path.join(pkg, rel), 'w') as f:
                     f.write(src)
@@ -324,7 +332,7 @@ endmodule
                 from proj.top import Top
                 t = Top()
                 t.x.set(10); t.y.set(20)
-                t.tick()
+                t._settle_comb()
                 self.assertEqual(int(t.z), 30)
             finally:
                 sys.path.remove(d)

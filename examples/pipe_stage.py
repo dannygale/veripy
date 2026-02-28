@@ -74,19 +74,26 @@ class ForwardMux(Module):
 
 
 if __name__ == '__main__':
+    from veripy.sim import SimEngine
+
     # --- PipeReg demo ---
     print("=== PipeReg Simulation ===")
     pr = PipeReg(width=8)
-    pr.d._val = 0xAB
+    sim = SimEngine(pr)
+    sim.clock(pr.clock, 10)
 
-    for i in range(8):
-        pr.reset._val = 1 if i < 1 else 0
-        pr.flush._val = 1 if i == 4 else 0
-        pr.stall._val = 1 if i == 3 else 0
-        pr.d._val = (i * 0x11) & 0xFF
-        pr.tick()
-        print(f"  cycle {i}: rst={pr.reset._val} flush={pr.flush._val} "
-              f"stall={pr.stall._val} d=0x{pr.d._val:02x} q=0x{pr.q._val:02x}")
+    @sim.initial
+    def pipe_demo():
+        for i in range(8):
+            pr.reset.set(1 if i < 1 else 0)
+            pr.flush.set(1 if i == 4 else 0)
+            pr.stall.set(1 if i == 3 else 0)
+            pr.d.set((i * 0x11) & 0xFF)
+            yield 10
+            print(f"  cycle {i}: rst={int(pr.reset)} flush={int(pr.flush)} "
+                  f"stall={int(pr.stall)} d=0x{int(pr.d):02x} q=0x{int(pr.q):02x}")
+
+    sim.run()
 
     print("\n=== PipeReg Verilog ===")
     print(pr.to_verilog(module_name='pipe_reg'))
@@ -94,25 +101,25 @@ if __name__ == '__main__':
     # --- ForwardMux demo ---
     print("\n=== ForwardMux Simulation ===")
     fm = ForwardMux(width=8)
-    fm.reg_val._val = 0x10
-    fm.ex_val._val  = 0xEE
-    fm.mem_val._val = 0xDD
-    fm.rs_addr._val = 3
+    fm.reg_val.set(0x10)
+    fm.ex_val.set(0xEE)
+    fm.mem_val.set(0xDD)
+    fm.rs_addr.set(3)
 
     tests = [
-        ("no match",       0, 0, 5, 5),   # no forward
-        ("EX match",       1, 0, 3, 5),   # EX forward
-        ("MEM match",      0, 1, 5, 3),   # MEM forward
-        ("both match",     1, 1, 3, 3),   # EX wins (priority)
-        ("EX match no we", 0, 0, 3, 5),   # match but no write-enable
+        ("no match",       0, 0, 5, 5),
+        ("EX match",       1, 0, 3, 5),
+        ("MEM match",      0, 1, 5, 3),
+        ("both match",     1, 1, 3, 3),
+        ("EX match no we", 0, 0, 3, 5),
     ]
     for desc, ex_we, mem_we, ex_rd, mem_rd in tests:
-        fm.ex_we._val = ex_we
-        fm.mem_we._val = mem_we
-        fm.ex_rd_addr._val = ex_rd
-        fm.mem_rd_addr._val = mem_rd
-        fm.tick()
-        print(f"  {desc:20s}: out=0x{fm.out._val:02x} fwd_sel={fm.fwd_sel._val}")
+        fm.ex_we.set(ex_we)
+        fm.mem_we.set(mem_we)
+        fm.ex_rd_addr.set(ex_rd)
+        fm.mem_rd_addr.set(mem_rd)
+        fm._settle_comb()
+        print(f"  {desc:20s}: out=0x{int(fm.out):02x} fwd_sel={int(fm.fwd_sel)}")
 
     print("\n=== ForwardMux Verilog ===")
     print(fm.to_verilog(module_name='forward_mux'))

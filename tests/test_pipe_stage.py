@@ -4,112 +4,131 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
 from examples.pipe_stage import PipeReg, ForwardMux
+from veripy.sim import SimEngine
+
+T = 10
 
 
 class TestPipeRegSim(unittest.TestCase):
-    def setUp(self):
-        self.pr = PipeReg(width=8)
-
-    def _reset(self):
-        self.pr.reset._val = 1
-        self.pr.tick()
-        self.pr.reset._val = 0
-
     def test_reset_clears(self):
-        self.pr.d._val = 0xFF
-        self.pr.tick()
-        self._reset()
-        self.assertEqual(self.pr.q._val, 0)
+        pr = PipeReg(width=8)
+        sim = SimEngine(pr)
+        sim.clock(pr.clock, T)
+        @sim.initial
+        def _():
+            pr.d.set(0xFF); yield T
+            pr.reset.set(1); yield T
+            self.assertEqual(int(pr.q), 0)
+        sim.run()
 
     def test_captures_data(self):
-        self._reset()
-        self.pr.d._val = 0xAB
-        self.pr.tick()
-        self.assertEqual(self.pr.q._val, 0xAB)
+        pr = PipeReg(width=8)
+        sim = SimEngine(pr)
+        sim.clock(pr.clock, T)
+        @sim.initial
+        def _():
+            pr.reset.set(1); yield T; pr.reset.set(0)
+            pr.d.set(0xAB); yield T
+            self.assertEqual(int(pr.q), 0xAB)
+        sim.run()
 
     def test_stall_freezes(self):
-        self._reset()
-        self.pr.d._val = 0x11
-        self.pr.tick()
-        self.assertEqual(self.pr.q._val, 0x11)
-        self.pr.stall._val = 1
-        self.pr.d._val = 0x22
-        self.pr.tick()
-        self.assertEqual(self.pr.q._val, 0x11)  # frozen
+        pr = PipeReg(width=8)
+        sim = SimEngine(pr)
+        sim.clock(pr.clock, T)
+        @sim.initial
+        def _():
+            pr.reset.set(1); yield T; pr.reset.set(0)
+            pr.d.set(0x11); yield T
+            self.assertEqual(int(pr.q), 0x11)
+            pr.stall.set(1); pr.d.set(0x22); yield T
+            self.assertEqual(int(pr.q), 0x11)  # frozen
+        sim.run()
 
     def test_stall_release(self):
-        self._reset()
-        self.pr.d._val = 0x11
-        self.pr.stall._val = 1
-        self.pr.tick()
-        self.assertEqual(self.pr.q._val, 0)  # stalled, still 0
-        self.pr.stall._val = 0
-        self.pr.tick()
-        self.assertEqual(self.pr.q._val, 0x11)
+        pr = PipeReg(width=8)
+        sim = SimEngine(pr)
+        sim.clock(pr.clock, T)
+        @sim.initial
+        def _():
+            pr.reset.set(1); yield T; pr.reset.set(0)
+            pr.d.set(0x11); pr.stall.set(1); yield T
+            self.assertEqual(int(pr.q), 0)  # stalled
+            pr.stall.set(0); yield T
+            self.assertEqual(int(pr.q), 0x11)
+        sim.run()
 
     def test_flush_clears(self):
-        self._reset()
-        self.pr.d._val = 0xCC
-        self.pr.tick()
-        self.assertEqual(self.pr.q._val, 0xCC)
-        self.pr.flush._val = 1
-        self.pr.tick()
-        self.assertEqual(self.pr.q._val, 0)
-        self.pr.flush._val = 0
+        pr = PipeReg(width=8)
+        sim = SimEngine(pr)
+        sim.clock(pr.clock, T)
+        @sim.initial
+        def _():
+            pr.reset.set(1); yield T; pr.reset.set(0)
+            pr.d.set(0xCC); yield T
+            self.assertEqual(int(pr.q), 0xCC)
+            pr.flush.set(1); yield T
+            self.assertEqual(int(pr.q), 0)
+        sim.run()
 
     def test_flush_priority_over_data(self):
-        self._reset()
-        self.pr.d._val = 0xFF
-        self.pr.flush._val = 1
-        self.pr.tick()
-        self.assertEqual(self.pr.q._val, 0)  # flush wins
+        pr = PipeReg(width=8)
+        sim = SimEngine(pr)
+        sim.clock(pr.clock, T)
+        @sim.initial
+        def _():
+            pr.reset.set(1); yield T; pr.reset.set(0)
+            pr.d.set(0xFF); pr.flush.set(1); yield T
+            self.assertEqual(int(pr.q), 0)  # flush wins
+        sim.run()
 
 
 class TestForwardMuxSim(unittest.TestCase):
-    def setUp(self):
-        self.fm = ForwardMux(width=8)
-        self.fm.reg_val._val = 0x10
-        self.fm.ex_val._val = 0xEE
-        self.fm.mem_val._val = 0xDD
-        self.fm.rs_addr._val = 3
+    """ForwardMux is purely combinational."""
+
+    def _make(self):
+        fm = ForwardMux(width=8)
+        fm.reg_val.set(0x10)
+        fm.ex_val.set(0xEE)
+        fm.mem_val.set(0xDD)
+        fm.rs_addr.set(3)
+        return fm
 
     def test_no_forward(self):
-        self.fm.ex_rd_addr._val = 5
-        self.fm.mem_rd_addr._val = 5
-        self.fm.tick()
-        self.assertEqual(self.fm.out._val, 0x10)
-        self.assertEqual(self.fm.fwd_sel._val, 0)
+        fm = self._make()
+        fm.ex_rd_addr.set(5); fm.mem_rd_addr.set(5)
+        fm._settle_comb()
+        self.assertEqual(int(fm.out), 0x10)
+        self.assertEqual(int(fm.fwd_sel), 0)
 
     def test_ex_forward(self):
-        self.fm.ex_we._val = 1
-        self.fm.ex_rd_addr._val = 3
-        self.fm.tick()
-        self.assertEqual(self.fm.out._val, 0xEE)
-        self.assertEqual(self.fm.fwd_sel._val, 1)
+        fm = self._make()
+        fm.ex_we.set(1); fm.ex_rd_addr.set(3)
+        fm._settle_comb()
+        self.assertEqual(int(fm.out), 0xEE)
+        self.assertEqual(int(fm.fwd_sel), 1)
 
     def test_mem_forward(self):
-        self.fm.mem_we._val = 1
-        self.fm.mem_rd_addr._val = 3
-        self.fm.tick()
-        self.assertEqual(self.fm.out._val, 0xDD)
-        self.assertEqual(self.fm.fwd_sel._val, 2)
+        fm = self._make()
+        fm.mem_we.set(1); fm.mem_rd_addr.set(3)
+        fm._settle_comb()
+        self.assertEqual(int(fm.out), 0xDD)
+        self.assertEqual(int(fm.fwd_sel), 2)
 
     def test_ex_priority_over_mem(self):
-        self.fm.ex_we._val = 1
-        self.fm.mem_we._val = 1
-        self.fm.ex_rd_addr._val = 3
-        self.fm.mem_rd_addr._val = 3
-        self.fm.tick()
-        self.assertEqual(self.fm.out._val, 0xEE)  # EX wins
-        self.assertEqual(self.fm.fwd_sel._val, 1)
+        fm = self._make()
+        fm.ex_we.set(1); fm.mem_we.set(1)
+        fm.ex_rd_addr.set(3); fm.mem_rd_addr.set(3)
+        fm._settle_comb()
+        self.assertEqual(int(fm.out), 0xEE)  # EX wins
+        self.assertEqual(int(fm.fwd_sel), 1)
 
     def test_match_without_we(self):
-        self.fm.ex_rd_addr._val = 3
-        self.fm.mem_rd_addr._val = 3
-        # Both match but neither has write-enable
-        self.fm.tick()
-        self.assertEqual(self.fm.out._val, 0x10)  # no forward
-        self.assertEqual(self.fm.fwd_sel._val, 0)
+        fm = self._make()
+        fm.ex_rd_addr.set(3); fm.mem_rd_addr.set(3)
+        fm._settle_comb()
+        self.assertEqual(int(fm.out), 0x10)  # no forward
+        self.assertEqual(int(fm.fwd_sel), 0)
 
 
 class TestPipeRegVerilog(unittest.TestCase):
@@ -145,13 +164,11 @@ class TestForwardMuxVerilog(unittest.TestCase):
         self.assertIn('always @(*)', self.v)
 
     def test_blocking_assign(self):
-        # Comb blocks should use = not <=
         self.assertIn('out = ex_val;', self.v)
         self.assertIn('out = mem_val;', self.v)
         self.assertIn('out = reg_val;', self.v)
 
     def test_priority_structure(self):
-        # EX check should come before MEM check
         ex_pos = self.v.index('ex_we')
         mem_pos = self.v.index('mem_we')
         self.assertLess(ex_pos, mem_pos)

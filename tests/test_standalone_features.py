@@ -8,6 +8,9 @@ from veripy.context import (comb, posedge, negedge, always, fsm,
                             create_clock, max_delay, false_path)
 from veripy.decorator import module
 from veripy import posedge as posedge_edge, negedge as negedge_edge
+from veripy.sim import SimEngine
+
+T = 10
 
 
 # --- Module definitions ---
@@ -132,18 +135,24 @@ class TestAlways(unittest.TestCase):
 
     def test_async_reset(self):
         m = async_reset_ff()
-        m.rst_n.set(0)
-        m.clk.set(0)
-        m.d.set(42)
-        m.tick()
-        self.assertEqual(int(m.q), 0)
+        sim = SimEngine(m)
+        @sim.initial
+        def _():
+            m.rst_n.set(0); m.clk.set(0); m.d.set(42)
+            yield 1
+            self.assertEqual(int(m.q), 0)
+        sim.run()
 
     def test_async_reset_then_capture(self):
         m = async_reset_ff()
-        m.rst_n.set(1)
-        m.d.set(99)
-        m.tick()
-        self.assertEqual(int(m.q), 99)
+        sim = SimEngine(m)
+        @sim.initial
+        def _():
+            m.rst_n.set(1); m.d.set(99)
+            m.clk.set(0); yield 1
+            m.clk.set(1); yield 1
+            self.assertEqual(int(m.q), 99)
+        sim.run()
 
     def test_always_verilog(self):
         m = async_reset_ff()
@@ -156,22 +165,25 @@ class TestFSM(unittest.TestCase):
 
     def test_starts_in_first_state(self):
         m = traffic_light()
-        m.reset.set(1)
-        m.tick()
-        self.assertEqual(int(m.color), 0)  # RED → color=0
+        sim = SimEngine(m)
+        sim.clock(m.clock, T)
+        @sim.initial
+        def _():
+            m.reset.set(1); yield T
+            self.assertEqual(int(m.color), 0)  # RED → color=0
+        sim.run()
 
     def test_transitions(self):
         m = traffic_light()
-        m.reset.set(1)
-        m.tick()
-        m.reset.set(0)
-        m.go.set(1)
-        m.tick()  # RED → GREEN (state transitions)
-        m.go.set(0)
-        m.tick()  # GREEN → YELLOW (auto-transition)
-        # After GREEN, color should have been 1 at some point
-        # Now in YELLOW, color = 2
-        self.assertEqual(int(m.color), 2)
+        sim = SimEngine(m)
+        sim.clock(m.clock, T)
+        @sim.initial
+        def _():
+            m.reset.set(1); yield T; m.reset.set(0)
+            m.go.set(1); yield T  # RED → GREEN
+            m.go.set(0); yield T  # GREEN → YELLOW
+            self.assertEqual(int(m.color), 2)
+        sim.run()
 
     def test_fsm_has_state_register(self):
         m = traffic_light()
@@ -189,9 +201,13 @@ class TestAssertAlways(unittest.TestCase):
 
     def test_assertion_passes(self):
         m = bounded_counter()
-        for _ in range(10):
-            m.tick()
-        # Should not raise — count < 16 for first 15 ticks
+        sim = SimEngine(m)
+        sim.clock(m.clock, T)
+        @sim.initial
+        def _():
+            for _ in range(10):
+                yield T
+        sim.run()  # should not raise
 
 
 class TestCover(unittest.TestCase):
@@ -203,9 +219,13 @@ class TestCover(unittest.TestCase):
 
     def test_cover_hit(self):
         m = bounded_counter()
-        for _ in range(6):
-            m.tick()
-        # Cover point should have been hit (count reached 5)
+        sim = SimEngine(m)
+        sim.clock(m.clock, T)
+        @sim.initial
+        def _():
+            for _ in range(6):
+                yield T
+        sim.run()
         self.assertTrue(m._covers[0][2][0])
 
 
@@ -229,25 +249,28 @@ class TestPipeline(unittest.TestCase):
 
     def test_pipeline_latency(self):
         m = pipe_adder(width=8)
-        m.a.set(3)
-        m.b.set(4)
-        m.reset.set(1)
-        m.tick()
-        m.reset.set(0)
-        m.tick()  # stage 0: 3+4=7
-        m.tick()  # stage 1: 7*2=14
-        self.assertEqual(int(m.out), 14)
+        sim = SimEngine(m)
+        sim.clock(m.clock, T)
+        @sim.initial
+        def _():
+            m.a.set(3); m.b.set(4)
+            m.reset.set(1); yield T; m.reset.set(0)
+            yield T  # stage 0: 3+4=7
+            yield T  # stage 1: 7*2=14
+            self.assertEqual(int(m.out), 14)
+        sim.run()
 
     def test_pipeline_reset(self):
         m = pipe_adder(width=8)
-        m.a.set(3)
-        m.b.set(4)
-        m.reset.set(0)
-        m.tick()
-        m.tick()
-        m.reset.set(1)
-        m.tick()
-        self.assertEqual(int(m.out), 0)
+        sim = SimEngine(m)
+        sim.clock(m.clock, T)
+        @sim.initial
+        def _():
+            m.a.set(3); m.b.set(4); m.reset.set(0)
+            yield T; yield T
+            m.reset.set(1); yield T
+            self.assertEqual(int(m.out), 0)
+        sim.run()
 
 
 class TestInterface(unittest.TestCase):
@@ -260,7 +283,7 @@ class TestInterface(unittest.TestCase):
 
     def test_interface_signal_access(self):
         m = peripheral()
-        m.tick()
+        m._settle_comb()
         self.assertEqual(int(m.bus.awready), 1)
 
     def test_interface_verilog(self):

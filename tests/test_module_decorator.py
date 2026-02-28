@@ -5,6 +5,9 @@ from veripy.signal import Input, Output, Register, Mem
 from veripy.context import comb, posedge, negedge
 from veripy.decorator import module
 from veripy.parameter import Parameter
+from veripy.sim import SimEngine
+
+T = 10
 
 
 # --- Module definitions (at module level so inspect.getsource works) ---
@@ -157,14 +160,17 @@ class TestModuleDecorator(unittest.TestCase):
 
     def test_counter_simulation(self):
         c = counter(width=4)
-        c.enable.set(1)
-        c.reset.set(1)
-        c.tick()
-        self.assertEqual(int(c.count), 0)
-        c.reset.set(0)
-        for _ in range(5):
-            c.tick()
-        self.assertEqual(int(c.count), 5)
+        sim = SimEngine(c)
+        sim.clock(c.clock, T)
+        @sim.initial
+        def _():
+            c.enable.set(1); c.reset.set(1); yield T
+            self.assertEqual(int(c.count), 0)
+            c.reset.set(0)
+            for _ in range(5):
+                yield T
+            self.assertEqual(int(c.count), 5)
+        sim.run()
 
     def test_counter_width(self):
         c = counter(width=4)
@@ -188,12 +194,15 @@ class TestModuleDecorator(unittest.TestCase):
     def test_multiple_instances_independent(self):
         c1 = counter(width=4)
         c2 = counter(width=4)
-        c1.enable.set(1)
-        c1.reset.set(0)
-        c1.tick()
-        c1.tick()
-        self.assertEqual(int(c1.count), 2)
-        self.assertEqual(int(c2.count), 0)
+        sim = SimEngine(c1)
+        sim.clock(c1.clock, T)
+        @sim.initial
+        def _():
+            c1.enable.set(1); c1.reset.set(0)
+            yield T; yield T
+            self.assertEqual(int(c1.count), 2)
+            self.assertEqual(int(c2.count), 0)
+        sim.run()
 
 
 class TestSubModules(unittest.TestCase):
@@ -201,20 +210,17 @@ class TestSubModules(unittest.TestCase):
 
     def test_alu_simulation(self):
         a = simple_alu(width=8)
-        a.a.set(10)
-        a.b.set(3)
-        a.op.set(0)
-        a.tick()
+        a.a.set(10); a.b.set(3); a.op.set(0)
+        a._settle_comb()
         self.assertEqual(int(a.out), 13)
         a.op.set(1)
-        a.tick()
+        a._settle_comb()
         self.assertEqual(int(a.out), 7)
 
     def test_datapath_simulation(self):
         d = datapath(width=8)
-        d.a.set(5)
-        d.b.set(3)
-        d.tick()
+        d.a.set(5); d.b.set(3)
+        d._settle_comb()
         self.assertEqual(int(d.result), 8)
 
     def test_datapath_has_submodule(self):
@@ -249,7 +255,6 @@ class TestVerilogEmission(unittest.TestCase):
         from veripy.emit_verilog import VerilogEmitter
         d = datapath(width=8)
         v = VerilogEmitter(d).emit_all()
-        # Should contain both alu and datapath definitions
         self.assertIn('module simple_alu', v)
         self.assertIn('module datapath', v)
         self.assertIn('simple_alu #(.width(8)) alu', v)
@@ -282,13 +287,15 @@ class TestClassBasedUnchanged(unittest.TestCase):
                         self.counter = self.counter + 1
 
         c = Counter(n=4)
-        c.enable.set(1)
-        c.reset.set(1)
-        c.tick()
-        c.reset.set(0)
-        for _ in range(5):
-            c.tick()
-        self.assertEqual(int(c.count), 5)
+        sim = SimEngine(c)
+        sim.clock(c.clock, T)
+        @sim.initial
+        def _():
+            c.enable.set(1); c.reset.set(1); yield T; c.reset.set(0)
+            for _ in range(5):
+                yield T
+            self.assertEqual(int(c.count), 5)
+        sim.run()
         v = c.to_verilog()
         self.assertIn('module counter', v.lower())
 
@@ -298,12 +305,14 @@ class TestNegedge(unittest.TestCase):
 
     def test_negedge_captures_on_falling_edge(self):
         m = negedge_latch()
-        m.d.set(42)
-        m.clock.set(1)
-        m.tick()
-        m.clock.set(0)
-        m.tick()
-        self.assertEqual(int(m.q), 42)
+        sim = SimEngine(m)
+        @sim.initial
+        def _():
+            m.d.set(42)
+            m.clock.set(1); yield 1
+            m.clock.set(0); yield 1
+            self.assertEqual(int(m.q), 42)
+        sim.run()
 
     def test_negedge_verilog(self):
         m = negedge_latch()
@@ -345,7 +354,7 @@ class TestFixedWidth(unittest.TestCase):
     def test_simulation(self):
         m = fixed_inverter()
         m.a.set(0x0F)
-        m.tick()
+        m._settle_comb()
         self.assertEqual(int(m.out), 0xF0)
 
     def test_verilog_no_parameter_header(self):
@@ -376,17 +385,27 @@ class TestAugmentedAssignment(unittest.TestCase):
 
     def test_aug_assign_simulation(self):
         c = aug_counter(width=4)
-        c.enable.set(1)
-        for _ in range(3):
-            c.tick()
-        self.assertEqual(int(c.count), 3)
+        sim = SimEngine(c)
+        sim.clock(c.clock, T)
+        @sim.initial
+        def _():
+            c.enable.set(1)
+            for _ in range(3):
+                yield T
+            self.assertEqual(int(c.count), 3)
+        sim.run()
 
     def test_aug_assign_wraps(self):
         c = aug_counter(width=4)
-        c.enable.set(1)
-        for _ in range(16):
-            c.tick()
-        self.assertEqual(int(c.count), 0)
+        sim = SimEngine(c)
+        sim.clock(c.clock, T)
+        @sim.initial
+        def _():
+            c.enable.set(1)
+            for _ in range(16):
+                yield T
+            self.assertEqual(int(c.count), 0)
+        sim.run()
 
 
 class TestSliceWrite(unittest.TestCase):
@@ -394,9 +413,13 @@ class TestSliceWrite(unittest.TestCase):
 
     def test_slice_write_simulation(self):
         m = slice_writer()
-        m.data.set(0x00)
-        m.tick()
-        self.assertEqual(int(m.out) & 0x0F, 0x0A)
+        sim = SimEngine(m)
+        sim.clock(m.clock, T)
+        @sim.initial
+        def _():
+            m.data.set(0x00); yield T
+            self.assertEqual(int(m.out) & 0x0F, 0x0A)
+        sim.run()
 
 
 class TestMixedLocals(unittest.TestCase):
@@ -404,9 +427,8 @@ class TestMixedLocals(unittest.TestCase):
 
     def test_local_not_rewritten(self):
         m = mixed_locals(width=8)
-        m.a.set(3)
-        m.b.set(4)
-        m.tick()
+        m.a.set(3); m.b.set(4)
+        m._settle_comb()
         self.assertEqual(int(m.out), 14)  # (3+4)*2
 
 
@@ -417,7 +439,7 @@ class TestDeferredModule(unittest.TestCase):
         from veripy.module import DeferredModule
         p = Parameter(default=8)
         p.name = 'width'
-        d = simple_alu(width=8)  # concrete — normal Module
+        d = simple_alu(width=8)
         self.assertNotIsInstance(d, DeferredModule)
 
     def test_deferred_from_parameter(self):

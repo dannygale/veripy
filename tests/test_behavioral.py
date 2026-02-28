@@ -1,6 +1,9 @@
 """Tests for behavioral emulation mode."""
 import unittest
 from veripy import Module, Input, Output, Register
+from veripy.sim import SimEngine, BehavioralSim
+
+T = 10
 
 
 class TestBehavioral(unittest.TestCase):
@@ -34,58 +37,29 @@ class TestBehavioral(unittest.TestCase):
 
     def test_sim_mode(self):
         m = self._make_module()
-        m.reset.set(1); m.tick(); m.reset.set(0)
-        m.d.set(10)
-        m.tick()
-        self.assertEqual(int(m.q), 10)
-        m.tick()
-        self.assertEqual(int(m.q), 20)
+        sim = SimEngine(m)
+        sim.clock(m.clk, T)
+        @sim.initial
+        def _():
+            m.reset.set(1); yield T; m.reset.set(0)
+            m.d.set(10)
+            yield T
+            self.assertEqual(int(m.q), 10)
+            yield T
+            self.assertEqual(int(m.q), 20)
+        sim.run()
 
     def test_behavioral_mode(self):
         m = self._make_module()
-        m._mode = 'behavioral'
+        bsim = BehavioralSim(m)
         m.d.set(10)
-        m.tick()
+        bsim.step()
         self.assertEqual(int(m.q), 10)
-        m.tick()
+        bsim.step()
         self.assertEqual(int(m.q), 20)
 
-    def test_mode_switch(self):
-        m = self._make_module()
-        m._mode = 'behavioral'
-        m.d.set(5)
-        m.tick()
-        self.assertEqual(int(m.q), 5)
-        # Switch to sim — register starts from 0, not behavioral state
-        m._mode = 'sim'
-        m.reset.set(1); m.tick(); m.reset.set(0)
-        m.d.set(3)
-        m.tick()
-        self.assertEqual(int(m.q), 3)
-
-    def test_submodule_behavioral(self):
-        accum = self._make_module()
-
-        class Top(Module):
-            def __init__(self):
-                self.d   = Input(8)
-                self.out = Output(8)
-                self.acc = accum
-                super().__init__()
-
-                @self.comb
-                def wire():
-                    self.acc.d = self.d
-                    self.out = self.acc.q
-
-        top = Top()
-        top.acc._mode = 'behavioral'
-        top.d.set(7)
-        top.tick()
-        self.assertEqual(int(top.out), 7)
-
     def test_no_behavioral_uses_sim(self):
-        """Module without @behavioral in behavioral mode falls through to sim."""
+        """Module without @behavioral falls back to cycle-accurate."""
         class Simple(Module):
             def __init__(self):
                 self.d = Input(8)
@@ -97,9 +71,9 @@ class TestBehavioral(unittest.TestCase):
                     self.q = self.d
 
         m = Simple()
-        m._mode = 'behavioral'
+        bsim = BehavioralSim(m)
         m.d.set(42)
-        m.tick()
+        bsim.step()
         self.assertEqual(int(m.q), 42)
 
 

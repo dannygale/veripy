@@ -5,46 +5,58 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
 from examples.regfile import RegFile
 from veripy import VeripyTestCase
+from veripy.sim import SimEngine
+
+T = 10
 
 
 class TestRegFileSim(unittest.TestCase):
-    def setUp(self):
-        self.rf = RegFile(width=8, depth=4)
-
-    def _write(self, addr, data):
-        self.rf.we._val = 1
-        self.rf.waddr._val = addr
-        self.rf.wdata._val = data
-        self.rf.tick()
-        self.rf.we._val = 0
-
     def test_read_after_write(self):
-        self._write(1, 42)
-        self.rf.raddr1._val = 1
-        self.rf.tick()
-        self.assertEqual(self.rf.rdata1._val, 42)
+        rf = RegFile(width=8, depth=4)
+        sim = SimEngine(rf)
+        sim.clock(rf.clock, T)
+        @sim.initial
+        def _():
+            rf.we.set(1); rf.waddr.set(1); rf.wdata.set(42); yield T
+            rf.we.set(0); rf.raddr1.set(1); yield T
+            self.assertEqual(int(rf.rdata1), 42)
+        sim.run()
 
     def test_r0_hardwired_zero(self):
-        self._write(0, 0xFF)
-        self.rf.raddr1._val = 0
-        self.rf.tick()
-        self.assertEqual(self.rf.rdata1._val, 0)
+        rf = RegFile(width=8, depth=4)
+        sim = SimEngine(rf)
+        sim.clock(rf.clock, T)
+        @sim.initial
+        def _():
+            rf.we.set(1); rf.waddr.set(0); rf.wdata.set(0xFF); yield T
+            rf.we.set(0); rf.raddr1.set(0); yield T
+            self.assertEqual(int(rf.rdata1), 0)
+        sim.run()
 
     def test_two_read_ports(self):
-        self._write(1, 10)
-        self._write(2, 20)
-        self.rf.raddr1._val = 1
-        self.rf.raddr2._val = 2
-        self.rf.tick()
-        self.assertEqual(self.rf.rdata1._val, 10)
-        self.assertEqual(self.rf.rdata2._val, 20)
+        rf = RegFile(width=8, depth=4)
+        sim = SimEngine(rf)
+        sim.clock(rf.clock, T)
+        @sim.initial
+        def _():
+            rf.we.set(1); rf.waddr.set(1); rf.wdata.set(10); yield T
+            rf.waddr.set(2); rf.wdata.set(20); yield T
+            rf.we.set(0); rf.raddr1.set(1); rf.raddr2.set(2); yield T
+            self.assertEqual(int(rf.rdata1), 10)
+            self.assertEqual(int(rf.rdata2), 20)
+        sim.run()
 
     def test_overwrite(self):
-        self._write(3, 100)
-        self._write(3, 200)
-        self.rf.raddr1._val = 3
-        self.rf.tick()
-        self.assertEqual(self.rf.rdata1._val, 200)
+        rf = RegFile(width=8, depth=4)
+        sim = SimEngine(rf)
+        sim.clock(rf.clock, T)
+        @sim.initial
+        def _():
+            rf.we.set(1); rf.waddr.set(3); rf.wdata.set(100); yield T
+            rf.wdata.set(200); yield T
+            rf.we.set(0); rf.raddr1.set(3); yield T
+            self.assertEqual(int(rf.rdata1), 200)
+        sim.run()
 
 
 class TestRegFileVerilog(unittest.TestCase):

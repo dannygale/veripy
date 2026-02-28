@@ -29,17 +29,23 @@ class Counter(Module):
 
 
 if __name__ == '__main__':
-    # --- Simulate ---
+    from veripy.sim import SimEngine
+
     c = Counter(n=4)
-    c.enable._val = 1
+    sim = SimEngine(c)
+    sim.clock(c.clock, 10)
 
-    print("=== Simulation ===")
-    for i in range(20):
-        c.reset._val = 1 if i < 2 else 0
-        c.tick()
-        print(f"  cycle {i:2d}: reset={c.reset._val} en={c.enable._val} "
-              f"counter={c.counter._val:2d} count={c.count._val:2d}")
+    @sim.initial
+    def demo():
+        c.enable.set(1)
+        print("=== Simulation ===")
+        for i in range(20):
+            c.reset.set(1 if i < 2 else 0)
+            yield 10
+            print(f"  cycle {i:2d}: reset={int(c.reset)} en={int(c.enable)} "
+                  f"counter={int(c.counter):2d} count={int(c.count):2d}")
 
-    # --- Generate Verilog ---
+    sim.run()
+
     print("\n=== Generated Verilog ===")
     print(c.to_verilog())

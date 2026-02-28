@@ -1,6 +1,9 @@
 """Tests for pipeline transforms."""
 import unittest
 from veripy import Module, Input, Output, Register
+from veripy.sim import SimEngine
+
+T = 10
 
 
 class TestPipelineVerilog(unittest.TestCase):
@@ -68,26 +71,33 @@ class TestPipeline(unittest.TestCase):
         return Pipe()
 
     def test_pipeline_latency(self):
-        """Result appears after N stages of clock cycles."""
         m = self._make_pipe()
-        m.reset.set(1); m.tick(); m.reset.set(0)
-        m.a.set(3); m.b.set(4)
-        m.tick()  # stage 0 captures a+b=7
-        self.assertEqual(int(m.out), 0)  # stage 1 still has reset value
-        m.tick()  # stage 1 captures 7*2=14
-        self.assertEqual(int(m.out), 14)
+        sim = SimEngine(m)
+        sim.clock(m.clock, T)
+        @sim.initial
+        def _():
+            m.reset.set(1); yield T; m.reset.set(0)
+            m.a.set(3); m.b.set(4)
+            yield T  # stage 0 captures a+b=7
+            self.assertEqual(int(m.out), 0)  # stage 1 still has reset value
+            yield T  # stage 1 captures 7*2=14
+            self.assertEqual(int(m.out), 14)
+        sim.run()
 
     def test_pipeline_reset(self):
-        """Reset clears all stages."""
         m = self._make_pipe()
-        m.a.set(5); m.b.set(5)
-        m.tick(); m.tick()
-        self.assertEqual(int(m.out), 20)
-        m.reset.set(1); m.tick()
-        self.assertEqual(int(m.out), 0)
+        sim = SimEngine(m)
+        sim.clock(m.clock, T)
+        @sim.initial
+        def _():
+            m.a.set(5); m.b.set(5)
+            yield T; yield T
+            self.assertEqual(int(m.out), 20)
+            m.reset.set(1); yield T
+            self.assertEqual(int(m.out), 0)
+        sim.run()
 
     def test_pipeline_chaining(self):
-        """stage() returns self for chaining."""
         class P(Module):
             def __init__(self):
                 self.clock = Input()
@@ -101,13 +111,17 @@ class TestPipeline(unittest.TestCase):
                 def o():
                     self.out = pipe.result
         m = P()
-        m.reset.set(1); m.tick(); m.reset.set(0)
-        m.x.set(10)
-        m.tick(); m.tick()
-        self.assertEqual(int(m.out), 11)
+        sim = SimEngine(m)
+        sim.clock(m.clock, T)
+        @sim.initial
+        def _():
+            m.reset.set(1); yield T; m.reset.set(0)
+            m.x.set(10)
+            yield T; yield T
+            self.assertEqual(int(m.out), 11)
+        sim.run()
 
     def test_three_stages(self):
-        """Three-stage pipeline has 3-cycle latency for input data."""
         class P(Module):
             def __init__(self):
                 self.clock = Input()
@@ -123,12 +137,17 @@ class TestPipeline(unittest.TestCase):
                 def o():
                     self.out = pipe.result
         m = P()
-        m.reset.set(1); m.tick(); m.reset.set(0)
-        m.d.set(10)
-        m.tick()  # stage0=10, stage1=0+1=1, stage2=0+1=1
-        m.tick()  # stage0=10, stage1=11, stage2=1+1=2
-        m.tick()  # stage0=10, stage1=11, stage2=11+1=12
-        self.assertEqual(int(m.out), 12)  # 10 + 1 + 1
+        sim = SimEngine(m)
+        sim.clock(m.clock, T)
+        @sim.initial
+        def _():
+            m.reset.set(1); yield T; m.reset.set(0)
+            m.d.set(10)
+            yield T  # stage0=10, stage1=0+1=1, stage2=0+1=1
+            yield T  # stage0=10, stage1=11, stage2=1+1=2
+            yield T  # stage0=10, stage1=11, stage2=11+1=12
+            self.assertEqual(int(m.out), 12)  # 10 + 1 + 1
+        sim.run()
 
 
 if __name__ == '__main__':
