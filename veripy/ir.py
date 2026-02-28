@@ -116,6 +116,24 @@ class Display(Stmt):
 class Finish(Stmt):
     pass
 
+@dataclass
+class Repeat(Stmt):
+    count: Expr
+    body: list       # list[Stmt]
+    label: str = ''  # named block for disable (break)
+
+@dataclass
+class ForLoop(Stmt):
+    var: str
+    start: Expr
+    stop: Expr
+    body: list       # list[Stmt]
+    label: str = ''  # named block for disable (break)
+
+@dataclass
+class Disable(Stmt):
+    label: str
+
 
 # ── Blocks ───────────────────────────────────────────────────────────
 

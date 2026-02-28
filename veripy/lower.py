@@ -12,6 +12,7 @@ from .ir import (
     Expr, Const, Param, Sig, BinOp, UnaryOp, Compare, BoolOp, Mux,
     Slice, Index, Concat,
     Stmt, Assign, SliceAssign, If, Case, MemWrite, Delay, Display, Finish,
+    Repeat, ForLoop, Disable,
     ContAssign, CombBlock, SeqBlock, InitialBlock, AlwaysBlock,
     Port, WireDecl, RegDecl, MemDecl, Instance, IRModule,
 )
@@ -933,8 +934,10 @@ class _TBLowerer:
             if sig_name:
                 return [Assign(sig_name, self._expr(node.value), blocking=True)]
 
-        # break → skip (handled by for loop unrolling)
+        # break → disable named block
         if isinstance(node, ast.Break):
+            if hasattr(self, '_break_label') and self._break_label:
+                return [Disable(self._break_label)]
             return []
 
         return []  # skip unrecognized
@@ -1092,61 +1095,36 @@ class _TBLowerer:
         return stmts
 
     def _lower_for(self, node):
-        """Unroll for loop, handling break via flag."""
+        """Emit Repeat or ForLoop instead of unrolling."""
         if not (isinstance(node.iter, ast.Call)
                 and isinstance(node.iter.func, ast.Name)
                 and node.iter.func.id == 'range'):
             raise SyntaxError('TB: only for ... in range(...) supported')
         args = node.iter.args
-        if len(args) == 1:
-            start, stop = 0, self._const_eval(args[0])
-        elif len(args) == 2:
-            start, stop = self._const_eval(args[0]), self._const_eval(args[1])
-        else:
-            start, stop = self._const_eval(args[0]), self._const_eval(args[1])
+        n = len(args)
+        start = self._const_eval(args[0]) if n >= 2 else 0
+        stop = self._const_eval(args[0]) if n == 1 else self._const_eval(args[1])
+
+        has_break = any(isinstance(n_, ast.Break)
+                        for n_ in ast.walk(ast.Module(body=node.body, type_ignores=[])))
+        label = ''
+        if has_break:
+            if not hasattr(self, '_loop_id'):
+                self._loop_id = 0
+            label = f'_loop{self._loop_id}'
+            self._loop_id += 1
+            self._break_label = label
 
         var = node.target.id
-        has_break = any(isinstance(n, ast.Break) for n in ast.walk(ast.Module(body=node.body, type_ignores=[])))
+        body = self._stmts(node.body)
 
-        out = []
         if has_break:
-            # Use a flag variable to simulate break
-            flag = f'_brk'
-            out.append(Assign(flag, Const(0), blocking=True))
-            for val in range(start, stop):
-                body = self._stmts(self._subst_var(node.body, var, val, has_break, flag))
-                out.append(If(Compare('==', Sig(flag), Const(0)), body, []))
+            self._break_label = None
+
+        if var == '_':
+            return [Repeat(Const(stop - start), body, label)]
         else:
-            for val in range(start, stop):
-                body = self._stmts(self._subst_var(node.body, var, val, False, None))
-                out.extend(body)
-        return out
-
-    def _subst_var(self, stmts, var_name, val, has_break, flag):
-        import copy
-        stmts = copy.deepcopy(stmts)
-        for node in ast.walk(ast.Module(body=stmts, type_ignores=[])):
-            for field, child in ast.iter_fields(node):
-                if isinstance(child, ast.Name) and child.id == var_name:
-                    setattr(node, field, ast.Constant(value=val))
-                elif isinstance(child, list):
-                    for i, item in enumerate(child):
-                        if isinstance(item, ast.Name) and item.id == var_name:
-                            child[i] = ast.Constant(value=val)
-        # Replace break with flag set
-        if has_break:
-            self._replace_break(stmts, flag)
-        return stmts
-
-    def _replace_break(self, nodes, flag):
-        for i, node in enumerate(nodes):
-            if isinstance(node, ast.Break):
-                nodes[i] = ast.Assign(
-                    targets=[ast.Name(id=flag, ctx=ast.Store())],
-                    value=ast.Constant(value=1))
-            elif isinstance(node, ast.If):
-                self._replace_break(node.body, flag)
-                self._replace_break(node.orelse, flag)
+            return [ForLoop(var, Const(start), Const(stop), body, label)]
 
     def _const_eval(self, node):
         if isinstance(node, ast.Constant):

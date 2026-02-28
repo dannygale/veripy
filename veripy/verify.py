@@ -7,7 +7,7 @@ from .sim import SimEngine
 
 def _collect_locals(stmts, declared, regs):
     """Scan IR stmts for Assign targets not in declared → add RegDecl."""
-    from .ir import Assign, If, RegDecl
+    from .ir import Assign, If, Repeat, ForLoop, RegDecl
     for stmt in stmts:
         if isinstance(stmt, Assign) and stmt.target not in declared:
             declared.add(stmt.target)
@@ -15,6 +15,13 @@ def _collect_locals(stmts, declared, regs):
         elif isinstance(stmt, If):
             _collect_locals(stmt.then_body, declared, regs)
             _collect_locals(stmt.else_body, declared, regs)
+        elif isinstance(stmt, Repeat):
+            _collect_locals(stmt.body, declared, regs)
+        elif isinstance(stmt, ForLoop):
+            if stmt.var not in declared:
+                declared.add(stmt.var)
+                regs.append(RegDecl(stmt.var, 32))
+            _collect_locals(stmt.body, declared, regs)
 
 
 class VeripyTestCase(unittest.TestCase):

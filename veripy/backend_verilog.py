@@ -7,6 +7,7 @@ from .ir import (
     Const, Param, Sig, BinOp, UnaryOp, Compare, BoolOp, Mux,
     Slice, Index, Concat,
     Assign, SliceAssign, If, Case, MemWrite, Delay, Display, Finish,
+    Repeat, ForLoop, Disable,
     ContAssign, CombBlock, SeqBlock, InitialBlock, AlwaysBlock,
     IRModule,
 )
@@ -195,6 +196,39 @@ def _emit_stmt(stmt, lines, indent=2):
 
     elif isinstance(stmt, Finish):
         lines.append(f'{pad}$finish;')
+
+    elif isinstance(stmt, Repeat):
+        if stmt.label:
+            lines.append(f'{pad}begin : {stmt.label}')
+            lines.append(f'{pad}    repeat ({_expr(stmt.count)}) begin')
+            for s in stmt.body:
+                _emit_stmt(s, lines, indent + 2)
+            lines.append(f'{pad}    end')
+            lines.append(f'{pad}end')
+        else:
+            lines.append(f'{pad}repeat ({_expr(stmt.count)}) begin')
+            for s in stmt.body:
+                _emit_stmt(s, lines, indent + 1)
+            lines.append(f'{pad}end')
+
+    elif isinstance(stmt, Disable):
+        lines.append(f'{pad}disable {stmt.label};')
+
+    elif isinstance(stmt, ForLoop):
+        v = stmt.var
+        hdr = f'for ({v} = {_expr(stmt.start)}; {v} < {_expr(stmt.stop)}; {v} = {v} + 1) begin'
+        if stmt.label:
+            lines.append(f'{pad}begin : {stmt.label}')
+            lines.append(f'{pad}    {hdr}')
+            for s in stmt.body:
+                _emit_stmt(s, lines, indent + 2)
+            lines.append(f'{pad}    end')
+            lines.append(f'{pad}end')
+        else:
+            lines.append(f'{pad}{hdr}')
+            for s in stmt.body:
+                _emit_stmt(s, lines, indent + 1)
+            lines.append(f'{pad}end')
 
 
 # ── Initial blocks ───────────────────────────────────────────────────
