@@ -56,8 +56,13 @@ class Module:
                         r_sig = value._signals()[name]
                         if direction == 'r2l':
                             l_sig._assign(int(r_sig))
-                        else:
+                        elif direction == 'l2r':
                             r_sig._assign(int(l_sig))
+                        else:  # fwd
+                            if l_sig._kind == 'input':
+                                l_sig._assign(int(r_sig))
+                            else:
+                                r_sig._assign(int(l_sig))
                     return
             except AttributeError:
                 pass

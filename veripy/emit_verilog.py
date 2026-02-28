@@ -156,11 +156,16 @@ class VerilogEmitter:
         assign_driven = set()
         for method in self.mod._comb_blocks:
             tree = self._get_func_ast(method)
-            if all(self._is_nba(s) for s in tree.body):
+            if all(self._is_nba(s) or self._try_expand_iface_assign(s) for s in tree.body):
                 self._current_func = method; self._locals = {}
                 for stmt in tree.body:
-                    t, _ = self._extract_nba(stmt)
-                    assign_driven.add(t.split('[')[0])  # strip bit index
+                    expanded = self._try_expand_iface_assign(stmt)
+                    if expanded:
+                        for t, _ in expanded:
+                            assign_driven.add(t)
+                    elif self._is_nba(stmt):
+                        t, _ = self._extract_nba(stmt)
+                        assign_driven.add(t.split('[')[0])
                 self._current_func = None
 
         ports = []
@@ -612,7 +617,7 @@ class VerilogEmitter:
 
     # --- interface bulk connect ---
     def _resolve_sub_iface(self, node):
-        """If node is self.sub.iface, return (sub_name, iface_name, Interface). Else None."""
+        """If node is self.sub.iface or self.iface, return (prefix, iface_name, Interface)."""
         if (isinstance(node, ast.Attribute) and
             isinstance(node.value, ast.Attribute) and
             self._is_self(node.value.value)):
@@ -623,6 +628,11 @@ class VerilogEmitter:
                 iface = getattr(sub, iface_name, None)
                 if isinstance(iface, Interface):
                     return sub_name, iface_name, iface
+        if isinstance(node, ast.Attribute) and self._is_self(node.value):
+            iface_name = node.attr
+            iface = getattr(self.mod, iface_name, None)
+            if isinstance(iface, Interface):
+                return '', iface_name, iface
         return None
 
     def _try_expand_iface_assign(self, stmt):
@@ -635,12 +645,22 @@ class VerilogEmitter:
             return None
         l_sub, l_iface, l_obj = lhs
         r_sub, r_iface, r_obj = rhs
+        def _wire(sub, iface, sig):
+            return f'{sub}_{iface}_{sig}' if sub else f'{iface}_{sig}'
         pairs = []
         for name, direction in Interface._match(l_obj, r_obj):
+            l_wire = _wire(l_sub, l_iface, name)
+            r_wire = _wire(r_sub, r_iface, name)
             if direction == 'r2l':
-                pairs.append((f'{l_sub}_{l_iface}_{name}', f'{r_sub}_{r_iface}_{name}'))
-            else:
-                pairs.append((f'{r_sub}_{r_iface}_{name}', f'{l_sub}_{l_iface}_{name}'))
+                pairs.append((l_wire, r_wire))
+            elif direction == 'l2r':
+                pairs.append((r_wire, l_wire))
+            else:  # fwd
+                l_sig = l_obj._signals()[name]
+                if l_sig._kind == 'input':
+                    pairs.append((l_wire, r_wire))
+                else:
+                    pairs.append((r_wire, l_wire))
         return pairs
 
     # --- helpers ---

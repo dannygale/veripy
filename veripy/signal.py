@@ -287,11 +287,13 @@ class Interface:
 
     @staticmethod
     def _match(lhs, rhs):
-        """Return [(signal_name, 'l2r'|'r2l'), ...] for matching signals. Raises on errors."""
-        if hasattr(lhs, '_connects_to') and not isinstance(rhs, lhs._connects_to):
-            raise TypeError(f"Cannot connect {type(lhs).__name__} to {type(rhs).__name__}")
-        if hasattr(rhs, '_connects_to') and not isinstance(lhs, rhs._connects_to):
-            raise TypeError(f"Cannot connect {type(rhs).__name__} to {type(lhs).__name__}")
+        """Return [(signal_name, 'l2r'|'r2l'|'fwd'), ...] for matching signals."""
+        same_type = type(lhs) is type(rhs)
+        if not same_type:
+            if hasattr(lhs, '_connects_to') and not isinstance(rhs, lhs._connects_to):
+                raise TypeError(f"Cannot connect {type(lhs).__name__} to {type(rhs).__name__}")
+            if hasattr(rhs, '_connects_to') and not isinstance(lhs, rhs._connects_to):
+                raise TypeError(f"Cannot connect {type(rhs).__name__} to {type(lhs).__name__}")
         pairs = []
         l_sigs, r_sigs = lhs._signals(), rhs._signals()
         for name, r_sig in r_sigs.items():
@@ -299,10 +301,13 @@ class Interface:
             if l_sig is None:
                 continue
             if r_sig._kind == l_sig._kind:
-                raise TypeError(
-                    f"Signal '{name}' is {r_sig._kind} on both "
-                    f"{type(lhs).__name__} and {type(rhs).__name__}")
-            if r_sig._kind == 'output':
+                if same_type:
+                    pairs.append((name, 'fwd'))
+                else:
+                    raise TypeError(
+                        f"Signal '{name}' is {r_sig._kind} on both "
+                        f"{type(lhs).__name__} and {type(rhs).__name__}")
+            elif r_sig._kind == 'output':
                 pairs.append((name, 'r2l'))
             else:
                 pairs.append((name, 'l2r'))
