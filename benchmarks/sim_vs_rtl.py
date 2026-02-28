@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-"""Benchmark: Python SimEngine vs iverilog simulation throughput."""
+"""Benchmark: Python SimEngine vs iverilog — same stimulus, both backends.
 
-import sys, os, time, subprocess, tempfile
+Uses VeripyTestCase internals so both sides run identical testbenches.
+"""
+
+import sys, os, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from veripy import Module, Input, Output, Register
+from veripy import Module, Input, Output, Register, VeripyTestCase
 from veripy.sim import SimEngine
-from veripy.emit_verilog import _to_snake
-from examples.spi_controller import SpiController, sync_fifo
+from examples.spi_controller import SpiController
 
-
-# ── Benchmark modules ────────────────────────────────────────────────
 
 class Counter(Module):
-    """Trivial: single register."""
     def __init__(self):
         self.clock = Input()
         self.count = Output(8)
@@ -26,89 +25,12 @@ class Counter(Module):
         def inc():
             self.cnt = self.cnt + 1
 
-
-# ── Python sim benchmark ─────────────────────────────────────────────
-
-def bench_python(make_module, n_cycles, setup=None):
-    """Run SimEngine for n_cycles, return elapsed seconds."""
-    mod = make_module()
-    sim = SimEngine(mod)
-
-    @sim.initial
-    def stim():
-        if setup:
-            setup(mod)
-        for _ in range(n_cycles):
-            mod.clock.set(0); yield 1
-            mod.clock.set(1); yield 1
-
-    start = time.perf_counter()
-    sim.run()
-    return time.perf_counter() - start
+T = 10  # half-period, matches test_spi_controller.py
 
 
-# ── iverilog benchmark ───────────────────────────────────────────────
+def p(s=''):
+    print(s, flush=True)
 
-def bench_iverilog(make_module, n_cycles):
-    """Compile + run iverilog for n_cycles, return (compile_sec, run_sec)."""
-    mod = make_module()
-
-    # Collect all module definitions
-    parts = []
-    seen = set()
-    def _collect(m, mname):
-        if mname in seen:
-            return
-        seen.add(mname)
-        factory = getattr(type(m), '_veripy_factory', None)
-        fresh = factory() if factory else type(m)()
-        for sn, sub in fresh._submodules().items():
-            _collect(sub, _to_snake(type(sub).__name__))
-        parts.append(fresh.to_verilog(mname))
-    for sn, sub in mod._submodules().items():
-        _collect(sub, _to_snake(type(sub).__name__))
-    parts.append(mod.to_verilog())
-    verilog_src = '\n\n'.join(parts)
-
-    module_name = type(mod).__name__.lower()
-
-    # Testbench: just toggle clock for N cycles
-    tb = f"""`timescale 1ns/1ps
-module tb;
-    reg clock;
-    {module_name} dut(.clock(clock));
-    initial begin
-        clock = 0;
-        repeat ({n_cycles * 2}) #1 clock = ~clock;
-        $finish;
-    end
-endmodule
-"""
-
-    with tempfile.TemporaryDirectory() as d:
-        src = os.path.join(d, 'bench.v')
-        out = os.path.join(d, 'bench.out')
-        with open(src, 'w') as f:
-            f.write(verilog_src + '\n\n' + tb)
-
-        # Compile
-        t0 = time.perf_counter()
-        r = subprocess.run(['iverilog', '-o', out, src],
-                           capture_output=True, text=True)
-        compile_time = time.perf_counter() - t0
-        if r.returncode != 0:
-            print(f'  iverilog compile error:\n{r.stderr}')
-            return None, None
-
-        # Run
-        t0 = time.perf_counter()
-        subprocess.run(['vvp', out], capture_output=True, text=True)
-        run_time = time.perf_counter() - t0
-
-    return compile_time, run_time
-
-
-# ── Main ─────────────────────────────────────────────────────────────
 
 def fmt_rate(cycles, secs):
     if secs < 0.001:
@@ -121,41 +43,104 @@ def fmt_rate(cycles, secs):
     return f'{rate:.0f} cyc/s'
 
 
-def p(s=''):
-    print(s, flush=True)
+def bench_dual(name, create_module, define_stimulus, n_repeats=1):
+    """Run the same stimulus on Python sim and iverilog, time each.
+
+    define_stimulus(tc, n_repeats) should register @tc.always / @tc.initial
+    blocks on the VeripyTestCase instance.
+    """
+
+    class BenchCase(VeripyTestCase):
+        def create_module(self):
+            return create_module()
+
+    tc = BenchCase('runTest')
+
+    # --- Python sim ---
+    tc._begin()
+    define_stimulus(tc, n_repeats)
+    t0 = time.perf_counter()
+    tc.run_sim()
+    py_time = time.perf_counter() - t0
+
+    # --- iverilog (compile + run, uses recorded trace from Python run) ---
+    t0 = time.perf_counter()
+    tc._run_iverilog()
+    iv_time = time.perf_counter() - t0
+
+    return py_time, iv_time
 
 
-def run_bench(name, make_module, cycle_counts, setup=None):
-    p(f'\n{"=" * 60}')
-    p(f'  {name}')
-    p(f'{"=" * 60}')
-    p(f'{"Cycles":>10}  {"Python":>10}  {"vvp only":>10}  {"Ratio":>8}')
-    p(f'{"-"*10}  {"-"*10}  {"-"*10}  {"-"*8}')
+# ── Stimulus definitions ─────────────────────────────────────────────
 
-    for n in cycle_counts:
-        py = bench_python(make_module, n, setup)
-        iv_compile, iv_run = bench_iverilog(make_module, n)
-        if iv_run is None:
-            p(f'{n:>10}  {py:>10.4f}s  {"ERROR":>10}  {"N/A":>8}')
-            continue
-        ratio = py / iv_run if iv_run > 0 else float('inf')
-        p(f'{n:>10}  {py:>10.4f}s  {iv_run:>10.4f}s  {ratio:>7.1f}x')
-        p(f'{"":>10}  {fmt_rate(n, py):>10}  '
-              f'iverilog compile {iv_compile:.3f}s')
+def counter_stimulus(tc, n_repeats):
+    m = tc._mod
+
+    @tc.always
+    def clock():
+        tc.set(clock=0); yield T
+        tc.set(clock=1); yield T
+
+    @tc.initial
+    def stim():
+        for _ in range(n_repeats):
+            yield T * 2
+            tc.out('count')
 
 
-def spi_setup(mod):
-    mod.reset.set(1)
-    mod.spi.miso.set(0)
-    mod.tx_valid.set(0)
+def spi_stimulus(tc, n_repeats):
+    m = tc._mod
 
+    @tc.always
+    def clock():
+        tc.set(clock=0); yield T
+        tc.set(clock=1); yield T
+
+    @tc.initial
+    def stim():
+        m.reset.set(1); m.tx_valid.set(0); m.tx_data.set(0); m.spi.miso.set(0)
+        yield T * 2
+        m.reset.set(0)
+        yield T * 2
+
+        for i in range(n_repeats):
+            # Push a byte
+            m.tx_data.set(i & 0xFF); m.tx_valid.set(1)
+            yield T * 2
+            m.tx_valid.set(0)
+
+            # Wait for transfer to complete
+            for _ in range(200):
+                yield T * 2
+                if int(m.rx_valid):
+                    tc.out('rx_data')
+                    break
+
+
+# ── Main ─────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    cycles = [1_000, 10_000, 100_000]
+    p(f'\n{"=" * 60}')
+    p(f'  Counter — same stimulus, both backends')
+    p(f'  (iverilog = compile + run of generated testbench)')
+    p(f'{"=" * 60}')
+    p(f'{"Cycles":>10}  {"Python":>10}  {"iverilog":>10}  {"Ratio":>8}')
+    p(f'{"-"*10}  {"-"*10}  {"-"*10}  {"-"*8}')
 
-    run_bench('Counter (trivial — 1 register)',
-              Counter, cycles)
+    for n in [100, 1_000, 5_000]:
+        py, iv = bench_dual('counter', Counter, counter_stimulus, n)
+        ratio = py / iv if iv > 0 else float('inf')
+        p(f'{n:>10}  {py:>10.4f}s  {iv:>10.4f}s  {ratio:>7.1f}x')
 
-    run_bench('SPI Controller (FSM + FIFO + shift register)',
-              lambda: SpiController(width=8, fifo_depth=4, clk_div=2),
-              cycles, setup=spi_setup)
+    p(f'\n{"=" * 60}')
+    p(f'  SPI Controller — real byte transfers, both backends')
+    p(f'  (iverilog = compile + run of generated testbench)')
+    p(f'{"=" * 60}')
+    p(f'{"Xfers":>10}  {"~Cycles":>10}  {"Python":>10}  {"iverilog":>10}  {"Ratio":>8}')
+    p(f'{"-"*10}  {"-"*10}  {"-"*10}  {"-"*10}  {"-"*8}')
+
+    for n in [1, 10, 50, 100]:
+        py, iv = bench_dual('spi', lambda: SpiController(width=8, fifo_depth=4, clk_div=2),
+                            spi_stimulus, n)
+        ratio = py / iv if iv > 0 else float('inf')
+        p(f'{n:>10}  {"~"+str(n*38):>10}  {py:>10.4f}s  {iv:>10.4f}s  {ratio:>7.1f}x')
