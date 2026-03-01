@@ -10,3 +10,9 @@ from .context import (comb, always, fsm, assert_always, cover, pipeline,
 
 from .cdc import Synchronizer, AsyncFIFO
 from .verify import VeripyTestCase
+
+
+def GpuSim(*args, **kwargs):
+    """Lazy-loaded GPU simulator (requires ``pip install veripy[gpu]``)."""
+    from .gpu_sim import GpuSim as _GpuSim
+    return _GpuSim(*args, **kwargs)

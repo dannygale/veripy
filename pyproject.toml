@@ -26,6 +26,7 @@ keywords = ["hdl", "verilog", "fpga", "simulation", "hardware"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+gpu = ["wgpu>=0.19.0", "numpy>=1.24"]
 
 [project.urls]
 Homepage = "https://github.com/dannygale/veripy"
