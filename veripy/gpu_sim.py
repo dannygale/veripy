@@ -37,13 +37,23 @@ class GpuSim:
 
         self.ir = ir
         self.n = n_instances
-        wgsl_src, self.sig_names = emit_wgsl(ir, params)
+        wgsl_src, self.sig_names, self.mem_layout = emit_wgsl(ir, params)
         self._sig_idx = {name: i for i, name in enumerate(self.sig_names)}
         self._inputs = {p.name for p in ir.ports if p.direction == 'input'}
         self._outputs = {p.name for p in ir.ports if p.direction == 'output'}
 
-        # Struct has padding to multiple of 4 fields
-        self._stride = len(self.sig_names) + (4 - len(self.sig_names) % 4) % 4
+        # Struct layout: signal scalars, then mem arrays, then padding
+        n_sig = len(self.sig_names)
+        n_mem_slots = sum(d for _, d, _ in self.mem_layout)
+        total = n_sig + n_mem_slots
+        self._stride = total + (4 - total % 4) % 4
+
+        # Mem offsets within the flat struct (for host read/write)
+        self._mem_offset = {}  # name → start index in flat array
+        off = n_sig
+        for mname, depth, _w in self.mem_layout:
+            self._mem_offset[mname] = off
+            off += depth
 
         # Host-side state: flat u32 arrays matching the State struct layout
         self._state = np.zeros((n_instances, self._stride), dtype=np.uint32)
@@ -103,6 +113,11 @@ class GpuSim:
     def read(self, name: str) -> np.ndarray:
         """Read current value of a signal across all instances."""
         return self._state[:, self._sig_idx[name]]
+
+    def read_mem(self, name: str, addr: int) -> np.ndarray:
+        """Read one mem element across all instances."""
+        off = self._mem_offset[name]
+        return self._state[:, off + addr]
 
     def reset(self):
         """Zero all state."""
