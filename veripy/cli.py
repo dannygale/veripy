@@ -279,6 +279,25 @@ def cmd_equiv(args):
         print(f"\nRun: yosys -s {script_path}")
 
 
+def cmd_doc(args):
+    """Generate markdown documentation for modules in a Python file."""
+    from .autodoc import to_markdown
+    params = _parse_params(args.param)
+    modules = _load_modules(args.file, module_name=args.module, params=params)
+    if not modules:
+        sys.exit(f"error: no modules found in {args.file}")
+    for name, instance in modules:
+        md = to_markdown(instance, module_name=_to_snake(name))
+        if args.output:
+            os.makedirs(args.output, exist_ok=True)
+            out_path = os.path.join(args.output, f"{_to_snake(name)}.md")
+            with open(out_path, "w") as f:
+                f.write(md)
+            print(f"  {out_path}")
+        else:
+            print(md)
+
+
 def cmd_profile(args):
     """Run test case(s) and compare Python sim vs iverilog performance."""
     import time
@@ -380,6 +399,13 @@ def main():
     p_prof.add_argument("file", help="Test file containing VeripyTestCase subclass(es)")
     p_prof.add_argument("-t", "--test", help="Run only this test method (e.g. test_nop)")
 
+    # doc
+    p_doc = sub.add_parser("doc", help="Generate markdown documentation from module definitions")
+    p_doc.add_argument("file", help="Python file containing Module subclass(es)")
+    p_doc.add_argument("-o", "--output", help="Output directory for .md files (default: stdout)")
+    p_doc.add_argument("-m", "--module", help="Target a specific Module subclass by name")
+    p_doc.add_argument("-p", "--param", action="append", help="Module parameter (e.g. -p n=4)")
+
     # equiv
     p_equiv = sub.add_parser("equiv", help="Formal equivalence checking between two modules")
     p_equiv.add_argument("gold", help="Gold (reference) Python file")
@@ -394,7 +420,7 @@ def main():
     args = parser.parse_args()
     {"build": cmd_build, "test": cmd_test, "import": cmd_import,
      "lint": cmd_lint, "formal": cmd_formal, "profile": cmd_profile,
-     "equiv": cmd_equiv}[args.command](args)
+     "equiv": cmd_equiv, "doc": cmd_doc}[args.command](args)
 
 
 if __name__ == "__main__":
