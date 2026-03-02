@@ -341,7 +341,7 @@
     {
       "id": 23,
       "type": "bug",
-      "status": "open",
+      "status": "resolved",
       "priority": "medium",
       "title": "Module.__setattr__ bypasses _assign() for underscore-prefixed attributes, breaking simulation",
       "description": "Module.__setattr__ bypasses _assign() for underscore-prefixed attributes, breaking simulation",
@@ -350,6 +350,10 @@
         {
           "ts": "2026-03-02",
           "msg": "When a Register is named with underscore prefix (e.g. self._prev), Module.__setattr__ falls through to object.__setattr__ which replaces the Signal with a plain int. This silently breaks simulation. Workaround: use non-underscore names for all registers. Fix: __setattr__ should check for Signal before the underscore check, or use a different mechanism."
+        },
+        {
+          "ts": "2026-03-02",
+          "msg": "Fixed: __setattr__ now checks for Signal before the underscore prefix check. Underscore-prefixed registers (e.g. self._prev) now correctly use _assign() instead of being replaced. All 525 tests pass."
         }
       ]
     },

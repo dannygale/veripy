@@ -45,28 +45,28 @@ class Module:
         return super().__new__(cls)
 
     def __setattr__(self, name, value):
-        if not name.startswith('_'):
-            try:
-                existing = object.__getattribute__(self, name)
-                if isinstance(existing, Signal):
-                    existing._assign(value)
-                    return
-                if isinstance(existing, Interface) and isinstance(value, Interface):
-                    for name, direction in Interface._match(existing, value):
-                        l_sig = existing._signals()[name]
-                        r_sig = value._signals()[name]
-                        if direction == 'r2l':
+        # Always check if we're assigning to an existing Signal (even underscore-prefixed)
+        try:
+            existing = object.__getattribute__(self, name)
+            if isinstance(existing, Signal):
+                existing._assign(value)
+                return
+            if not name.startswith('_') and isinstance(existing, Interface) and isinstance(value, Interface):
+                for name, direction in Interface._match(existing, value):
+                    l_sig = existing._signals()[name]
+                    r_sig = value._signals()[name]
+                    if direction == 'r2l':
+                        l_sig._assign(int(r_sig))
+                    elif direction == 'l2r':
+                        r_sig._assign(int(l_sig))
+                    else:  # fwd
+                        if l_sig._kind == 'input':
                             l_sig._assign(int(r_sig))
-                        elif direction == 'l2r':
+                        else:
                             r_sig._assign(int(l_sig))
-                        else:  # fwd
-                            if l_sig._kind == 'input':
-                                l_sig._assign(int(r_sig))
-                            else:
-                                r_sig._assign(int(l_sig))
-                    return
-            except AttributeError:
-                pass
+                return
+        except AttributeError:
+            pass
         object.__setattr__(self, name, value)
 
     def __init__(self, params=None):
