@@ -281,6 +281,38 @@ class VeripyTestCase(unittest.TestCase):
                         self._rtl_outputs[t][name] = vm.get(name)
         return True
 
+    def _run_csim(self):
+        """Replay recorded stimuli through native C sim, collect outputs."""
+        from .backend_csim import compile_module as csim_compile
+
+        mod = self._mod
+        module_name = type(mod).__name__.lower()
+
+        try:
+            with csim_compile(mod, module_name) as cm:
+                cm.eval()
+
+                self._rtl_outputs = {}
+                for t, sets in self._trace_sets:
+                    for name, val in sets.items():
+                        cm.set(name, val)
+                    cm.eval()
+                    if t in self._py_outputs:
+                        if t not in self._rtl_outputs:
+                            self._rtl_outputs[t] = {}
+                        for name in self._py_outputs[t]:
+                            self._rtl_outputs[t][name] = cm.get(name)
+
+                # Capture outputs at times after the last trace_set
+                for t in self._py_outputs:
+                    if t not in self._rtl_outputs:
+                        self._rtl_outputs[t] = {}
+                        for name in self._py_outputs[t]:
+                            self._rtl_outputs[t][name] = cm.get(name)
+        except Exception:
+            return False
+        return True
+
 
 def _wrap_dual(fn):
     """Wrap a test method to run Python sim then compare with iverilog."""
@@ -309,6 +341,16 @@ def _wrap_dual(fn):
             saved_rtl = self._rtl_outputs
             if self._run_verilator():
                 with self.subTest(backend='verilator'):
+                    self._assert_traces_match()
+            self._rtl_outputs = saved_rtl
+
+        # Pass 4 (opt-in): Native C simulation
+        use_csim = getattr(self, 'USE_CSIM', False) or \
+                   os.environ.get('VERIPY_CSIM', '') == '1'
+        if use_csim:
+            saved_rtl = self._rtl_outputs
+            if self._run_csim():
+                with self.subTest(backend='csim'):
                     self._assert_traces_match()
             self._rtl_outputs = saved_rtl
 

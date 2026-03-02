@@ -93,7 +93,12 @@ def _expr(node, sig_w) -> str:
         l, r = _expr(node.left, sig_w), _expr(node.right, sig_w)
         return f'({l} {node.op} {r})'
     if isinstance(node, BoolOp):
-        parts = [_expr(v, sig_w) for v in node.values]
+        parts = []
+        for v in node.values:
+            s = _expr(v, sig_w)
+            if isinstance(v, BoolOp):
+                s = f'({s})'
+            parts.append(s)
         return f' {node.op} '.join(parts)
     if isinstance(node, Mux):
         s, t, f = (_expr(node.sel, sig_w), _expr(node.true_val, sig_w),
@@ -350,6 +355,42 @@ def emit_c(ir: IRModule) -> str:
 
 
 # ── Compile + load ───────────────────────────────────────────────────
+
+def compile_module(module, module_name=None):
+    """Compile a VeriPy Module to a CSimModel.
+
+    Handles lowering, sub-module collection, flattening, and compilation.
+    """
+    from .signal import Signal, Interface
+    from .lower import lower_module
+    from .flatten import flatten_ir
+    from .emit_verilog import _to_snake
+
+    if module_name is None:
+        module_name = type(module).__name__.lower()
+
+    # Collect sub-module IRs into registry
+    registry = {}
+    def _collect(m, mname):
+        if mname in registry:
+            return
+        factory = getattr(type(m), '_veripy_factory', None)
+        fresh = factory() if factory else type(m)()
+        for sn, sub in fresh._submodules().items():
+            _collect(sub, _to_snake(type(sub).__name__))
+        registry[mname] = lower_module(fresh, mname)
+
+    from .module import Module as _Module
+    for k in dir(module):
+        v = getattr(module, k)
+        if isinstance(v, _Module) and v is not module:
+            _collect(v, _to_snake(type(v).__name__))
+
+    top_ir = lower_module(module, module_name)
+    flat_ir = flatten_ir(top_ir, registry) if top_ir.instances else top_ir
+
+    return CSimModel(flat_ir)
+
 
 class CSimModel:
     """Compile C source to shared lib and wrap with ctypes.

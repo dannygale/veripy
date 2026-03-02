@@ -191,14 +191,17 @@ def topo_sort_comb(mod: IRModule) -> IRModule:
     if len(order) != n:
         raise ValueError('Combinational loop detected in comb assignments')
 
-    # Rebuild assigns and comb_blocks in sorted order
+    # Rebuild assigns and comb_blocks in sorted order.
+    # All nodes go into comb_blocks to preserve interleaved ordering;
+    # ContAssigns become single-statement CombBlocks.
     out = deepcopy(mod)
     out.assigns = []
     out.comb_blocks = []
     for i in order:
         kind, obj = nodes[i]
         if kind == 'assign':
-            out.assigns.append(deepcopy(obj))
+            out.comb_blocks.append(CombBlock(
+                stmts=[Assign(obj.target, deepcopy(obj.value))], locals={}))
         else:
             out.comb_blocks.append(deepcopy(obj))
 

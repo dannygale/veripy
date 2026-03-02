@@ -178,6 +178,15 @@ class TestFlattenDualPortMem(unittest.TestCase):
 # ── Topological sort tests ──────────────────────────────────────────
 
 class TestTopoSort(unittest.TestCase):
+    def _comb_targets(self, mod):
+        """Extract assignment targets from comb_blocks in order."""
+        targets = []
+        for blk in mod.comb_blocks:
+            for s in blk.stmts:
+                if isinstance(s, Assign):
+                    targets.append(s.target)
+        return targets
+
     def test_already_sorted(self):
         """a = 1; b = a  →  order preserved."""
         mod = IRModule(name='t',
@@ -186,7 +195,7 @@ class TestTopoSort(unittest.TestCase):
             assigns=[ContAssign('a', Const(1)),
                      ContAssign('b', Sig('a'))])
         out = topo_sort_comb(mod)
-        targets = [a.target for a in out.assigns]
+        targets = self._comb_targets(out)
         self.assertEqual(targets, ['a', 'b'])
 
     def test_reverse_order_sorted(self):
@@ -197,7 +206,7 @@ class TestTopoSort(unittest.TestCase):
             assigns=[ContAssign('b', Sig('a')),
                      ContAssign('a', Const(1))])
         out = topo_sort_comb(mod)
-        targets = [a.target for a in out.assigns]
+        targets = self._comb_targets(out)
         self.assertLess(targets.index('a'), targets.index('b'))
 
     def test_chain_of_three(self):
@@ -209,7 +218,7 @@ class TestTopoSort(unittest.TestCase):
                      ContAssign('b', Sig('a')),
                      ContAssign('a', Sig('inp'))])
         out = topo_sort_comb(mod)
-        targets = [a.target for a in out.assigns]
+        targets = self._comb_targets(out)
         self.assertLess(targets.index('a'), targets.index('b'))
         self.assertLess(targets.index('b'), targets.index('c'))
 
@@ -221,10 +230,10 @@ class TestTopoSort(unittest.TestCase):
             assigns=[ContAssign('a', Const(1))],
             comb_blocks=[CombBlock(stmts=[Assign('b', Sig('a'))], locals={})])
         out = topo_sort_comb(mod)
-        # 'a' assign should come before 'b' comb block
-        self.assertEqual(len(out.assigns), 1)
-        self.assertEqual(out.assigns[0].target, 'a')
-        self.assertEqual(len(out.comb_blocks), 1)
+        # All nodes merged into comb_blocks; 'a' should come before 'b'
+        self.assertEqual(len(out.assigns), 0)
+        targets = self._comb_targets(out)
+        self.assertLess(targets.index('a'), targets.index('b'))
 
     def test_loop_raises(self):
         """a = b; b = a  →  ValueError."""
@@ -251,7 +260,8 @@ class TestTopoSort(unittest.TestCase):
             assigns=[ContAssign('a', Sig('x')),
                      ContAssign('b', Sig('y'))])
         out = topo_sort_comb(mod)
-        self.assertEqual(len(out.assigns), 2)
+        targets = self._comb_targets(out)
+        self.assertEqual(len(targets), 2)
 
 
 if __name__ == '__main__':
