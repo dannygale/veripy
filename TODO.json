@@ -1,0 +1,59 @@
+{
+  "items": [
+    {
+      "id": 1,
+      "type": "task",
+      "status": "resolved",
+      "priority": "high",
+      "title": "Transaction-level helpers: Driver base class with send(txn) and SPI example",
+      "description": "Create a Driver base class with async def send(txn) that uses reactive yields internally. Ship a simple SPI driver example. Users subclass for their protocols.",
+      "created": "2026-03-02",
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Feature already fully implemented and committed (d353e94, 2eec80b). Driver base class, SPI examples, 12 tests all passing. Export in __init__.py."
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "task",
+      "status": "resolved",
+      "priority": "medium",
+      "title": "Document Driver base class in docs/testing.md and README.md",
+      "description": "Driver base class is implemented but not documented. Add a section to testing.md and a row to the README features table.",
+      "created": "2026-03-02",
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Committed 3e469d3: added Protocol Drivers section to testing.md and README features list."
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "bug",
+      "status": "open",
+      "priority": "low",
+      "title": "test_rand.py: 5 tests fail due to missing constrainedrandom dependency",
+      "description": "TestRand tests error with ImportError: constrainedrandom is required. Tests should skip gracefully when the optional dep is missing.",
+      "created": "2026-03-02"
+    },
+    {
+      "id": 4,
+      "type": "task",
+      "status": "resolved",
+      "priority": "high",
+      "title": "Implement PriorityArbiter, ClockDivider, CreditFlowControl IPs",
+      "description": "Implement PriorityArbiter, ClockDivider, CreditFlowControl IPs",
+      "created": "2026-03-02",
+      "feature": "ip-library",
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Implemented PriorityArbiter, ClockDivider, CreditFlowControl. 10 new tests, all passing."
+        }
+      ]
+    }
+  ]
+}

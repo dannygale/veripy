@@ -201,3 +201,130 @@ class RoundRobinArbiter(Module):
         @self.comb
         def output():
             self.grant = self.grnt
+
+
+class PriorityArbiter(Module):
+    """Fixed-priority arbiter for N requestors.
+
+    Lowest index = highest priority. Grant is one-hot.
+
+    Ports:
+        clock, reset  — system signals
+        req           — N-bit request vector
+        grant         — N-bit grant vector (one-hot)
+
+    Usage:
+        arb = PriorityArbiter(n=4)
+    """
+
+    def __init__(self, n=4):
+        self.clock = Input()
+        self.reset = Input()
+        self.req   = Input(n)
+        self.grant = Output(n)
+        self.grnt  = Register(n)
+        super().__init__()
+
+        @self.posedge(self.clock)
+        def update():
+            if self.reset:
+                self.grnt = 0
+            elif self.req:
+                found = 0
+                for i in range(n):
+                    if not found and (self.req & (1 << i)):
+                        self.grnt = 1 << i
+                        found = 1
+            else:
+                self.grnt = 0
+
+        @self.comb
+        def output():
+            self.grant = self.grnt
+
+
+class ClockDivider(Module):
+    """Parameterized clock divider.
+
+    Output toggles every ``divisor`` input clock cycles, producing
+    a clock with period = 2 * divisor * input period.
+
+    Ports:
+        clock, reset  — system signals
+        clk_out       — divided clock output
+
+    Usage:
+        div = ClockDivider(divisor=4)
+    """
+
+    def __init__(self, divisor=2):
+        self.clock   = Input()
+        self.reset   = Input()
+        self.clk_out = Output()
+
+        cnt_bits = max(1, (divisor - 1).bit_length())
+        self.cnt  = Register(cnt_bits)
+        self.out_r = Register()
+        super().__init__()
+
+        @self.posedge(self.clock)
+        def divide():
+            if self.reset:
+                self.cnt   = 0
+                self.out_r = 0
+            elif self.cnt == divisor - 1:
+                self.cnt   = 0
+                self.out_r = not self.out_r
+            else:
+                self.cnt = self.cnt + 1
+
+        @self.comb
+        def output():
+            self.clk_out = self.out_r
+
+
+class CreditFlowControl(Module):
+    """Credit-based flow control.
+
+    Sender may send when credits > 0. Each send consumes a credit;
+    each recv returns a credit.
+
+    Ports:
+        clock, reset   — system signals
+        send_valid     — input: sender has data
+        send_ready     — output: credits available (sender may send)
+        recv_valid     — input: receiver consumed data (returns credit)
+        recv_ready     — output: receiver can accept (always 1 when credits < max)
+
+    Usage:
+        fc = CreditFlowControl(credits=4)
+    """
+
+    def __init__(self, credits=4):
+        self.clock      = Input()
+        self.reset      = Input()
+        self.send_valid = Input()
+        self.send_ready = Output()
+        self.recv_valid = Input()
+        self.recv_ready = Output()
+
+        cnt_bits = credits.bit_length() + 1
+        self.cnt = Register(cnt_bits)
+        super().__init__()
+
+        @self.posedge(self.clock)
+        def update():
+            if self.reset:
+                self.cnt = credits
+            else:
+                send = self.send_valid and self.cnt != 0
+                recv = self.recv_valid and self.cnt != credits
+                if send and not recv:
+                    self.cnt = self.cnt - 1
+                elif recv and not send:
+                    self.cnt = self.cnt + 1
+
+        @self.comb
+        def output():
+            self.send_ready = 1 if self.cnt != 0 else 0
+            self.recv_ready = 1 if self.cnt != credits else 0

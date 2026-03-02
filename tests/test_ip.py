@@ -1,9 +1,11 @@
-"""Tests for IP library: SyncFifo, EdgeDetector, Debouncer."""
+"""Tests for IP library: SyncFifo, EdgeDetector, Debouncer, arbiters, ClockDivider, CreditFlowControl."""
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
-from veripy import VeripyTestCase, SyncFifo, EdgeDetector, Debouncer, RoundRobinArbiter
+from veripy import (VeripyTestCase, SyncFifo, EdgeDetector, Debouncer,
+                    RoundRobinArbiter, PriorityArbiter, ClockDivider,
+                    CreditFlowControl)
 
 T = 5  # half-period
 
@@ -188,6 +190,172 @@ class TestDebouncer(VeripyTestCase):
             self.assertEqual(self.out('q'), 0)
 
 
+# ── PriorityArbiter tests ─────────────────────────────────────────────
+
+class TestPriorityArbiter(VeripyTestCase):
+    def create_module(self):
+        return PriorityArbiter(n=4)
+
+    def test_lowest_index_wins(self):
+        @self.always
+        def clock():
+            self.set(clock=0); yield T
+            self.set(clock=1); yield T
+
+        @self.initial
+        def stimulus():
+            self.set(reset=1, req=0)
+            yield T * 4
+            self.set(reset=0)
+            yield T * 2
+
+            # Bits 0 and 2 requesting — bit 0 wins
+            self.set(req=0b0101)
+            yield T * 2
+            self.assertEqual(self.out('grant'), 0b0001)
+
+    def test_single_high_bit(self):
+        @self.always
+        def clock():
+            self.set(clock=0); yield T
+            self.set(clock=1); yield T
+
+        @self.initial
+        def stimulus():
+            self.set(reset=1, req=0)
+            yield T * 4
+            self.set(reset=0)
+            yield T * 2
+
+            self.set(req=0b1000)
+            yield T * 2
+            self.assertEqual(self.out('grant'), 0b1000)
+
+    def test_no_request(self):
+        @self.always
+        def clock():
+            self.set(clock=0); yield T
+            self.set(clock=1); yield T
+
+        @self.initial
+        def stimulus():
+            self.set(reset=1, req=0)
+            yield T * 4
+            self.set(reset=0)
+            yield T * 2
+
+            self.set(req=0)
+            yield T * 2
+            self.assertEqual(self.out('grant'), 0)
+
+
+# ── ClockDivider tests ───────────────────────────────────────────────
+
+class TestClockDivider(VeripyTestCase):
+    def create_module(self):
+        return ClockDivider(divisor=2)
+
+    def test_divides_clock(self):
+        @self.always
+        def clock():
+            self.set(clock=0); yield T
+            self.set(clock=1); yield T
+
+        @self.initial
+        def stimulus():
+            self.set(reset=1)
+            yield T * 4
+            self.set(reset=0)
+            yield T * 2
+
+            self.assertEqual(self.out('clk_out'), 0)
+
+            # After 2 input cycles, clk_out toggles
+            yield T * 2  # cycle 1: cnt goes 0→1
+            yield T * 2  # cycle 2: cnt==1 → toggle, cnt=0
+            self.assertEqual(self.out('clk_out'), 1)
+
+            # After 2 more, toggles back
+            yield T * 2
+            yield T * 2
+            self.assertEqual(self.out('clk_out'), 0)
+
+
+# ── CreditFlowControl tests ──────────────────────────────────────────
+
+class TestCreditFlowControl(VeripyTestCase):
+    def create_module(self):
+        return CreditFlowControl(credits=2)
+
+    def test_initial_credits(self):
+        @self.always
+        def clock():
+            self.set(clock=0); yield T
+            self.set(clock=1); yield T
+
+        @self.initial
+        def stimulus():
+            self.set(reset=1, send_valid=0, recv_valid=0)
+            yield T * 4
+            self.set(reset=0)
+            yield T * 2
+
+            # After reset, all credits available
+            self.assertEqual(self.out('send_ready'), 1)
+
+    def test_credits_exhaust(self):
+        @self.always
+        def clock():
+            self.set(clock=0); yield T
+            self.set(clock=1); yield T
+
+        @self.initial
+        def stimulus():
+            self.set(reset=1, send_valid=0, recv_valid=0)
+            yield T * 4
+            self.set(reset=0)
+            yield T * 2
+
+            # Send twice to exhaust 2 credits
+            self.set(send_valid=1)
+            yield T * 2  # credit: 2→1
+            yield T * 2  # credit: 1→0
+            self.set(send_valid=0)
+            yield T * 2
+
+            self.assertEqual(self.out('send_ready'), 0)
+
+    def test_credit_return(self):
+        @self.always
+        def clock():
+            self.set(clock=0); yield T
+            self.set(clock=1); yield T
+
+        @self.initial
+        def stimulus():
+            self.set(reset=1, send_valid=0, recv_valid=0)
+            yield T * 4
+            self.set(reset=0)
+            yield T * 2
+
+            # Exhaust credits
+            self.set(send_valid=1)
+            yield T * 2
+            yield T * 2
+            self.set(send_valid=0)
+            yield T * 2
+
+            self.assertEqual(self.out('send_ready'), 0)
+
+            # Return a credit
+            self.set(recv_valid=1)
+            yield T * 2
+            self.set(recv_valid=0)
+            yield T * 2
+
+            self.assertEqual(self.out('send_ready'), 1)
+
+
 # ── Verilog emission tests ───────────────────────────────────────────
 
 class TestRoundRobinArbiter(VeripyTestCase):
@@ -278,6 +446,23 @@ class TestIPVerilog(unittest.TestCase):
         self.assertIn('module roundrobinarbiter', v)
         self.assertIn('grant', v)
         self.assertIn('req', v)
+
+    def test_priority_arbiter_emits(self):
+        v = PriorityArbiter(n=4).to_verilog()
+        self.assertIn('module priorityarbiter', v)
+        self.assertIn('grant', v)
+        self.assertIn('req', v)
+
+    def test_clockdivider_emits(self):
+        v = ClockDivider(divisor=4).to_verilog()
+        self.assertIn('module clockdivider', v)
+        self.assertIn('clk_out', v)
+
+    def test_creditflowcontrol_emits(self):
+        v = CreditFlowControl(credits=4).to_verilog()
+        self.assertIn('module creditflowcontrol', v)
+        self.assertIn('send_ready', v)
+        self.assertIn('recv_ready', v)
 
 
 if __name__ == '__main__':
