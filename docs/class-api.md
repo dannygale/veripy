@@ -98,6 +98,8 @@ def ctrl(state, IDLE, RUN, DONE):
 
 ## Pipelines
 
+### Lambda-Chain (Simple)
+
 ```python
 pipe = self.pipeline(self.clock, self.reset, width=16)
 pipe.stage(lambda: int(self.a) + int(self.b))
@@ -107,6 +109,22 @@ pipe.stage(lambda prev: prev * 2)
 def output():
     self.out = pipe.result
 ```
+
+### Named Stages
+
+```python
+pipe = self.pipeline(self.clock, self.reset)
+
+if_id = pipe.stage('if_id', self.stall, self.flush,
+    instr=self.instr,
+    pc=self.pc)
+
+id_ex = pipe.stage('id_ex', self.stall, None,
+    alu_op=self.dec_alu_op,
+    pc=if_id.pc)
+```
+
+Each `field=source` creates a register `{stage}_{field}` with width inferred from the source. Access fields via `stage.field`. See [Guide — Named Stages](guide.md#named-stages-multi-stage-cpu-pipelines) for stall/flush semantics and expression sources.
 
 ## Formal Properties
 

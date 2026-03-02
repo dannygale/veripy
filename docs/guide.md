@@ -220,6 +220,8 @@ def safe_counter():
 
 ## Pipelines
 
+### Lambda-Chain (Simple)
+
 ```python
 from veripy.context import pipeline
 
@@ -241,6 +243,59 @@ def pipe(width=16):
 ```
 
 Each `.stage()` creates a register boundary. Data propagates one stage per clock cycle. Reset clears all pipeline registers.
+
+### Named Stages (Multi-Stage CPU Pipelines)
+
+For real pipelines with per-stage stall/flush and many fields, use named stages:
+
+```python
+@module
+def cpu(width=32):
+    clk = Input()
+    rst = Input()
+    instr = Input(width)
+    pc    = Input(width)
+    dec_alu_op = Input(5)
+    dec_rd     = Input(5)
+    stall      = Input()
+    flush      = Input()
+
+    pipe = pipeline(clk, rst)
+
+    # pipe.stage('name', stall, flush, field=source, ...)
+    if_id = pipe.stage('if_id', stall, flush,
+        instr=instr,
+        pc=pc)
+
+    id_ex = pipe.stage('id_ex', stall, None,
+        alu_op=dec_alu_op,
+        rd=dec_rd,
+        pc=if_id.pc)           # chain from previous stage
+```
+
+Each `field=source` pair creates a register named `{stage}_{field}` (e.g. `if_id_instr`). Width is inferred from the source signal. On each posedge:
+
+- **reset** → zero all fields
+- **stall** → hold current values
+- **flush** → zero all fields
+- **else** → latch source values
+
+Access fields via `stage.field` (e.g. `if_id.pc`, `id_ex.alu_op`).
+
+#### Expression Sources
+
+Signal expressions work directly as stall/flush conditions and field sources — no intermediate registers needed:
+
+```python
+_flush = hzu.flush_if_id & ~mem_stall
+if_id = pipe.stage('if_id',
+    pipeline_stall & ~_flush, _flush,       # expressions as stall/flush
+    valid=(fsm == 2),                        # comparison expression as field source
+    link_pc=id_ex.pc + 4,                    # arithmetic expression
+    byte_off=alu.result[1:0])                # bit slice as source
+```
+
+Expressions emit inline in the generated Verilog (e.g. `link_pc <= (id_ex_pc + 4)`).
 
 ## Timing Constraints
 

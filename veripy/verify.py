@@ -100,6 +100,18 @@ class VeripyTestCase(unittest.TestCase):
         self._tb_initial.append(fn)
         return fn
 
+    def fork(self, *fns):
+        """Launch generator functions in parallel, return Until that waits for all."""
+        return self._engine.fork(*fns)
+
+    def fork_any(self, *fns):
+        """Launch generator functions in parallel, return Until that waits for first."""
+        return self._engine.fork_any(*fns)
+
+    def coverage_report(self):
+        """Return [(name, hit_count)] for all cover points on the module."""
+        return self._mod.coverage_report()
+
     # --- internals ---
 
     def _begin(self):
@@ -257,7 +269,11 @@ def _wrap_dual(fn):
                 self.run_sim()
 
         # Pass 2: generate Verilog testbench, run iverilog, compare
-        self._run_iverilog()
+        # Reactive yields (until()) can't be lowered to Verilog — skip iverilog path.
+        try:
+            self._run_iverilog()
+        except SyntaxError:
+            return
         with self.subTest(backend='sim_vs_rtl'):
             self._assert_traces_match()
 

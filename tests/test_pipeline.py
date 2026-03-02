@@ -42,7 +42,9 @@ class TestPipelineVerilog(unittest.TestCase):
 
     def test_stage_chain(self):
         v = self._make_pipe().to_verilog()
-        self.assertIn('_pipe_stage1 <= _pipe_stage0', v)
+        # Stage 0 computes a+b, stage 1 computes prev*2
+        self.assertIn('_pipe_stage0 <= (a + b)', v)
+        self.assertIn('_pipe_stage1 <= (_pipe_stage0 * 2)', v)
 
     def test_output_wired(self):
         v = self._make_pipe().to_verilog()

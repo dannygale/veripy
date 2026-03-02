@@ -22,12 +22,23 @@ print(bool(sig))     # True (non-zero)
 
 ## Operators
 
-All arithmetic returns width-masked integers:
+All arithmetic and bitwise operators return lazy `_Expr` objects that re-evaluate on each `int()` / `bool()` call, always reflecting current signal values:
 
 ```python
 a = Signal(8); a.set(10)
 b = Signal(8); b.set(3)
 
+expr = a + b     # _Expr — not yet evaluated
+int(expr)        # 13 — evaluates now
+a.set(20)
+int(expr)        # 23 — re-evaluates with current values
+```
+
+Expressions carry width metadata, so they can be used directly as pipeline stage sources without intermediate registers.
+
+Arithmetic (width-masked):
+
+```python
 a + b    # 13
 a - b    # 7
 a & b    # 2
@@ -38,13 +49,15 @@ a << 2   # 40
 a >> 1   # 5
 ```
 
-Comparisons return Python bools:
+Comparisons (return 1-bit `_Expr`):
 
 ```python
-a == b   # False
-a > b    # True
-a <= 10  # True
+a == b   # _Expr → 0
+a > b    # _Expr → 1
+a <= 10  # _Expr → 1
 ```
+
+Expressions compose — `(a + b) & mask` builds a chain of `_Expr` objects. Using `int()`, `bool()`, or `if expr:` evaluates immediately.
 
 ## Bit Slicing
 
