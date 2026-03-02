@@ -3,6 +3,26 @@
 import heapq
 
 
+class Until:
+    """Sentinel yielded by generators to wait for a condition.
+
+    Usage in testbench generators::
+
+        yield until(lambda: int(dut.ready) == 1)
+        yield until(lambda: int(dut.ready) == 1, timeout=1000)
+    """
+    __slots__ = ('cond', 'timeout')
+
+    def __init__(self, cond, timeout=None):
+        self.cond = cond
+        self.timeout = timeout
+
+
+def until(cond, timeout=None):
+    """Wait until *cond()* returns truthy. Raise TimeoutError after *timeout* time units."""
+    return Until(cond, timeout)
+
+
 class VCDWriter:
     """Writes VCD (Value Change Dump) files for waveform viewing."""
 
@@ -82,6 +102,7 @@ class SimEngine:
         self._seq = 0          # tie-breaker for heap ordering
         self._finished = False
         self._initial_count = 0  # track active initial blocks
+        self._waiting = []     # [(gen, restart_fn, cond, deadline|None)]
         self._vcd_path = vcd
         self._vcd = None
         self._vcd_file = None
@@ -109,6 +130,35 @@ class SimEngine:
             signal.set(1)
             yield half
 
+    def fork(self, *fns):
+        """Launch generator functions in parallel, return Until that waits for all.
+
+        Usage::
+
+            yield sim.fork(block_a, block_b)   # resumes when both finish
+        """
+        done = set()
+        n = len(fns)
+        for i, fn in enumerate(fns):
+            def _cb(idx=i):
+                done.add(idx)
+            self._schedule(self.time, fn(), _cb)
+        return until(lambda: len(done) == n)
+
+    def fork_any(self, *fns):
+        """Launch generator functions in parallel, return Until that waits for first.
+
+        Usage::
+
+            yield sim.fork_any(block_a, block_b)  # resumes when first finishes
+        """
+        done = set()
+        for i, fn in enumerate(fns):
+            def _cb(idx=i):
+                done.add(idx)
+            self._schedule(self.time, fn(), _cb)
+        return until(lambda: len(done) > 0)
+
     def finish(self):
         """Stop the simulation (like $finish)."""
         self._finished = True
@@ -124,26 +174,59 @@ class SimEngine:
             self.mod._snapshot_prev()
             self.mod._settle_comb()
 
-            while self._queue and not self._finished:
+            while (self._queue or self._waiting) and not self._finished:
+                # If only waiting generators remain, advance to earliest deadline
+                if not self._queue:
+                    deadline = min((d for _, _, _, d in self._waiting if d is not None), default=None)
+                    if deadline is None:
+                        raise RuntimeError(
+                            'Deadlock: waiting generators but no scheduled events and no timeouts')
+                    self.time = deadline
+                    self._check_waiting()
+                    continue
+
                 t, _, gen, restart_fn = heapq.heappop(self._queue)
                 self.time = t
-
-                try:
-                    delay = next(gen)
-                    self._schedule(t + delay, gen, restart_fn)
-                except StopIteration:
-                    if restart_fn is not None:
-                        self._schedule(t, restart_fn(), restart_fn)
-                    else:
-                        self._initial_count -= 1
-                        if self._initial_count <= 0:
-                            self._finished = True
-
+                self._resume(gen, restart_fn)
                 self._process()
+                self._check_waiting()
         finally:
             if self._vcd_file:
                 self._vcd_file.close()
                 self._vcd_file = None
+
+    def _resume(self, gen, restart_fn, exc=None):
+        """Advance a generator and handle its yielded value."""
+        try:
+            result = gen.throw(exc) if exc else next(gen)
+            if isinstance(result, Until):
+                deadline = self.time + result.timeout if result.timeout is not None else None
+                self._waiting.append((gen, restart_fn, result.cond, deadline))
+            else:
+                self._schedule(self.time + result, gen, restart_fn)
+        except StopIteration:
+            if restart_fn is not None:
+                result = restart_fn()
+                if result is not None:          # always block → reschedule
+                    self._schedule(self.time, result, restart_fn)
+                                                # fork callback → returned None, done
+            else:
+                self._initial_count -= 1
+                if self._initial_count <= 0:
+                    self._finished = True
+
+    def _check_waiting(self):
+        """Resume waiting generators whose conditions are met or deadlines passed."""
+        still_waiting = []
+        for gen, restart_fn, cond, deadline in self._waiting:
+            if cond():
+                self._resume(gen, restart_fn)
+            elif deadline is not None and self.time >= deadline:
+                self._resume(gen, restart_fn, exc=TimeoutError(
+                    f'until() timed out at time {self.time}'))
+            else:
+                still_waiting.append((gen, restart_fn, cond, deadline))
+        self._waiting = still_waiting
 
     def _schedule(self, time, gen, restart_fn):
         heapq.heappush(self._queue, (time, self._seq, gen, restart_fn))
