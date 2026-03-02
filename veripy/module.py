@@ -1,7 +1,7 @@
 """Module base class: defines the structure for simulation and Verilog emission."""
 
 import ast as _ast
-from .signal import Signal, Mem, Edge, SensitivityList, Interface, Register, posedge as _posedge
+from .signal import Signal, Mem, Edge, SensitivityList, Interface, Register, posedge as _posedge, _Expr, _SliceProxy
 from .parameter import Parameter, ParamExpr, is_param
 
 
@@ -826,6 +826,15 @@ class _NamedStage:
         rn = self._resolve_name(reset) or 'reset'
         stall, flush = self._stall, self._flush
         name = self._name
+        resolve = self._resolve_name
+
+        def _src(sig):
+            """Render a signal/expr as a Python expression for emit source."""
+            if isinstance(sig, _Expr):  return sig._to_emit_python(resolve)
+            if isinstance(sig, _SliceProxy):
+                n = resolve(sig._signal)
+                return f'self.{n}[{sig._hi}:{sig._lo}]' if sig._hi != sig._lo else f'self.{n}[{sig._lo}]'
+            return f'self.{resolve(sig)}'
 
         lines = [f'def _{name}_advance(self):']
         lines.append(f'    if self.{rn}:')
@@ -833,20 +842,17 @@ class _NamedStage:
             lines.append(f'        self.{name}_{fname} = 0')
 
         if stall is not None:
-            sn = self._resolve_name(stall) or 'stall'
-            lines.append(f'    elif self.{sn}:')
+            lines.append(f'    elif {_src(stall)}:')
             lines.append('        pass')
 
         if flush is not None:
-            fn = self._resolve_name(flush) or 'flush'
-            lines.append(f'    elif self.{fn}:')
+            lines.append(f'    elif {_src(flush)}:')
             for fname, _ in self._field_sources:
                 lines.append(f'        self.{name}_{fname} = 0')
 
         lines.append('    else:')
         for fname, src in self._field_sources:
-            src_name = self._resolve_name(src)
-            lines.append(f'        self.{name}_{fname} = self.{src_name}')
+            lines.append(f'        self.{name}_{fname} = {_src(src)}')
 
         self._advance_func._veripy_emit_source = '\n'.join(lines)
 
