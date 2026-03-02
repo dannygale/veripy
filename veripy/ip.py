@@ -153,3 +153,51 @@ class Debouncer(Module):
         @self.comb
         def output():
             self.q = self.qr
+
+
+class RoundRobinArbiter(Module):
+    """Round-robin arbiter for N requestors.
+
+    Grants one request per cycle in round-robin order. If no requests
+    are active, grant is 0. The arbiter is fair: it rotates priority
+    after each grant.
+
+    Ports:
+        clock, reset  — system signals
+        req           — N-bit request vector (one-hot or multi-hot)
+        grant         — N-bit grant vector (one-hot, at most one bit set)
+
+    Usage:
+        arb = RoundRobinArbiter(n=4)
+    """
+
+    def __init__(self, n=4):
+        self.clock = Input()
+        self.reset = Input()
+        self.req   = Input(n)
+        self.grant = Output(n)
+        self.ptr   = Register(n.bit_length())
+        self.grnt  = Register(n)
+        super().__init__()
+
+        @self.posedge(self.clock)
+        def update():
+            if self.reset:
+                self.ptr  = 0
+                self.grnt = 0
+            elif self.req:
+                for p in range(n):
+                    if self.ptr == p:
+                        found = 0
+                        for i in range(n):
+                            idx = (p + i) % n
+                            if not found and (self.req & (1 << idx)):
+                                self.ptr  = (idx + 1) % n
+                                self.grnt = 1 << idx
+                                found = 1
+            else:
+                self.grnt = 0
+
+        @self.comb
+        def output():
+            self.grant = self.grnt

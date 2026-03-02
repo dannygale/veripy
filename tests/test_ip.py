@@ -3,7 +3,7 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
-from veripy import VeripyTestCase, SyncFifo, EdgeDetector, Debouncer
+from veripy import VeripyTestCase, SyncFifo, EdgeDetector, Debouncer, RoundRobinArbiter
 
 T = 5  # half-period
 
@@ -190,6 +190,71 @@ class TestDebouncer(VeripyTestCase):
 
 # ── Verilog emission tests ───────────────────────────────────────────
 
+class TestRoundRobinArbiter(VeripyTestCase):
+    def create_module(self):
+        return RoundRobinArbiter(n=4)
+
+    def test_single_request(self):
+        @self.always
+        def clock():
+            self.set(clock=0); yield T
+            self.set(clock=1); yield T
+
+        @self.initial
+        def stimulus():
+            self.set(reset=1, req=0)
+            yield T * 4
+            self.set(reset=0)
+            yield T * 2
+
+            # Request bit 0 only
+            self.set(req=0b0001)
+            yield T * 2  # posedge: grnt <= 0b0001
+            self.assertEqual(self.out('grant'), 0b0001)
+
+    def test_round_robin_rotation(self):
+        @self.always
+        def clock():
+            self.set(clock=0); yield T
+            self.set(clock=1); yield T
+
+        @self.initial
+        def stimulus():
+            self.set(reset=1, req=0)
+            yield T * 4
+            self.set(reset=0)
+            yield T * 2
+
+            # All 4 requesting — should rotate
+            self.set(req=0b1111)
+            yield T * 2  # posedge: ptr=0 grants bit 0, ptr<=1
+            self.assertEqual(self.out('grant'), 0b0001)
+
+            yield T * 2  # posedge: ptr=1 grants bit 1, ptr<=2
+            self.assertEqual(self.out('grant'), 0b0010)
+
+            yield T * 2  # posedge: ptr=2 grants bit 2, ptr<=3
+            self.assertEqual(self.out('grant'), 0b0100)
+
+    def test_no_request(self):
+        @self.always
+        def clock():
+            self.set(clock=0); yield T
+            self.set(clock=1); yield T
+
+        @self.initial
+        def stimulus():
+            self.set(reset=1, req=0)
+            yield T * 4
+            self.set(reset=0)
+            yield T * 2
+
+            # No requests
+            self.set(req=0)
+            yield T * 2
+            self.assertEqual(self.out('grant'), 0)
+
+
 class TestIPVerilog(unittest.TestCase):
     def test_syncfifo_emits(self):
         v = SyncFifo(width=8, depth=4).to_verilog()
@@ -207,6 +272,12 @@ class TestIPVerilog(unittest.TestCase):
         v = Debouncer(threshold=8).to_verilog()
         self.assertIn('module debouncer', v)
         self.assertIn('threshold', v)
+
+    def test_arbiter_emits(self):
+        v = RoundRobinArbiter(n=4).to_verilog()
+        self.assertIn('module roundrobinarbiter', v)
+        self.assertIn('grant', v)
+        self.assertIn('req', v)
 
 
 if __name__ == '__main__':
