@@ -47,12 +47,13 @@ def _to_snake(name):
 class _Lowerer:
     """Lowers Python AST blocks into IR, with full name resolution."""
 
-    def __init__(self, signals, mems, submodules, interfaces, params):
+    def __init__(self, signals, mems, submodules, interfaces, params, module=None):
         self.signals = signals
         self.mems = mems
         self.submodules = submodules
         self.interfaces = interfaces
         self.params = params
+        self._module = module
         self._func = None          # current function being lowered
         self._reg_locals = {}      # name → width for Register locals
         self._all_reg_locals = {}  # accumulated across blocks
@@ -443,6 +444,21 @@ class _Lowerer:
 
     # ── Scan for Register locals ─────────────────────────────────────
 
+    def _infer_rhs_width(self, node):
+        """Try to evaluate an AST expression to get its width."""
+        try:
+            func = self._func
+            ns = dict(func.__globals__) if hasattr(func, '__globals__') else {}
+            if hasattr(func, '__code__') and func.__closure__:
+                for n, cell in zip(func.__code__.co_freevars, func.__closure__):
+                    ns[n] = cell.cell_contents
+            if self._module is not None:
+                ns['self'] = self._module
+            val = eval(compile(ast.Expression(body=node), '<width>', 'eval'), ns)
+            return getattr(val, '_width', None) or getattr(val, 'width', None)
+        except Exception:
+            return None
+
     def _scan_reg_locals(self, tree):
         regs = {}
         for node in ast.walk(tree):
@@ -466,6 +482,10 @@ class _Lowerer:
                             regs[name] = 32
                     else:
                         regs[name] = 32
+                elif name not in self.signals:
+                    w = self._infer_rhs_width(node.value)
+                    if w is not None:
+                        regs[name] = max(regs.get(name, 0), w)
         return regs
 
     # ── Get function AST ─────────────────────────────────────────────
@@ -741,7 +761,7 @@ def lower_module(module, module_name=None):
         ir.mems.append(MemDecl(mem_name, d, w))
 
     # Sub-module wires and instances
-    lowerer = _Lowerer(signals, mems, submodules, interfaces, params)
+    lowerer = _Lowerer(signals, mems, submodules, interfaces, params, module)
     always_driven = lowerer.collect_always_targets(module._comb_blocks)
 
     for sub_name, sub in sorted(submodules.items()):
