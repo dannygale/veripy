@@ -457,7 +457,7 @@ class _Pipeline:
         self._valid_regs = []   # list of Register|None
         self._finalized = False
 
-    def stage(self, func_or_name, *, stall=None, flush=None, **fields):
+    def stage(self, func_or_name, stall=None, flush=None, **fields):
         """Add a pipeline stage.
 
         Two calling conventions:
@@ -466,12 +466,11 @@ class _Pipeline:
             pipe.stage(lambda prev: prev + 1)
 
         Named-stage (new):
-            pipe.stage('id_ex', stall=stall_sig, flush=flush_sig,
-                       rs1=id_rs1_data, rd=dec.rd_addr, valid=if_id.valid)
+            pipe.stage('id_ex', stall_sig, flush_sig,
+                       rs1=id_rs1_data, rd=dec.rd_addr)
 
-        Named stages create registers automatically and generate the
-        posedge block with reset/stall/flush gating.  Field sources
-        must be Signals so they can be read each cycle.
+        *stall* and *flush* are positional-or-keyword; all remaining
+        kwargs become pipeline registers.
         """
         if callable(func_or_name):
             self._stage_funcs.append(func_or_name)

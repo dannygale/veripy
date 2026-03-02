@@ -100,7 +100,7 @@ class TestNamedStageStall(unittest.TestCase):
                 self.stall = Input()
                 super().__init__()
                 pipe = self.pipeline(self.clk, self.rst)
-                self.s0 = pipe.stage('s0', stall=self.stall, a=self.a)
+                self.s0 = pipe.stage('s0', self.stall, None, a=self.a)
         return M()
 
     def test_stall_holds(self):
@@ -146,7 +146,7 @@ class TestNamedStageFlush(unittest.TestCase):
                 self.flush = Input()
                 super().__init__()
                 pipe = self.pipeline(self.clk, self.rst)
-                self.s0 = pipe.stage('s0', flush=self.flush, a=self.a)
+                self.s0 = pipe.stage('s0', None, self.flush, a=self.a)
         m = M()
         def stim():
             m.rst.set(1); m.flush.set(0); m.a.set(42)
@@ -175,7 +175,7 @@ class TestNamedStageMultiStage(unittest.TestCase):
                 super().__init__()
                 pipe = self.pipeline(self.clk, self.rst)
                 self.s0 = pipe.stage('s0', a=self.a)
-                self.s1 = pipe.stage('s1', stall=self.stall,
+                self.s1 = pipe.stage('s1', self.stall, None,
                                      a=self.s0.a)
         return M()
 
@@ -224,9 +224,9 @@ class TestNamedStageValid(unittest.TestCase):
                 super().__init__()
                 self.vin = Register(1)
                 pipe = self.pipeline(self.clk, self.rst)
-                self.s0 = pipe.stage('s0', flush=self.flush,
+                self.s0 = pipe.stage('s0', None, self.flush,
                                      a=self.a, valid=self.vin)
-                self.s1 = pipe.stage('s1', flush=self.flush,
+                self.s1 = pipe.stage('s1', None, self.flush,
                                      a=self.s0.a, valid=self.s0.valid)
                 @self.comb
                 def _():
@@ -264,7 +264,7 @@ class TestNamedStageVerilog(unittest.TestCase):
                 self.out = Output(8)
                 super().__init__()
                 pipe = self.pipeline(self.clk, self.rst)
-                s0 = pipe.stage('s0', stall=self.stall, flush=self.flush,
+                s0 = pipe.stage('s0', self.stall, self.flush,
                                 a=self.a)
                 @self.comb
                 def _():
