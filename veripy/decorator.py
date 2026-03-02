@@ -148,6 +148,7 @@ def module(func):
         instance._comb_blocks = []
         instance._assertions = []
         instance._covers = []
+        instance._assumes = []
         instance._timing = []
         instance._params = resolved_params
 
@@ -201,6 +202,19 @@ def module(func):
         # Collect formal properties, timing, and FSM signals from context
         instance._assertions = list(ctx.assertions)
         instance._covers = list(ctx.covers)
+        instance._assumes = list(ctx.assumes)
+        for clock, fn in instance._assertions:
+            src = emitter_sources.get(fn.__name__)
+            if src:
+                fn._veripy_emit_source = src
+        for clock, fn, _hit in instance._covers:
+            src = emitter_sources.get(fn.__name__)
+            if src:
+                fn._veripy_emit_source = src
+        for clock, fn in instance._assumes:
+            src = emitter_sources.get(fn.__name__)
+            if src:
+                fn._veripy_emit_source = src
         # Resolve timing constraint signal refs to names
         resolved_timing = []
         for entry in ctx.timing:

@@ -1,0 +1,64 @@
+{
+  "items": [
+    {
+      "id": 1,
+      "type": "task",
+      "status": "resolved",
+      "priority": "medium",
+      "title": "Document BlackBox in guide.md",
+      "description": "BlackBox is implemented with tests but has no documentation.",
+      "created": "2026-03-02",
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Added BlackBox section to docs/guide.md (lines 161-214) with class-based and @module examples, verilog_module_name, auto-captured params, generated Verilog output."
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "task",
+      "status": "open",
+      "priority": "medium",
+      "title": "Document CSR/RegisterMap in docs",
+      "description": "csr.py (Field, Reg, RegisterMap, to_module, to_c_header, to_python_driver, to_markdown) is implemented with tests but undocumented.",
+      "created": "2026-03-02"
+    },
+    {
+      "id": 3,
+      "type": "task",
+      "status": "open",
+      "priority": "medium",
+      "title": "Document IP library in docs",
+      "description": "ip.py (SyncFifo, EdgeDetector, Debouncer, RoundRobinArbiter, PriorityArbiter, ClockDivider, CreditFlowControl) is implemented with tests but undocumented.",
+      "created": "2026-03-02"
+    },
+    {
+      "id": 4,
+      "type": "task",
+      "status": "open",
+      "priority": "medium",
+      "title": "Document DualPortMem/TrueDualPortMem and ram_style in signals.md",
+      "description": "DualPortMem, TrueDualPortMem, and Mem ram_style are implemented with tests but signals.md only covers basic Mem.",
+      "created": "2026-03-02"
+    },
+    {
+      "id": 5,
+      "type": "task",
+      "status": "open",
+      "priority": "low",
+      "title": "Document GPU/WGPU backend",
+      "description": "backend_wgpu.py and gpu_sim.py are implemented with tests but undocumented.",
+      "created": "2026-03-02"
+    },
+    {
+      "id": 6,
+      "type": "feature",
+      "status": "open",
+      "priority": "low",
+      "title": "Add combinational loop detection to lint",
+      "description": "Detect circular dependencies in @comb blocks where signal A depends on B and B depends on A.",
+      "created": "2026-03-02"
+    }
+  ]
+}

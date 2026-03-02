@@ -1,12 +1,139 @@
 {
   "features": [
     {
+      "id": "axi4-lite",
+      "category": "ip-library",
+      "title": "AXI4-Lite subordinate IP",
+      "description": "Parameterized AXI4-Lite subordinate module for CSR access. Generates read/write decode logic, byte enables, and response signaling from a register map definition. Foundation for SoC peripheral integration.",
+      "status": "implemented",
+      "priority": "critical",
+      "package": "veripy",
+      "required_by": [
+        "csr-regmap"
+      ]
+    },
+    {
+      "id": "csr-regmap",
+      "category": "ip-library",
+      "title": "CSR / register map generator",
+      "description": "Define register maps in Python (name, offset, fields, access type). Generates: RTL register file, C header, Python test driver, markdown docs. Uses AXI4-Lite subordinate as the bus interface.",
+      "status": "implemented",
+      "priority": "critical",
+      "package": "veripy",
+      "requires": [
+        "axi4-lite"
+      ]
+    },
+    {
+      "id": "blackbox",
+      "category": "core",
+      "title": "Black-box module instantiation",
+      "description": "First-class BlackBox declaration with ports only (no body). Emits clean Verilog instantiation for vendor IP (Xilinx BRAM, PLLs, ASIC memory compilers). Supports constraint propagation and parameter forwarding.",
+      "status": "implemented",
+      "priority": "critical",
+      "package": "veripy"
+    },
+    {
+      "id": "verilator-cosim",
+      "category": "simulation",
+      "title": "Verilator co-simulation backend",
+      "description": "Compile emitted Verilog with Verilator, drive from Python via ctypes/pybind. Same VeripyTestCase API, 100-1000x faster than Python sim. Enables system-level testing of large designs.",
+      "status": "planned",
+      "priority": "high",
+      "package": "veripy",
+      "requires": [
+        "blackbox"
+      ]
+    },
+    {
+      "id": "formal-sby",
+      "category": "verification",
+      "title": "SymbiYosys formal verification integration",
+      "description": "Emit .sby files from assert_always/cover properties. Run bounded model checking via SymbiYosys. Report counterexamples as VCD traces. Support assume/restrict for compositional proofs.",
+      "status": "implemented",
+      "priority": "high",
+      "package": "veripy"
+    },
+    {
+      "id": "mem-inference",
+      "category": "core",
+      "title": "Memory inference annotations",
+      "description": "Mem() style hints: style='block'|'distributed'|'ultra'. Emit (* ram_style *) attributes. Support dual-port and true dual-port variants with correct Verilog coding patterns for Vivado/Quartus/DC.",
+      "status": "implemented",
+      "priority": "high",
+      "package": "veripy"
+    },
+    {
+      "id": "ip-library",
+      "category": "ip-library",
+      "title": "Parameterized IP building blocks",
+      "description": "Sync FIFO, round-robin arbiter, priority arbiter, credit-based flow control, clock divider, edge detector, debouncer. All with dual-path tests and synthesizable Verilog output.",
+      "status": "implemented",
+      "priority": "medium",
+      "package": "veripy",
+      "requires": [
+        "mem-inference"
+      ]
+    },
+    {
+      "id": "build-system",
+      "category": "tooling",
+      "title": "Build system and vendor tool integration",
+      "description": "Dependency-ordered file lists for Vivado/Quartus/DC. Tcl script generation. Incremental rebuild (only re-emit changed modules). Project concept tracking all modules and relationships.",
+      "status": "planned",
+      "priority": "medium",
+      "package": "veripy"
+    },
+    {
+      "id": "auto-docs",
+      "category": "tooling",
+      "title": "Auto-documentation generation",
+      "description": "Generate markdown/HTML from module definitions: port tables, parameter descriptions, register maps, block diagrams (mermaid). Leverage Python introspection.",
+      "status": "planned",
+      "priority": "low",
+      "package": "veripy"
+    },
+    {
+      "id": "equiv-check",
+      "category": "verification",
+      "title": "Formal equivalence checking",
+      "description": "Prove Python behavioral model matches emitted Verilog via Yosys equiv_check. CLI command: veripy equiv <file.py>. Stronger guarantee than dual-path simulation.",
+      "status": "planned",
+      "priority": "low",
+      "package": "veripy",
+      "requires": [
+        "formal-sby"
+      ]
+    },
+    {
+      "id": "lint-v2",
+      "category": "core",
+      "title": "Advanced lint checks",
+      "description": "Combinational loop detection, latch inference warnings, clock domain annotation with automatic CDC violation flagging for raw signal crossings between annotated domains.",
+      "status": "planned",
+      "priority": "medium",
+      "package": "veripy"
+    },
+    {
+      "id": "ip-packaging",
+      "category": "tooling",
+      "title": "Pip-installable IP packages",
+      "description": "Publish VeriPy IP as pip packages (e.g. pip install veripy-axi). Version-pinned, tested, reusable. Package discovery and dependency resolution for hardware IP.",
+      "status": "planned",
+      "priority": "low",
+      "package": "veripy",
+      "requires": [
+        "build-system",
+        "ip-library"
+      ]
+    },
+    {
       "id": "F1",
+      "category": "testing",
       "title": "Enhanced testing model: reactive yields, fork/join, constrained random, transaction helpers, coverage reporting",
       "description": "Reactive yields (until), fork/join concurrency, constrained random integration, Driver base class for protocol helpers, coverage reporting with hit counts.",
       "status": "implemented",
-      "priority": "high",
-      "category": "testing"
+      "priority": "high"
     }
   ]
 }

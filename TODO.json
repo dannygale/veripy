@@ -3,11 +3,17 @@
     {
       "id": 1,
       "type": "task",
-      "status": "in-progress",
+      "status": "resolved",
       "priority": "medium",
       "title": "Document BlackBox in guide.md",
       "description": "BlackBox is implemented with tests but has no documentation.",
-      "created": "2026-03-02"
+      "created": "2026-03-02",
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Added BlackBox section to docs/guide.md (lines 161-214) with class-based and @module examples, verilog_module_name, auto-captured params, generated Verilog output."
+        }
+      ]
     },
     {
       "id": 2,
@@ -53,6 +59,339 @@
       "title": "Add combinational loop detection to lint",
       "description": "Detect circular dependencies in @comb blocks where signal A depends on B and B depends on A.",
       "created": "2026-03-02"
+    },
+    {
+      "id": 7,
+      "type": "task",
+      "status": "open",
+      "priority": "low",
+      "title": "Document GPU/WGPU backend",
+      "description": "backend_wgpu.py and gpu_sim.py are implemented with tests but undocumented.",
+      "created": "2026-03-02"
+    },
+    {
+      "id": 8,
+      "type": "task",
+      "status": "open",
+      "priority": "low",
+      "title": "Add combinational loop detection to lint",
+      "description": "Detect circular dependencies in @comb blocks where signal A depends on B and B depends on A.",
+      "created": "2026-03-02"
+    },
+    {
+      "id": 9,
+      "type": "task",
+      "status": "wontfix",
+      "priority": "high",
+      "title": "Emit Verilog for BlackBox",
+      "description": "Emit Verilog for BlackBox",
+      "created": "2026-03-02",
+      "feature": "blackbox"
+    },
+    {
+      "id": 10,
+      "type": "task",
+      "status": "resolved",
+      "priority": "critical",
+      "title": "Implement Axi4LiteBus interface and Axi4LiteSub module",
+      "description": "Implement Axi4LiteBus interface and Axi4LiteSub module",
+      "created": "2026-03-02",
+      "feature": "axi4-lite",
+      "blocks": [
+        11
+      ],
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Implemented Axi4LiteBus interface (all 5 AXI4-Lite channels) and Axi4LiteSub module. Uses _veripy_emit_source + exec to generate if/elif decode chains for Verilog lowering. Supports rw/ro/wo access, byte enables via wstrb, OKAY/DECERR responses. iverilog compiles clean."
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "task",
+      "status": "resolved",
+      "priority": "critical",
+      "title": "Write tests for Axi4LiteSub module",
+      "description": "Write tests for Axi4LiteSub module",
+      "created": "2026-03-02",
+      "feature": "axi4-lite",
+      "blocked_by": [
+        10
+      ],
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "19 tests written and passing: interface signals, construction, simulation (write/read, byte enables, DECERR, ro/wo access, reset, handshake), Verilog emission (ports, decode, iverilog compile)."
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "task",
+      "status": "resolved",
+      "priority": "critical",
+      "title": "Core RegisterMap, Reg, Field classes + to_module() RTL generation",
+      "description": "Core RegisterMap, Reg, Field classes + to_module() RTL generation",
+      "created": "2026-03-02",
+      "feature": "csr-regmap",
+      "blocks": [
+        13,
+        14,
+        15
+      ],
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Implemented Field, Reg, RegisterMap in veripy/csr.py. to_module() delegates to Axi4LiteSub. to_c_header() generates C macros. 18 tests pass."
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "task",
+      "status": "resolved",
+      "priority": "high",
+      "title": "C header generation: to_c_header()",
+      "description": "C header generation: to_c_header()",
+      "created": "2026-03-02",
+      "feature": "csr-regmap",
+      "blocked_by": [
+        12
+      ],
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Implemented as part of #12 \u2014 to_c_header() generates include guard, offsets, reset values, field shift/mask macros."
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "task",
+      "status": "resolved",
+      "priority": "medium",
+      "title": "Python test driver generation from RegisterMap",
+      "description": "Python test driver generation from RegisterMap",
+      "created": "2026-03-02",
+      "feature": "csr-regmap",
+      "blocked_by": [
+        12
+      ],
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Implemented to_python_driver() on RegisterMap. Generates Python class with offset/mask/shift constants, read/write methods per register, get/set field accessors. Respects ro/wo/rw access types. 10 tests added and passing."
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "task",
+      "status": "resolved",
+      "priority": "medium",
+      "title": "Markdown documentation generation from RegisterMap",
+      "description": "Markdown documentation generation from RegisterMap",
+      "created": "2026-03-02",
+      "feature": "csr-regmap",
+      "blocked_by": [
+        12
+      ],
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Implemented to_markdown() on RegisterMap. Generates title heading, per-register sections with offset/access/reset, and field tables. 7 tests added and passing."
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "task",
+      "status": "resolved",
+      "priority": "high",
+      "title": "Add style parameter to Mem and propagate through MemDecl to Verilog emission",
+      "description": "Add style parameter to Mem and propagate through MemDecl to Verilog emission",
+      "created": "2026-03-02",
+      "feature": "mem-inference",
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Implemented style parameter on Mem (None/block/distributed/ultra), propagated through MemDecl, lower, flatten, and Verilog backend. Emits (* ram_style = \"...\" *) attribute. 10 tests."
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "task",
+      "status": "resolved",
+      "priority": "medium",
+      "title": "Dual-port and true dual-port Mem variants with correct Verilog coding patterns",
+      "description": "Dual-port and true dual-port Mem variants with correct Verilog coding patterns",
+      "created": "2026-03-02",
+      "feature": "mem-inference",
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Implemented DualPortMem (1 write + 1 read port) and TrueDualPortMem (2 read/write ports). Both generate correct Verilog coding patterns for Vivado/Quartus/DC inference. 19 tests, all passing."
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "task",
+      "status": "resolved",
+      "priority": "high",
+      "title": "Sync FIFO IP with dual-path tests",
+      "description": "Sync FIFO IP with dual-path tests",
+      "created": "2026-03-02",
+      "feature": "ip-library",
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Implemented SyncFifo, EdgeDetector, Debouncer in veripy/ip.py. 9 dual-path tests. Discovered that underscore-prefixed register names break simulation (Module.__setattr__ bypasses _assign). Used non-underscore names."
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "task",
+      "status": "resolved",
+      "priority": "medium",
+      "title": "Round-robin arbiter IP with dual-path tests",
+      "description": "Round-robin arbiter IP with dual-path tests",
+      "created": "2026-03-02",
+      "feature": "ip-library",
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Implemented RoundRobinArbiter with registered grant output. Uses found-flag pattern (no break) and range(n) loops (lowerer only supports range). 4 tests."
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "task",
+      "status": "resolved",
+      "priority": "medium",
+      "title": "Edge detector and debouncer IPs",
+      "description": "Edge detector and debouncer IPs",
+      "created": "2026-03-02",
+      "feature": "ip-library"
+    },
+    {
+      "id": 21,
+      "type": "task",
+      "status": "open",
+      "priority": "low",
+      "title": "Priority arbiter and clock divider IPs",
+      "description": "Priority arbiter and clock divider IPs",
+      "created": "2026-03-02",
+      "feature": "ip-library"
+    },
+    {
+      "id": 22,
+      "type": "task",
+      "status": "open",
+      "priority": "low",
+      "title": "Credit-based flow control IP",
+      "description": "Credit-based flow control IP",
+      "created": "2026-03-02",
+      "feature": "ip-library"
+    },
+    {
+      "id": 23,
+      "type": "bug",
+      "status": "open",
+      "priority": "medium",
+      "title": "Module.__setattr__ bypasses _assign() for underscore-prefixed attributes, breaking simulation",
+      "description": "Module.__setattr__ bypasses _assign() for underscore-prefixed attributes, breaking simulation",
+      "created": "2026-03-02",
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "When a Register is named with underscore prefix (e.g. self._prev), Module.__setattr__ falls through to object.__setattr__ which replaces the Signal with a plain int. This silently breaks simulation. Workaround: use non-underscore names for all registers. Fix: __setattr__ should check for Signal before the underscore check, or use a different mechanism."
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "task",
+      "status": "resolved",
+      "priority": "high",
+      "title": "Add FormalAssert/FormalCover/FormalAssume IR nodes and IRModule.formal_props field",
+      "description": "Add FormalAssert/FormalCover/FormalAssume IR nodes and IRModule.formal_props field",
+      "created": "2026-03-02",
+      "feature": "formal-sby",
+      "blocks": [
+        25,
+        26
+      ]
+    },
+    {
+      "id": 25,
+      "type": "task",
+      "status": "resolved",
+      "priority": "high",
+      "title": "Lower assert_always/cover/assume functions to IR formal properties",
+      "description": "Lower assert_always/cover/assume functions to IR formal properties",
+      "created": "2026-03-02",
+      "feature": "formal-sby",
+      "blocked_by": [
+        24
+      ]
+    },
+    {
+      "id": 26,
+      "type": "task",
+      "status": "resolved",
+      "priority": "high",
+      "title": "Emit formal properties in Verilog backend (ifdef FORMAL)",
+      "description": "Emit formal properties in Verilog backend (ifdef FORMAL)",
+      "created": "2026-03-02",
+      "feature": "formal-sby",
+      "blocked_by": [
+        24
+      ]
+    },
+    {
+      "id": 27,
+      "type": "task",
+      "status": "resolved",
+      "priority": "high",
+      "title": "Add assume decorator to Module and context.py",
+      "description": "Add assume decorator to Module and context.py",
+      "created": "2026-03-02",
+      "feature": "formal-sby"
+    },
+    {
+      "id": 28,
+      "type": "task",
+      "status": "resolved",
+      "priority": "high",
+      "title": "Create backend_formal.py: generate .sby file from module",
+      "description": "Create backend_formal.py: generate .sby file from module",
+      "created": "2026-03-02",
+      "feature": "formal-sby"
+    },
+    {
+      "id": 29,
+      "type": "task",
+      "status": "resolved",
+      "priority": "high",
+      "title": "Add CLI command: veripy formal <file.py>",
+      "description": "Add CLI command: veripy formal <file.py>",
+      "created": "2026-03-02",
+      "feature": "formal-sby"
+    },
+    {
+      "id": 30,
+      "type": "task",
+      "status": "resolved",
+      "priority": "high",
+      "title": "Write tests for formal backend",
+      "description": "Write tests for formal backend",
+      "created": "2026-03-02",
+      "feature": "formal-sby"
     }
   ]
 }

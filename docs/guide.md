@@ -245,7 +245,7 @@ The decorator creates a state register and next-state logic. State constants are
 ## Formal Properties
 
 ```python
-from veripy.context import assert_always, cover
+from veripy.context import assert_always, cover, assume
 
 @module
 def safe_counter():
@@ -268,9 +268,25 @@ def safe_counter():
     @cover(clock)
     def reaches_five():
         return int(count) == 5
+
+    @assume(clock)
+    def valid_env():
+        return True
 ```
 
-`@assert_always` raises `AssertionError` during simulation if the property fails. `@cover` tracks whether the condition was ever true.
+`@assert_always` raises `AssertionError` during simulation if the property fails. `@cover` tracks whether the condition was ever true. `@assume` constrains the formal solver's input space (ignored during simulation).
+
+### SymbiYosys Integration
+
+Generate `.sby` files and formal-annotated Verilog for bounded model checking:
+
+```
+veripy formal examples/counter.py              # emit .sby + .v to current dir
+veripy formal examples/counter.py -o formal/   # write to formal/ directory
+veripy formal examples/counter.py -d 50        # set BMC depth to 50
+```
+
+The generated Verilog wraps formal properties in `` `ifdef FORMAL `` so the same file works for both synthesis and verification.
 
 ## Pipelines
 

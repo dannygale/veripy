@@ -15,7 +15,7 @@ from .ir import (
     Repeat, ForLoop, Disable,
     ContAssign, CombBlock, SeqBlock, InitialBlock, AlwaysBlock,
     Port, WireDecl, RegDecl, MemDecl, DualPortMemDecl, TrueDualPortMemDecl,
-    Instance, IRModule,
+    Instance, IRModule, FormalProperty,
 )
 from .signal import Signal, Mem, DualPortMem, TrueDualPortMem, Interface
 from .parameter import is_param
@@ -687,6 +687,21 @@ class _Lowerer:
         edge_list = [(e.kind, e.signal.name) for e in edges]
         return SeqBlock(edge_list, stmts, locals_dict)
 
+    def lower_formal_prop(self, kind, clock, func):
+        """Lower a formal property function → FormalProperty IR node."""
+        self._func = func
+        self._reg_locals = {}
+        tree = self._get_func_ast(func)
+        # Extract the return expression from the function body
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Return) and node.value is not None:
+                expr = self._expr(node.value)
+                self._func = None
+                clock_name = clock.name if isinstance(clock, Signal) else str(clock)
+                return FormalProperty(kind, clock_name, 'posedge', expr, func.__name__)
+        self._func = None
+        return None
+
     def collect_always_targets(self, comb_blocks):
         """Return set of signal names assigned inside always @(*) comb blocks."""
         targets = set()
@@ -845,6 +860,20 @@ def lower_module(module, module_name=None):
         else:
             new_regs.append(r)
     ir.regs = new_regs
+
+    # Lower formal properties (assert_always, cover, assume)
+    for clock, func in module._assertions:
+        prop = lowerer.lower_formal_prop('assert', clock, func)
+        if prop:
+            ir.formal_props.append(prop)
+    for clock, func, _hit in module._covers:
+        prop = lowerer.lower_formal_prop('cover', clock, func)
+        if prop:
+            ir.formal_props.append(prop)
+    for clock, func in getattr(module, '_assumes', []):
+        prop = lowerer.lower_formal_prop('assume', clock, func)
+        if prop:
+            ir.formal_props.append(prop)
 
     return ir
 

@@ -186,6 +186,49 @@ def cmd_lint(args):
     sys.exit(1 if found else 0)
 
 
+def cmd_formal(args):
+    """Generate .sby + formal Verilog for SymbiYosys verification."""
+    from .lower import lower_module
+    from .backend_verilog import emit_verilog
+    from .backend_formal import emit_sby
+
+    params = _parse_params(args.param)
+    modules = _load_modules(args.file, module_name=args.module, params=params)
+    if not modules:
+        sys.exit(f"error: no modules found in {args.file}")
+
+    out_dir = args.output or '.'
+    os.makedirs(out_dir, exist_ok=True)
+
+    for name, instance in modules:
+        mod_name = _to_snake(name)
+        ir = lower_module(instance, mod_name)
+        if not ir.formal_props:
+            print(f"  {mod_name}: no formal properties, skipping")
+            continue
+
+        v_src = emit_verilog(ir)
+        sby_src = emit_sby(ir, depth=args.depth)
+
+        v_path = os.path.join(out_dir, f'{mod_name}.v')
+        sby_path = os.path.join(out_dir, f'{mod_name}.sby')
+        with open(v_path, 'w') as f:
+            f.write(v_src)
+        with open(sby_path, 'w') as f:
+            f.write(sby_src)
+        print(f"  {v_path}")
+        print(f"  {sby_path}")
+
+        n_assert = sum(1 for p in ir.formal_props if p.kind == 'assert')
+        n_cover = sum(1 for p in ir.formal_props if p.kind == 'cover')
+        n_assume = sum(1 for p in ir.formal_props if p.kind == 'assume')
+        parts = []
+        if n_assert: parts.append(f'{n_assert} assert')
+        if n_cover: parts.append(f'{n_cover} cover')
+        if n_assume: parts.append(f'{n_assume} assume')
+        print(f"  {mod_name}: {', '.join(parts)}")
+
+
 def cmd_profile(args):
     """Run test case(s) and compare Python sim vs iverilog performance."""
     import time
@@ -274,6 +317,14 @@ def main():
     p_lint.add_argument("file", help="Python file containing Module subclass(es)")
     p_lint.add_argument("-m", "--module", help="Target a specific Module subclass by name")
 
+    # formal
+    p_formal = sub.add_parser("formal", help="Generate .sby + Verilog for SymbiYosys formal verification")
+    p_formal.add_argument("file", help="Python file containing Module subclass(es)")
+    p_formal.add_argument("-o", "--output", help="Output directory (default: current dir)")
+    p_formal.add_argument("-m", "--module", help="Target a specific Module subclass by name")
+    p_formal.add_argument("-p", "--param", action="append", help="Module parameter (e.g. -p n=4)")
+    p_formal.add_argument("-d", "--depth", type=int, default=20, help="BMC depth (default: 20)")
+
     # profile
     p_prof = sub.add_parser("profile", help="Compare Python sim vs iverilog performance")
     p_prof.add_argument("file", help="Test file containing VeripyTestCase subclass(es)")
@@ -281,7 +332,7 @@ def main():
 
     args = parser.parse_args()
     {"build": cmd_build, "test": cmd_test, "import": cmd_import,
-     "lint": cmd_lint, "profile": cmd_profile}[args.command](args)
+     "lint": cmd_lint, "formal": cmd_formal, "profile": cmd_profile}[args.command](args)
 
 
 if __name__ == "__main__":

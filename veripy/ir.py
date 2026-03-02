@@ -162,6 +162,17 @@ class AlwaysBlock:
     stmts: list      # list[Stmt]
 
 
+# ── Formal properties ────────────────────────────────────────────────
+
+@dataclass
+class FormalProperty:
+    kind: str        # 'assert' | 'cover' | 'assume'
+    clock: str       # clock signal name
+    edge: str        # 'posedge' | 'negedge'
+    expr: Expr       # boolean expression
+    name: str        # property name (from function name)
+
+
 # ── Declarations ─────────────────────────────────────────────────────
 
 @dataclass
@@ -242,3 +253,4 @@ class IRModule:
     seq_blocks: list = field(default_factory=list)    # list[SeqBlock]
     initial_blocks: list = field(default_factory=list) # list[InitialBlock]
     always_blocks: list = field(default_factory=list)  # list[AlwaysBlock]
+    formal_props: list = field(default_factory=list)   # list[FormalProperty]

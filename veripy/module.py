@@ -74,6 +74,7 @@ class Module:
         self._comb_blocks = []
         self._assertions = []      # [(clock_signal, func), ...]
         self._covers = []          # [(clock_signal, func, hit), ...]
+        self._assumes = []         # [(clock_signal, func), ...]
         self._timing = []          # [(constraint_type, kwargs), ...]
         self._behavioral = None    # optional behavioral model function
         if params is not None:
@@ -162,6 +163,19 @@ class Module:
         """
         def decorator(func):
             self._covers.append((clock, func, [0]))
+            return func
+        return decorator
+
+    def assume(self, clock):
+        """Decorator: register an assumption for formal verification.
+
+        Usage:
+            @self.assume(self.clock)
+            def valid_input():
+                return self.enable | self.reset
+        """
+        def decorator(func):
+            self._assumes.append((clock, func))
             return func
         return decorator
 

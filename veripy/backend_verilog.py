@@ -9,7 +9,7 @@ from .ir import (
     Assign, SliceAssign, If, Case, MemWrite, Delay, Display, Finish,
     Repeat, ForLoop, Disable,
     ContAssign, CombBlock, SeqBlock, InitialBlock, AlwaysBlock,
-    DualPortMemDecl, TrueDualPortMemDecl,
+    DualPortMemDecl, TrueDualPortMemDecl, FormalProperty,
     IRModule,
 )
 
@@ -25,6 +25,7 @@ def emit_verilog(ir: IRModule) -> str:
     _emit_dual_port_mems(ir, lines)
     _emit_initial_blocks(ir, lines)
     _emit_always_blocks(ir, lines)
+    _emit_formal_props(ir, lines)
     lines.append('')
     lines.append('endmodule')
     return '\n'.join(lines)
@@ -278,6 +279,21 @@ def _emit_always_blocks(ir, lines):
         for s in blk.stmts:
             _emit_stmt(s, lines, indent=2)
         lines.append('    end')
+
+
+# ── Formal properties ────────────────────────────────────────────────
+
+def _emit_formal_props(ir, lines):
+    if not ir.formal_props:
+        return
+    lines.append('')
+    lines.append('`ifdef FORMAL')
+    for prop in ir.formal_props:
+        kw = {'assert': 'assert', 'cover': 'cover', 'assume': 'assume'}[prop.kind]
+        lines.append(f'    always @({prop.edge} {prop.clock}) begin')
+        lines.append(f'        {kw}({_expr(prop.expr)});  // {prop.name}')
+        lines.append(f'    end')
+    lines.append('`endif')
 
 
 # ── Expression emission ──────────────────────────────────────────────

@@ -106,6 +106,7 @@ veripy test [path] [-v]             # dual-path test suite
 veripy import <file.v>              # convert Verilog → VeriPy Python
 veripy import rtl/ -o src/          # convert entire project
 veripy lint <file.py>               # static checks
+veripy formal <file.py>            # emit .sby + Verilog for SymbiYosys
 ```
 
 ## Features

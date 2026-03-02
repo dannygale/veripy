@@ -6,7 +6,7 @@ from .module import Module
 from .blackbox import BlackBox
 from .parameter import Parameter
 from .decorator import module
-from .context import (comb, always, fsm, assert_always, cover, pipeline,
+from .context import (comb, always, fsm, assert_always, cover, assume, pipeline,
                       create_clock, max_delay, false_path)
 
 from .sim import until

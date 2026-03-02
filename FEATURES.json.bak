@@ -1,0 +1,12 @@
+{
+  "features": [
+    {
+      "id": "F1",
+      "title": "Enhanced testing model: reactive yields, fork/join, constrained random, transaction helpers, coverage reporting",
+      "description": "Reactive yields (until), fork/join concurrency, constrained random integration, Driver base class for protocol helpers, coverage reporting with hit counts.",
+      "status": "implemented",
+      "priority": "high",
+      "category": "testing"
+    }
+  ]
+}

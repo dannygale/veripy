@@ -25,6 +25,7 @@ class ModuleContext:
         self.always_blocks = []
         self.assertions = []
         self.covers = []
+        self.assumes = []
         self.timing = []
 
 
@@ -150,6 +151,22 @@ def cover(clock):
         ctx = _get_context()
         if ctx is not None:
             ctx.covers.append((clock, func, [0]))
+        return func
+    return decorator
+
+
+def assume(clock):
+    """Standalone @assume(clock) decorator — formal assumption.
+
+    Usage:
+        @assume(clock)
+        def valid_input():
+            return int(enable) | int(reset)
+    """
+    def decorator(func):
+        ctx = _get_context()
+        if ctx is not None:
+            ctx.assumes.append((clock, func))
         return func
     return decorator
 
