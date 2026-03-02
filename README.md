@@ -157,4 +157,5 @@ veripy formal <file.py>            # emit .sby + Verilog for SymbiYosys
 - **[Signals](docs/signals.md)** — signal types, operations, slicing, memory arrays
 - **[Testing](docs/testing.md)** — dual-path testing, SimEngine, VCD waveforms
 - **[Verilog](docs/verilog.md)** — import, export, emission, lint
+- **[Equivalence Checking](docs/equiv.md)** — formal equivalence via Yosys equiv_check
 - **[GPU Simulation](docs/gpu.md)** — WGPU backend, batch-parallel verification, flattening

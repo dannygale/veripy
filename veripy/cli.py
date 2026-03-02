@@ -229,6 +229,56 @@ def cmd_formal(args):
         print(f"  {mod_name}: {', '.join(parts)}")
 
 
+def cmd_equiv(args):
+    """Generate Yosys equivalence checking script for two modules."""
+    from .lower import lower_module
+    from .backend_verilog import emit_verilog
+    from .backend_equiv import emit_equiv_script
+
+    gold_params = _parse_params(args.gold_param)
+    gate_params = _parse_params(args.gate_param)
+
+    gold_mods = _load_modules(args.gold, module_name=args.gold_module, params=gold_params)
+    gate_mods = _load_modules(args.gate, module_name=args.gate_module, params=gate_params)
+    if not gold_mods:
+        sys.exit(f"error: no modules found in {args.gold}")
+    if not gate_mods:
+        sys.exit(f"error: no modules found in {args.gate}")
+
+    gold_name, gold_inst = gold_mods[0]
+    gate_name, gate_inst = gate_mods[0]
+
+    gold_ir = lower_module(gold_inst, _to_snake(gold_name))
+    gate_ir = lower_module(gate_inst, _to_snake(gate_name))
+
+    out_dir = args.output or '.'
+    os.makedirs(out_dir, exist_ok=True)
+
+    gold_v = emit_verilog(gold_ir)
+    gate_v = emit_verilog(gate_ir)
+    script = emit_equiv_script(gold_ir, gate_ir)
+
+    gold_path = os.path.join(out_dir, 'gold.v')
+    gate_path = os.path.join(out_dir, 'gate.v')
+    script_path = os.path.join(out_dir, 'equiv.ys')
+
+    for path, content in [(gold_path, gold_v), (gate_path, gate_v), (script_path, script)]:
+        with open(path, 'w') as f:
+            f.write(content)
+        print(f"  {path}")
+
+    if args.run:
+        result = subprocess.run(['yosys', '-s', script_path],
+                                capture_output=True, text=True, cwd=out_dir)
+        print(result.stdout)
+        if result.returncode != 0:
+            print(result.stderr, file=sys.stderr)
+            sys.exit(1)
+        print("Equivalence check PASSED")
+    else:
+        print(f"\nRun: yosys -s {script_path}")
+
+
 def cmd_profile(args):
     """Run test case(s) and compare Python sim vs iverilog performance."""
     import time
@@ -330,9 +380,21 @@ def main():
     p_prof.add_argument("file", help="Test file containing VeripyTestCase subclass(es)")
     p_prof.add_argument("-t", "--test", help="Run only this test method (e.g. test_nop)")
 
+    # equiv
+    p_equiv = sub.add_parser("equiv", help="Formal equivalence checking between two modules")
+    p_equiv.add_argument("gold", help="Gold (reference) Python file")
+    p_equiv.add_argument("gate", help="Gate (implementation) Python file")
+    p_equiv.add_argument("-o", "--output", help="Output directory (default: current dir)")
+    p_equiv.add_argument("--gold-module", help="Module name in gold file")
+    p_equiv.add_argument("--gate-module", help="Module name in gate file")
+    p_equiv.add_argument("--gold-param", action="append", default=[], help="Gold module param (e.g. --gold-param n=4)")
+    p_equiv.add_argument("--gate-param", action="append", default=[], help="Gate module param (e.g. --gate-param n=4)")
+    p_equiv.add_argument("--run", action="store_true", help="Run Yosys automatically (requires yosys on PATH)")
+
     args = parser.parse_args()
     {"build": cmd_build, "test": cmd_test, "import": cmd_import,
-     "lint": cmd_lint, "formal": cmd_formal, "profile": cmd_profile}[args.command](args)
+     "lint": cmd_lint, "formal": cmd_formal, "profile": cmd_profile,
+     "equiv": cmd_equiv}[args.command](args)
 
 
 if __name__ == "__main__":
