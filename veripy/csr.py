@@ -224,3 +224,21 @@ class RegisterMap:
                     lines.append(f'{ind}{ind}self.write_{rn}(cur)')
                     lines.append('')
         return '\n'.join(lines)
+
+    def to_markdown(self, title='Register Map'):
+        """Generate Markdown documentation for this register map."""
+        lines = [f'# {title}', '']
+        for r in self.regs:
+            lines.append(f'## {r.name} (0x{r.offset:04X})')
+            if r.desc:
+                lines.append(f'\n{r.desc}')
+            lines.append(f'\nAccess: {r.access} | Reset: 0x{r.reset_val:08X}')
+            if r.fields:
+                lines.append('')
+                lines.append('| Bits | Field | Access | Reset | Description |')
+                lines.append('|------|-------|--------|-------|-------------|')
+                for f in r.fields:
+                    bits = str(f.lsb) if f.msb == f.lsb else f'{f.msb}:{f.lsb}'
+                    lines.append(f'| {bits} | {f.name} | {f.access} | 0x{f.reset:X} | {f.desc} |')
+            lines.append('')
+        return '\n'.join(lines)

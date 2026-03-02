@@ -254,5 +254,44 @@ class TestToPythonDriver(unittest.TestCase):
         self.assertIn('def set_txdata_payload(self, val):', src)
 
 
+# ── to_markdown() ───────────────────────────────────────────────────
+
+class TestToMarkdown(unittest.TestCase):
+    def setUp(self):
+        self.md = _make_rmap().to_markdown('Test Map')
+
+    def test_title(self):
+        self.assertTrue(self.md.startswith('# Test Map'))
+
+    def test_default_title(self):
+        md = _make_rmap().to_markdown()
+        self.assertIn('# Register Map', md)
+
+    def test_register_headings(self):
+        self.assertIn('## ctrl (0x0000)', self.md)
+        self.assertIn('## status (0x0004)', self.md)
+        self.assertIn('## data (0x0008)', self.md)
+
+    def test_access_and_reset(self):
+        self.assertIn('Access: rw | Reset: 0x00000001', self.md)
+        self.assertIn('Access: ro | Reset: 0x00000000', self.md)
+
+    def test_field_table_header(self):
+        self.assertIn('| Bits | Field | Access | Reset | Description |', self.md)
+
+    def test_field_rows(self):
+        self.assertIn('| 0 | enable | rw | 0x1 |', self.md)
+        self.assertIn('| 2:1 | mode | rw | 0x0 |', self.md)
+        self.assertIn('| 0 | busy | ro | 0x0 |', self.md)
+
+    def test_description_included(self):
+        rmap = RegisterMap([
+            Reg('ctrl', 0x00, [Field('en', 0, desc='Enable bit')], desc='Main control'),
+        ])
+        md = rmap.to_markdown()
+        self.assertIn('Main control', md)
+        self.assertIn('Enable bit', md)
+
+
 if __name__ == '__main__':
     unittest.main()
