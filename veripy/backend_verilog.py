@@ -9,6 +9,7 @@ from .ir import (
     Assign, SliceAssign, If, Case, MemWrite, Delay, Display, Finish,
     Repeat, ForLoop, Disable,
     ContAssign, CombBlock, SeqBlock, InitialBlock, AlwaysBlock,
+    DualPortMemDecl, TrueDualPortMemDecl,
     IRModule,
 )
 
@@ -21,6 +22,7 @@ def emit_verilog(ir: IRModule) -> str:
     _emit_comb_blocks(ir, lines)
     _emit_assigns(ir, lines)
     _emit_seq_blocks(ir, lines)
+    _emit_dual_port_mems(ir, lines)
     _emit_initial_blocks(ir, lines)
     _emit_always_blocks(ir, lines)
     lines.append('')
@@ -135,6 +137,30 @@ def _emit_seq_blocks(ir, lines):
             _emit_stmt(s, lines, indent=2)
         lines.append('    end')
 
+
+# ── Dual-port memory blocks ─────────────────────────────────────────
+
+def _emit_dual_port_mems(ir, lines):
+    for m in ir.mems:
+        if isinstance(m, DualPortMemDecl):
+            lines.append('')
+            lines.append(f'    always @(posedge {m.clock}) begin')
+            lines.append(f'        if ({m.we})')
+            lines.append(f'            {m.name}[{m.waddr}] <= {m.wdata};')
+            lines.append(f'        {m.rdata} <= {m.name}[{m.raddr}];')
+            lines.append('    end')
+        elif isinstance(m, TrueDualPortMemDecl):
+            lines.append('')
+            lines.append(f'    always @(posedge {m.clka}) begin')
+            lines.append(f'        if ({m.wea})')
+            lines.append(f'            {m.name}[{m.addra}] <= {m.dina};')
+            lines.append(f'        {m.douta} <= {m.name}[{m.addra}];')
+            lines.append('    end')
+            lines.append(f'    always @(posedge {m.clkb}) begin')
+            lines.append(f'        if ({m.web})')
+            lines.append(f'            {m.name}[{m.addrb}] <= {m.dinb};')
+            lines.append(f'        {m.doutb} <= {m.name}[{m.addrb}];')
+            lines.append('    end')
 
 # ── Statement emission ───────────────────────────────────────────────
 

@@ -5,7 +5,7 @@ import copy
 import inspect
 import textwrap
 
-from .signal import Signal, Mem, Interface
+from .signal import Signal, Mem, DualPortMem, TrueDualPortMem, Interface
 from .parameter import Parameter, ParamExpr, is_param
 from .module import Module, DeferredModule, _resolve_deferred
 from .context import ModuleContext, _set_context, _get_context
@@ -47,7 +47,8 @@ def _analyze_and_rewrite(func):
         fname = None
         if isinstance(node.value.func, ast.Name):
             fname = node.value.func.id
-        if fname in ('Input', 'Output', 'Register', 'Signal', 'Mem'):
+        if fname in ('Input', 'Output', 'Register', 'Signal', 'Mem',
+                     'DualPortMem', 'TrueDualPortMem'):
             signal_names.add(target.id)
         elif fname and fname not in ('Parameter', 'pipeline',
                                       'create_clock', 'max_delay', 'false_path'):
@@ -158,6 +159,10 @@ def module(func):
             elif isinstance(val, Mem):
                 val.name = name
                 object.__setattr__(instance, name, val)
+            elif isinstance(val, (DualPortMem, TrueDualPortMem)):
+                val.name = name
+                object.__setattr__(instance, name, val)
+                val._register(instance)
             elif isinstance(val, Interface):
                 object.__setattr__(instance, name, val)
                 # Flatten interface signals with prefix

@@ -14,9 +14,10 @@ from .ir import (
     Stmt, Assign, SliceAssign, If, Case, MemWrite, Delay, Display, Finish,
     Repeat, ForLoop, Disable,
     ContAssign, CombBlock, SeqBlock, InitialBlock, AlwaysBlock,
-    Port, WireDecl, RegDecl, MemDecl, Instance, IRModule,
+    Port, WireDecl, RegDecl, MemDecl, DualPortMemDecl, TrueDualPortMemDecl,
+    Instance, IRModule,
 )
-from .signal import Signal, Mem, Interface
+from .signal import Signal, Mem, DualPortMem, TrueDualPortMem, Interface
 from .parameter import is_param
 
 _BIN_OPS = {
@@ -717,7 +718,7 @@ def lower_module(module, module_name=None):
     interfaces = {}
     for k in dir(module):
         v = getattr(module, k)
-        if isinstance(v, Mem):
+        if isinstance(v, (Mem, DualPortMem, TrueDualPortMem)):
             mems[k] = v
         elif isinstance(v, Interface):
             interfaces[k] = v
@@ -756,9 +757,25 @@ def lower_module(module, module_name=None):
 
     # Mems
     for mem_name, mem in sorted(mems.items()):
-        w = mem._width_param.name if mem._width_param else mem.width
-        d = mem._depth_param.name if mem._depth_param else mem.depth
-        ir.mems.append(MemDecl(mem_name, d, w, style=mem.style))
+        if isinstance(mem, DualPortMem):
+            ir.mems.append(DualPortMemDecl(
+                mem_name, mem.depth, mem.width, style=mem.style,
+                clock=mem._clock.name, we=mem._we.name,
+                waddr=mem._waddr.name, wdata=mem._wdata.name,
+                raddr=mem._raddr.name, rdata=mem._rdata.name))
+        elif isinstance(mem, TrueDualPortMem):
+            ir.mems.append(TrueDualPortMemDecl(
+                mem_name, mem.depth, mem.width, style=mem.style,
+                clka=mem._clka.name, wea=mem._wea.name,
+                addra=mem._addra.name, dina=mem._dina.name,
+                douta=mem._douta.name,
+                clkb=mem._clkb.name, web=mem._web.name,
+                addrb=mem._addrb.name, dinb=mem._dinb.name,
+                doutb=mem._doutb.name))
+        else:
+            w = mem._width_param.name if mem._width_param else mem.width
+            d = mem._depth_param.name if mem._depth_param else mem.depth
+            ir.mems.append(MemDecl(mem_name, d, w, style=mem.style))
 
     # Sub-module wires and instances
     lowerer = _Lowerer(signals, mems, submodules, interfaces, params, module)
@@ -794,8 +811,10 @@ def lower_module(module, module_name=None):
             elif isinstance(item, CombBlock):
                 ir.comb_blocks.append(item)
 
-    # Lower always blocks
+    # Lower always blocks (skip auto-generated mem blocks)
     for edges, method in module._always_blocks:
+        if getattr(method, '_veripy_mem_block', False):
+            continue
         ir.seq_blocks.append(lowerer.lower_always(edges, method))
 
     # Mark output ports that are driven by always blocks as reg
@@ -806,6 +825,13 @@ def lower_module(module, module_name=None):
     for blk in ir.comb_blocks:
         for s in blk.stmts:
             _collect_assign_targets(s, always_driven)
+    # Also mark outputs driven by dual-port memory read ports
+    for m in ir.mems:
+        if isinstance(m, DualPortMemDecl):
+            seq_targets.add(m.rdata)
+        elif isinstance(m, TrueDualPortMemDecl):
+            seq_targets.add(m.douta)
+            seq_targets.add(m.doutb)
     for port in ir.ports:
         if port.direction == 'output' and (port.name in seq_targets or port.name in always_driven):
             port.is_reg = True

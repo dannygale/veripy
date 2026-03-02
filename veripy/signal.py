@@ -452,3 +452,141 @@ class Mem:
             addr, val = self._pending_write
             self._data[addr] = val
             self._pending_write = None
+
+
+def _sig_val(sig):
+    """Read the current integer value of a Signal (or plain int)."""
+    return sig._val if isinstance(sig, Signal) else int(sig)
+
+
+class DualPortMem:
+    """Simple dual-port memory: 1 write port + 1 read port (synchronous read).
+
+    Generates the correct Verilog coding pattern for synthesis tool inference:
+        always @(posedge clock) begin
+            if (we) mem[waddr] <= wdata;
+            rdata <= mem[raddr];
+        end
+    """
+
+    VALID_STYLES = (None, 'block', 'distributed', 'ultra')
+
+    def __init__(self, depth, width=1, style=None, *,
+                 clock=None, we=None, waddr=None, wdata=None,
+                 raddr=None, rdata=None):
+        if style not in self.VALID_STYLES:
+            raise ValueError(f"Mem style must be one of {self.VALID_STYLES}, got {style!r}")
+        self.depth = depth
+        self.width = width
+        self.style = style
+        self.name = ''
+        self._mask = (1 << width) - 1
+        self._data = [0] * depth
+        self._pending_write = None
+        # Port signal references
+        self._clock = clock
+        self._we = we
+        self._waddr = waddr
+        self._wdata = wdata
+        self._raddr = raddr
+        self._rdata = rdata
+
+    def _register(self, module):
+        """Register an always block on the parent module for simulation."""
+        mem = self
+        def _mem_block():
+            if mem._we and _sig_val(mem._we):
+                a = _sig_val(mem._waddr) % mem.depth
+                d = _sig_val(mem._wdata) & mem._mask
+                mem._pending_write = (a, d)
+            if mem._raddr is not None and mem._rdata is not None:
+                a = _sig_val(mem._raddr) % mem.depth
+                mem._rdata._next = mem._data[a]
+        _mem_block._veripy_mem_block = True
+        edges = [Edge('posedge', mem._clock)]
+        module._always_blocks.append((edges, _mem_block))
+
+    def _tick(self):
+        if self._pending_write is not None:
+            addr, val = self._pending_write
+            self._data[addr] = val
+            self._pending_write = None
+
+
+class TrueDualPortMem:
+    """True dual-port memory: 2 read/write ports (synchronous reads).
+
+    Generates the correct Verilog coding pattern for synthesis tool inference:
+        always @(posedge clka) begin
+            if (wea) mem[addra] <= dina;
+            douta <= mem[addra];
+        end
+        always @(posedge clkb) begin
+            if (web) mem[addrb] <= dinb;
+            doutb <= mem[addrb];
+        end
+    """
+
+    VALID_STYLES = (None, 'block', 'distributed', 'ultra')
+
+    def __init__(self, depth, width=1, style=None, *,
+                 clka=None, wea=None, addra=None, dina=None, douta=None,
+                 clkb=None, web=None, addrb=None, dinb=None, doutb=None):
+        if style not in self.VALID_STYLES:
+            raise ValueError(f"Mem style must be one of {self.VALID_STYLES}, got {style!r}")
+        self.depth = depth
+        self.width = width
+        self.style = style
+        self.name = ''
+        self._mask = (1 << width) - 1
+        self._data = [0] * depth
+        self._pending_a = None
+        self._pending_b = None
+        # Port A
+        self._clka = clka
+        self._wea = wea
+        self._addra = addra
+        self._dina = dina
+        self._douta = douta
+        # Port B
+        self._clkb = clkb
+        self._web = web
+        self._addrb = addrb
+        self._dinb = dinb
+        self._doutb = doutb
+
+    def _register(self, module):
+        """Register always blocks on the parent module for simulation."""
+        mem = self
+
+        def _port_a():
+            if mem._wea and _sig_val(mem._wea):
+                a = _sig_val(mem._addra) % mem.depth
+                d = _sig_val(mem._dina) & mem._mask
+                mem._pending_a = (a, d)
+            if mem._addra is not None and mem._douta is not None:
+                a = _sig_val(mem._addra) % mem.depth
+                mem._douta._next = mem._data[a]
+        _port_a._veripy_mem_block = True
+        module._always_blocks.append(([Edge('posedge', mem._clka)], _port_a))
+
+        def _port_b():
+            if mem._web and _sig_val(mem._web):
+                a = _sig_val(mem._addrb) % mem.depth
+                d = _sig_val(mem._dinb) & mem._mask
+                mem._pending_b = (a, d)
+            if mem._addrb is not None and mem._doutb is not None:
+                a = _sig_val(mem._addrb) % mem.depth
+                mem._doutb._next = mem._data[a]
+        _port_b._veripy_mem_block = True
+        module._always_blocks.append(([Edge('posedge', mem._clkb)], _port_b))
+
+    def _tick(self):
+        if self._pending_a is not None:
+            addr, val = self._pending_a
+            self._data[addr] = val
+            self._pending_a = None
+        if self._pending_b is not None:
+            addr, val = self._pending_b
+            self._data[addr] = val
+            self._pending_b = None

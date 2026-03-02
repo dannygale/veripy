@@ -189,6 +189,36 @@ class MemDecl:
     style: str = None
 
 @dataclass
+class DualPortMemDecl:
+    name: str
+    depth: int
+    width: Union[int, str]
+    style: str = None
+    clock: str = ''
+    we: str = ''
+    waddr: str = ''
+    wdata: str = ''
+    raddr: str = ''
+    rdata: str = ''
+
+@dataclass
+class TrueDualPortMemDecl:
+    name: str
+    depth: int
+    width: Union[int, str]
+    style: str = None
+    clka: str = ''
+    wea: str = ''
+    addra: str = ''
+    dina: str = ''
+    douta: str = ''
+    clkb: str = ''
+    web: str = ''
+    addrb: str = ''
+    dinb: str = ''
+    doutb: str = ''
+
+@dataclass
 class Instance:
     mod_type: str
     inst_name: str

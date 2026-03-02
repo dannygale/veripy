@@ -1,7 +1,7 @@
 """Module base class: defines the structure for simulation and Verilog emission."""
 
 import ast as _ast
-from .signal import Signal, Mem, Edge, SensitivityList, Interface, Register, posedge as _posedge, _Expr, _SliceProxy
+from .signal import Signal, Mem, DualPortMem, TrueDualPortMem, Edge, SensitivityList, Interface, Register, posedge as _posedge, _Expr, _SliceProxy
 from .parameter import Parameter, ParamExpr, is_param
 
 
@@ -100,6 +100,9 @@ class Module:
                 val.name = attr
             elif isinstance(val, Mem) and not val.name:
                 val.name = attr
+            elif isinstance(val, (DualPortMem, TrueDualPortMem)) and not val.name:
+                val.name = attr
+                val._register(self)
             elif isinstance(val, Interface):
                 for sig_name, sig in val._signals().items():
                     sig.name = f'{attr}_{sig_name}'
@@ -322,7 +325,7 @@ class Module:
         if cached is not None:
             return cached
         mems = {k: getattr(self, k) for k in dir(self)
-                if isinstance(getattr(self, k), Mem)}
+                if isinstance(getattr(self, k), (Mem, DualPortMem, TrueDualPortMem))}
         self._cached_mems = mems
         return mems
 
