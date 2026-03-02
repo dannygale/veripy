@@ -27,6 +27,7 @@ class ModuleContext:
         self.covers = []
         self.assumes = []
         self.timing = []
+        self.clock_domains = {}  # {domain_name: clock_signal_name}
 
 
 # --- Logic block decorators ---
@@ -245,3 +246,10 @@ def false_path(from_signal, to_signal):
     ctx = _get_context()
     if ctx is not None:
         ctx.timing.append(('false_path', from_signal, to_signal))
+
+
+def clock_domain(name, clock):
+    """Declare a named clock domain for enhanced CDC checking."""
+    ctx = _get_context()
+    if ctx is not None:
+        ctx.clock_domains[name] = clock

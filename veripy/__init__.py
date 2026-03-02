@@ -7,7 +7,7 @@ from .blackbox import BlackBox
 from .parameter import Parameter
 from .decorator import module
 from .context import (comb, always, fsm, assert_always, cover, assume, pipeline,
-                      create_clock, max_delay, false_path)
+                      create_clock, max_delay, false_path, clock_domain)
 
 from .sim import until
 from .driver import Driver
