@@ -177,6 +177,45 @@ class TestProjectWrite(unittest.TestCase):
         with open(paths[0]) as f:
             self.assertIn('module inner', f.read())
 
+    def test_incremental_skips_unchanged(self):
+        proj = Project()
+        proj.add(Inner())
+        # First write — all files written
+        paths1 = proj.write(self.tmpdir, incremental=True)
+        self.assertEqual(len(paths1), 1)
+        mtime1 = os.path.getmtime(paths1[0])
+
+        # Second write — nothing changed, should skip
+        import time; time.sleep(0.05)
+        paths2 = proj.write(self.tmpdir, incremental=True)
+        self.assertEqual(len(paths2), 0)
+        # mtime should be unchanged
+        self.assertEqual(os.path.getmtime(paths1[0]), mtime1)
+
+    def test_incremental_rewrites_changed(self):
+        proj = Project()
+        proj.add(Inner())
+        proj.write(self.tmpdir, incremental=True)
+
+        # Corrupt the file
+        p = os.path.join(self.tmpdir, 'inner.v')
+        with open(p, 'w') as f:
+            f.write('// corrupted')
+
+        # Incremental should rewrite it
+        paths = proj.write(self.tmpdir, incremental=True)
+        self.assertEqual(len(paths), 1)
+        with open(p) as f:
+            self.assertIn('module inner', f.read())
+
+    def test_non_incremental_always_writes(self):
+        proj = Project()
+        proj.add(Inner())
+        paths1 = proj.write(self.tmpdir)
+        paths2 = proj.write(self.tmpdir)
+        self.assertEqual(len(paths1), 1)
+        self.assertEqual(len(paths2), 1)
+
 
 # ── Tcl generation tests ────────────────────────────────────────────
 

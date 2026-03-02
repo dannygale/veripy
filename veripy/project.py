@@ -63,19 +63,26 @@ class Project:
         """Return dependency-ordered ``(name, verilog_source)`` pairs."""
         return [(name, mod.to_verilog(name)) for name, mod in self.modules()]
 
-    def write(self, output_dir):
+    def write(self, output_dir, incremental=False):
         """Write all Verilog files to *output_dir* in dependency order.
 
-        Returns list of written file paths.
+        When *incremental* is True, files whose content has not changed
+        are skipped (preserving their mtime for downstream tools).
+
+        Returns list of file paths that were actually written.
         """
         os.makedirs(output_dir, exist_ok=True)
-        paths = []
+        written = []
         for name, src in self.file_list():
             p = os.path.join(output_dir, f'{name}.v')
+            if incremental and os.path.isfile(p):
+                with open(p, 'r') as f:
+                    if f.read() == src:
+                        continue
             with open(p, 'w') as f:
                 f.write(src)
-            paths.append(p)
-        return paths
+            written.append(p)
+        return written
 
     def _file_names(self, output_dir):
         return [f'{output_dir}/{name}.v' for name, _ in self.file_list()]
