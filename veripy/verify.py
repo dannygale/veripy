@@ -256,6 +256,31 @@ class VeripyTestCase(unittest.TestCase):
                     f"Sim/RTL mismatch at t={t}, '{name}': "
                     f"Python={pv}, Verilog={rv}")
 
+    def _run_verilator(self):
+        """Replay recorded stimuli through Verilator model, collect outputs."""
+        from .backend_verilator import compile_module, _has_verilator
+        if not _has_verilator():
+            return False
+
+        mod = self._mod
+        module_name = type(mod).__name__.lower()
+
+        with compile_module(mod, module_name) as vm:
+            vm.eval()  # initial eval
+
+            self._rtl_outputs = {}
+            for t, sets in self._trace_sets:
+                for name, val in sets.items():
+                    vm.set(name, val)
+                vm.eval()
+                # Record outputs at this time
+                if t in self._py_outputs:
+                    if t not in self._rtl_outputs:
+                        self._rtl_outputs[t] = {}
+                    for name in self._py_outputs[t]:
+                        self._rtl_outputs[t][name] = vm.get(name)
+        return True
+
 
 def _wrap_dual(fn):
     """Wrap a test method to run Python sim then compare with iverilog."""
@@ -276,6 +301,16 @@ def _wrap_dual(fn):
             return
         with self.subTest(backend='sim_vs_rtl'):
             self._assert_traces_match()
+
+        # Pass 3 (opt-in): Verilator co-simulation
+        use_verilator = getattr(self, 'USE_VERILATOR', False) or \
+                        os.environ.get('VERIPY_VERILATOR', '') == '1'
+        if use_verilator:
+            saved_rtl = self._rtl_outputs
+            if self._run_verilator():
+                with self.subTest(backend='verilator'):
+                    self._assert_traces_match()
+            self._rtl_outputs = saved_rtl
 
     wrapper.__name__ = fn.__name__
     wrapper.__qualname__ = fn.__qualname__

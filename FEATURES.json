@@ -38,7 +38,7 @@
       "category": "simulation",
       "title": "Verilator co-simulation backend",
       "description": "Compile emitted Verilog with Verilator, drive from Python via ctypes/pybind. Same VeripyTestCase API, 100-1000x faster than Python sim. Enables system-level testing of large designs.",
-      "status": "planned",
+      "status": "implemented",
       "priority": "high",
       "package": "veripy",
       "requires": [

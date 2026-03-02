@@ -63,20 +63,40 @@
     {
       "id": 7,
       "type": "task",
-      "status": "open",
+      "status": "wontfix",
       "priority": "low",
       "title": "Document GPU/WGPU backend",
       "description": "backend_wgpu.py and gpu_sim.py are implemented with tests but undocumented.",
-      "created": "2026-03-02"
+      "created": "2026-03-02",
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Duplicate of #5"
+        },
+        {
+          "ts": "2026-03-02",
+          "msg": "Duplicate of #5"
+        }
+      ]
     },
     {
       "id": 8,
       "type": "task",
-      "status": "open",
+      "status": "wontfix",
       "priority": "low",
       "title": "Add combinational loop detection to lint",
       "description": "Detect circular dependencies in @comb blocks where signal A depends on B and B depends on A.",
-      "created": "2026-03-02"
+      "created": "2026-03-02",
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Duplicate of #6"
+        },
+        {
+          "ts": "2026-03-02",
+          "msg": "Duplicate of #6"
+        }
+      ]
     },
     {
       "id": 9,
@@ -281,22 +301,42 @@
     {
       "id": 21,
       "type": "task",
-      "status": "open",
+      "status": "resolved",
       "priority": "low",
       "title": "Priority arbiter and clock divider IPs",
       "description": "Priority arbiter and clock divider IPs",
       "created": "2026-03-02",
-      "feature": "ip-library"
+      "feature": "ip-library",
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Already implemented - PriorityArbiter, ClockDivider in ip.py with tests"
+        },
+        {
+          "ts": "2026-03-02",
+          "msg": "Already implemented"
+        }
+      ]
     },
     {
       "id": 22,
       "type": "task",
-      "status": "open",
+      "status": "resolved",
       "priority": "low",
       "title": "Credit-based flow control IP",
       "description": "Credit-based flow control IP",
       "created": "2026-03-02",
-      "feature": "ip-library"
+      "feature": "ip-library",
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Already implemented - CreditFlowControl in ip.py with tests"
+        },
+        {
+          "ts": "2026-03-02",
+          "msg": "Already implemented"
+        }
+      ]
     },
     {
       "id": 23,
@@ -392,6 +432,64 @@
       "description": "Write tests for formal backend",
       "created": "2026-03-02",
       "feature": "formal-sby"
+    },
+    {
+      "id": 31,
+      "type": "task",
+      "status": "resolved",
+      "priority": "high",
+      "title": "Create backend_verilator.py: compile Verilog to shared lib via Verilator + ctypes wrapper",
+      "description": "Create backend_verilator.py: compile Verilog to shared lib via Verilator + ctypes wrapper",
+      "created": "2026-03-02",
+      "feature": "verilator-cosim",
+      "blocks": [
+        32,
+        33
+      ],
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Implemented backend_verilator.py: _generate_wrapper (C++ codegen), compile_verilator (full pipeline), compile_module (Module convenience), VerilatorModel (ctypes wrapper with set/get/eval/step/close/context-manager)."
+        }
+      ]
+    },
+    {
+      "id": 32,
+      "type": "task",
+      "status": "resolved",
+      "priority": "high",
+      "title": "Integrate VerilatorModel with VeripyTestCase as opt-in backend",
+      "description": "Integrate VerilatorModel with VeripyTestCase as opt-in backend",
+      "created": "2026-03-02",
+      "feature": "verilator-cosim",
+      "blocked_by": [
+        31
+      ],
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Added _run_verilator to VeripyTestCase, updated _wrap_dual with opt-in Pass 3 (VERIPY_VERILATOR=1 env var or USE_VERILATOR class attr)."
+        }
+      ]
+    },
+    {
+      "id": 33,
+      "type": "task",
+      "status": "resolved",
+      "priority": "high",
+      "title": "Write tests for verilator backend (skip when verilator not installed)",
+      "description": "Write tests for verilator backend (skip when verilator not installed)",
+      "created": "2026-03-02",
+      "feature": "verilator-cosim",
+      "blocked_by": [
+        31
+      ],
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "10 tests: 6 pass (wrapper codegen, error handling, has_verilator), 4 skip (require verilator). All 525 tests pass."
+        }
+      ]
     }
   ]
 }

@@ -19,6 +19,12 @@ from .csr import Field, Reg, RegisterMap
 from .verify import VeripyTestCase
 
 
+def VerilatorModel(*args, **kwargs):
+    """Lazy-loaded Verilator co-simulation model (requires verilator on PATH)."""
+    from .backend_verilator import compile_module
+    return compile_module(*args, **kwargs)
+
+
 def GpuSim(*args, **kwargs):
     """Lazy-loaded GPU simulator (requires ``pip install veripy[gpu]``)."""
     from .gpu_sim import GpuSim as _GpuSim
