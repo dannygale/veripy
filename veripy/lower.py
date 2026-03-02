@@ -775,7 +775,7 @@ def lower_module(module, module_name=None):
                     ir.wires.append(WireDecl(wire_name, w))
 
         # Instance
-        mod_type = _to_snake(type(sub).__name__)
+        mod_type = getattr(sub, '_verilog_module_name', None) or _to_snake(type(sub).__name__)
         inst_ports = []
         for port_name, sig in sorted(sub._signals().items()):
             if sig._kind in ('input', 'output'):

@@ -3,6 +3,7 @@
 from .signal import Signal, Input, Output, Register, Mem
 from .signal import Edge, SensitivityList, Interface, posedge, negedge
 from .module import Module
+from .blackbox import BlackBox
 from .parameter import Parameter
 from .decorator import module
 from .context import (comb, always, fsm, assert_always, cover, pipeline,

@@ -91,6 +91,8 @@ def cmd_build(args):
             return
         seen.add(mod_name)
         for sub_name, sub in mod._submodules().items():
+            if getattr(sub, '_is_blackbox', False):
+                continue
             sub_snake = _to_snake(type(sub).__name__)
             factory = getattr(type(sub), '_veripy_factory', None)
             fresh = factory() if factory else type(sub)()
