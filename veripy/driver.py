@@ -1,7 +1,7 @@
 """Transaction-level protocol driver base class.
 
-Subclass ``Driver`` and override :meth:`send` as a generator that yields
-time delays and ``until()`` conditions to drive transactions onto a DUT.
+Subclass ``Driver`` and override :meth:`send` / :meth:`recv` as generators
+that yield time delays and ``until()`` conditions to drive transactions.
 
 Example usage in a testbench::
 
@@ -10,6 +10,7 @@ Example usage in a testbench::
     @sim.initial
     def stim():
         yield from drv.send({'data': 0xA5})
+        result = yield from drv.recv()
 """
 
 
@@ -35,3 +36,17 @@ class Driver:
         exactly as you would inside a ``@sim.initial`` block.
         """
         raise NotImplementedError("subclass must implement send()")
+
+    def recv(self):
+        """Generator: wait for and return a received transaction.
+
+        Override in subclass for bidirectional protocols.
+        """
+        raise NotImplementedError("subclass must implement recv()")
+
+    def reset(self):
+        """Generator: perform a protocol-level reset sequence.
+
+        Override in subclass if the protocol has a reset handshake.
+        """
+        raise NotImplementedError("subclass must implement reset()")

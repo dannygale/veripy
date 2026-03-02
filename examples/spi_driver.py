@@ -76,6 +76,34 @@ class SpiDriver(Driver):
         yield hp  # let final edge propagate
 
 
+# ── Controller-level driver (reactive yields) ───────────────────────
+
+class SpiControllerDriver(Driver):
+    """Transaction-level driver for :class:`SpiController`.
+
+    Uses ``until()`` to wait for tx_ready before pushing data and
+    rx_valid after the transfer completes.
+    """
+
+    def send(self, data):
+        """Generator: push *data* through the SPI controller's host interface."""
+        m = self.mod
+        from veripy.sim import until
+        # wait for controller ready
+        yield until(lambda: int(m.tx_ready) == 1)
+        m.tx_data.set(data)
+        m.tx_valid.set(1)
+        yield 10  # one clock cycle
+        m.tx_valid.set(0)
+
+    def recv(self):
+        """Generator: wait for rx_valid and return received byte."""
+        m = self.mod
+        from veripy.sim import until
+        yield until(lambda: int(m.rx_valid) == 1)
+        return int(m.rx_data)
+
+
 # ── Quick demo ───────────────────────────────────────────────────────
 
 if __name__ == '__main__':

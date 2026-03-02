@@ -17,8 +17,21 @@ class TestDriverBase(unittest.TestCase):
         sim = SimEngine(dut)
         drv = Driver(sim, dut)
         with self.assertRaises(NotImplementedError):
-            # send() should raise immediately (not a generator)
             drv.send(None)
+
+    def test_recv_raises(self):
+        dut = spi_shift_reg()
+        sim = SimEngine(dut)
+        drv = Driver(sim, dut)
+        with self.assertRaises(NotImplementedError):
+            drv.recv()
+
+    def test_reset_raises(self):
+        dut = spi_shift_reg()
+        sim = SimEngine(dut)
+        drv = Driver(sim, dut)
+        with self.assertRaises(NotImplementedError):
+            drv.reset()
 
     def test_stores_engine_and_mod(self):
         dut = spi_shift_reg()
@@ -79,6 +92,77 @@ class TestSpiDriver(unittest.TestCase):
 
         sim.run()
         self.assertEqual(results, [0x55, 0xAA])
+
+
+class TestSpiControllerDriver(unittest.TestCase):
+    """SpiControllerDriver uses reactive yields (until) for handshaking."""
+
+    def _make(self):
+        from examples.spi_controller import SpiController
+        from examples.spi_driver import SpiControllerDriver
+        dut = SpiController(width=8, fifo_depth=4, clk_div=2)
+        sim = SimEngine(dut)
+        sim.clock(dut.clock, 10)
+        drv = SpiControllerDriver(sim, dut)
+        return dut, sim, drv
+
+    def test_send_completes(self):
+        """send() waits for tx_ready via until(), then pushes data."""
+        dut, sim, drv = self._make()
+        done = []
+
+        @sim.initial
+        def stim():
+            dut.reset.set(1); dut.spi.miso.set(0)
+            yield 20
+            dut.reset.set(0)
+            yield 20
+            yield from drv.send(0xA5)
+            done.append(True)
+            # let transfer finish
+            yield 500
+
+        sim.run()
+        self.assertTrue(done)
+
+    def test_recv_returns_data(self):
+        """recv() waits for rx_valid via until(), returns rx_data."""
+        dut, sim, drv = self._make()
+        result = []
+
+        @sim.initial
+        def stim():
+            dut.reset.set(1); dut.spi.miso.set(0)
+            yield 20
+            dut.reset.set(0)
+            yield 20
+            yield from drv.send(0x42)
+            val = yield from drv.recv()
+            result.append(val)
+
+        sim.run()
+        self.assertEqual(len(result), 1)
+        # MISO tied to 0 → rx_data is 0
+        self.assertEqual(result[0], 0)
+
+    def test_back_to_back_sends(self):
+        """Two consecutive send+recv cycles complete."""
+        dut, sim, drv = self._make()
+        results = []
+
+        @sim.initial
+        def stim():
+            dut.reset.set(1); dut.spi.miso.set(0)
+            yield 20
+            dut.reset.set(0)
+            yield 20
+            for data in [0x55, 0xAA]:
+                yield from drv.send(data)
+                val = yield from drv.recv()
+                results.append(val)
+
+        sim.run()
+        self.assertEqual(len(results), 2)
 
 
 if __name__ == '__main__':
