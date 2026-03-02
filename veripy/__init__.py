@@ -16,6 +16,7 @@ from .ip import (SyncFifo, EdgeDetector, Debouncer, RoundRobinArbiter,
                  PriorityArbiter, ClockDivider, CreditFlowControl)
 from .axi4lite import Axi4LiteBus, Axi4LiteSub
 from .csr import Field, Reg, RegisterMap
+from .project import Project
 from .verify import VeripyTestCase
 
 
