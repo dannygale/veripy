@@ -3,7 +3,8 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
-from veripy import Module, Input, Output, Register, Signal
+from veripy import Module, Input, Output, Register, Signal, module, posedge
+from veripy.context import comb, always
 from veripy.lint import lint
 
 
@@ -163,6 +164,126 @@ class TestCleanModule(unittest.TestCase):
         w = lint(SingleClock())
         cdc = [m for lvl, m in w if 'CDC' in m]
         self.assertEqual(len(cdc), 0)
+
+
+class TestModuleDecoratorLint(unittest.TestCase):
+    """Lint must work on @module-decorated modules (uses _veripy_emit_source)."""
+
+    def test_decorator_module_clean(self):
+        @module
+        def clean():
+            d   = Input(8)
+            out = Output(8)
+
+            @comb
+            def drive():
+                out = d
+
+        self.assertEqual(lint(clean()), [])
+
+    def test_decorator_module_detects_undriven(self):
+        @module
+        def undriven():
+            d   = Input(8)
+            out = Output(8)
+
+        msgs = [m for _, m in lint(undriven())]
+        self.assertTrue(any("'out' is never driven" in m for m in msgs))
+
+
+class TestLatchInference(unittest.TestCase):
+    """Check 6: detect signals not assigned on all paths in @comb blocks."""
+
+    def test_missing_else_warns(self):
+        class M(Module):
+            def __init__(self):
+                self.sel = Input()
+                self.a   = Input(8)
+                self.out = Output(8)
+                super().__init__()
+
+                @self.comb
+                def logic():
+                    if self.sel:
+                        self.out = self.a
+
+        msgs = [m for _, m in lint(M())]
+        self.assertTrue(any('latch inferred' in m and "'out'" in m for m in msgs))
+
+    def test_complete_if_else_clean(self):
+        class M(Module):
+            def __init__(self):
+                self.sel = Input()
+                self.a   = Input(8)
+                self.b   = Input(8)
+                self.out = Output(8)
+                super().__init__()
+
+                @self.comb
+                def logic():
+                    if self.sel:
+                        self.out = self.a
+                    else:
+                        self.out = self.b
+
+        latch_warns = [m for _, m in lint(M()) if 'latch' in m]
+        self.assertEqual(latch_warns, [])
+
+    def test_elif_without_else_warns(self):
+        class M(Module):
+            def __init__(self):
+                self.sel = Input(2)
+                self.a   = Input(8)
+                self.b   = Input(8)
+                self.out = Output(8)
+                super().__init__()
+
+                @self.comb
+                def logic():
+                    if self.sel == 0:
+                        self.out = self.a
+                    elif self.sel == 1:
+                        self.out = self.b
+
+        msgs = [m for _, m in lint(M())]
+        self.assertTrue(any('latch inferred' in m for m in msgs))
+
+    def test_unconditional_assign_no_latch(self):
+        class M(Module):
+            def __init__(self):
+                self.sel = Input()
+                self.a   = Input(8)
+                self.x   = Output(8)
+                self.y   = Output(8)
+                super().__init__()
+
+                @self.comb
+                def logic():
+                    self.x = self.a
+                    if self.sel:
+                        self.y = self.a
+
+        msgs = [m for _, m in lint(M())]
+        latch = [m for m in msgs if 'latch' in m]
+        # x is always assigned → no latch; y is conditional → latch
+        self.assertFalse(any("'x'" in m for m in latch))
+        self.assertTrue(any("'y'" in m for m in latch))
+
+    def test_decorator_module_latch(self):
+        """Latch detection works on @module-decorated modules too."""
+        @module
+        def latchy():
+            sel = Input()
+            a   = Input(8)
+            out = Output(8)
+
+            @comb
+            def logic():
+                if sel:
+                    out = a
+
+        msgs = [m for _, m in lint(latchy())]
+        self.assertTrue(any('latch inferred' in m for m in msgs))
 
 
 if __name__ == '__main__':

@@ -6,7 +6,9 @@ import textwrap
 
 
 def _get_func_ast(func):
-    src = textwrap.dedent(inspect.getsource(func))
+    src = getattr(func, '_veripy_emit_source', None)
+    if src is None:
+        src = textwrap.dedent(inspect.getsource(func))
     tree = ast.parse(src)
     return tree.body[0] if isinstance(tree.body[0], ast.FunctionDef) else tree
 
@@ -61,6 +63,39 @@ def _collect_reads_writes(func):
     _ReadVisitor().visit(tree)
     # Remove writes from reads (a signal can be both read and written)
     return reads, writes
+
+
+def _any_assigned(stmts):
+    """Return set of self.x names assigned on ANY path through *stmts*."""
+    result = set()
+    for stmt in stmts:
+        if isinstance(stmt, ast.Assign):
+            for t in stmt.targets:
+                name = _self_attr_name(t)
+                if name:
+                    result.add(name)
+        elif isinstance(stmt, ast.If):
+            result |= _any_assigned(stmt.body)
+            result |= _any_assigned(stmt.orelse)
+    return result
+
+
+def _always_assigned(stmts):
+    """Return set of self.x names assigned on ALL paths through *stmts*."""
+    result = set()
+    for stmt in stmts:
+        if isinstance(stmt, ast.Assign):
+            for t in stmt.targets:
+                name = _self_attr_name(t)
+                if name:
+                    result.add(name)
+        elif isinstance(stmt, ast.If):
+            if_assigns = _always_assigned(stmt.body)
+            if stmt.orelse:
+                else_assigns = _always_assigned(stmt.orelse)
+                result |= (if_assigns & else_assigns)
+            # No else → nothing from the if branch is guaranteed
+    return result
 
 
 def lint(module):
@@ -175,5 +210,17 @@ def lint(module):
     for name in sorted(internal):
         if name not in all_reads and name not in submodules:
             warnings.append(('info', f"signal '{name}' is declared but never read"))
+
+    # Check 6: Latch inference in @comb blocks
+    for method in module._comb_blocks:
+        tree = _get_func_ast(method)
+        body = tree.body
+        any_set = _any_assigned(body)
+        always_set = _always_assigned(body)
+        latched = sorted(any_set - always_set)
+        for name in latched:
+            warnings.append(('warning',
+                f"signal '{name}' not assigned on all paths in @comb "
+                f"{method.__name__} (latch inferred)"))
 
     return warnings
