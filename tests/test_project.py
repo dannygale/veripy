@@ -1,6 +1,6 @@
-"""Tests for Project class: module tracking and dependency-ordered file lists."""
+"""Tests for Project class: module tracking, dependency ordering, Tcl generation."""
 
-import sys, os
+import sys, os, tempfile, shutil
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
 from veripy import Module, BlackBox, Input, Output, Register, Project
@@ -144,6 +144,98 @@ class TestProjectEmpty(unittest.TestCase):
         proj = Project()
         self.assertEqual(proj.modules(), [])
         self.assertEqual(proj.file_list(), [])
+
+
+# ── Write tests ──────────────────────────────────────────────────────
+
+class TestProjectWrite(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def test_write_creates_files(self):
+        proj = Project()
+        proj.add(Outer())
+        paths = proj.write(self.tmpdir)
+        self.assertEqual(len(paths), 2)
+        for p in paths:
+            self.assertTrue(os.path.isfile(p))
+
+    def test_write_dependency_order(self):
+        proj = Project()
+        proj.add(Outer())
+        paths = proj.write(self.tmpdir)
+        names = [os.path.basename(p) for p in paths]
+        self.assertEqual(names, ['inner.v', 'outer.v'])
+
+    def test_write_content(self):
+        proj = Project()
+        proj.add(Inner())
+        paths = proj.write(self.tmpdir)
+        with open(paths[0]) as f:
+            self.assertIn('module inner', f.read())
+
+
+# ── Tcl generation tests ────────────────────────────────────────────
+
+class TestVivadoTcl(unittest.TestCase):
+    def test_read_verilog_commands(self):
+        proj = Project()
+        proj.add(Outer())
+        tcl = proj.to_vivado_tcl('rtl')
+        self.assertIn('read_verilog rtl/inner.v', tcl)
+        self.assertIn('read_verilog rtl/outer.v', tcl)
+
+    def test_top_module_set(self):
+        proj = Project()
+        proj.add(Outer())
+        tcl = proj.to_vivado_tcl()
+        self.assertIn('set_property top outer', tcl)
+
+    def test_dependency_order(self):
+        proj = Project()
+        proj.add(Outer())
+        tcl = proj.to_vivado_tcl('rtl')
+        inner_pos = tcl.index('inner.v')
+        outer_pos = tcl.index('outer.v')
+        self.assertLess(inner_pos, outer_pos)
+
+    def test_empty_project(self):
+        tcl = Project().to_vivado_tcl()
+        self.assertNotIn('read_verilog', tcl)
+        self.assertNotIn('set_property top', tcl)
+
+
+class TestQuartusTcl(unittest.TestCase):
+    def test_global_assignments(self):
+        proj = Project()
+        proj.add(Outer())
+        tcl = proj.to_quartus_tcl('rtl')
+        self.assertIn('set_global_assignment -name VERILOG_FILE rtl/inner.v', tcl)
+        self.assertIn('set_global_assignment -name VERILOG_FILE rtl/outer.v', tcl)
+
+    def test_top_level_entity(self):
+        proj = Project()
+        proj.add(Outer())
+        tcl = proj.to_quartus_tcl()
+        self.assertIn('set_global_assignment -name TOP_LEVEL_ENTITY outer', tcl)
+
+
+class TestDcTcl(unittest.TestCase):
+    def test_analyze_commands(self):
+        proj = Project()
+        proj.add(Outer())
+        tcl = proj.to_dc_tcl('rtl')
+        self.assertIn('analyze -format verilog rtl/inner.v', tcl)
+        self.assertIn('analyze -format verilog rtl/outer.v', tcl)
+
+    def test_elaborate(self):
+        proj = Project()
+        proj.add(Outer())
+        tcl = proj.to_dc_tcl()
+        self.assertIn('elaborate outer', tcl)
 
 
 if __name__ == '__main__':
