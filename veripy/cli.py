@@ -360,6 +360,38 @@ def cmd_profile(args):
     print()
 
 
+def cmd_ip(args):
+    """Manage installed VeriPy IP packages."""
+    from .packaging import discover, scaffold
+
+    if args.ip_command == 'list':
+        packages = discover()
+        if not packages:
+            print("No VeriPy IP packages installed.")
+            print("Create one with: veripy ip init <name>")
+            return
+        for pkg in packages:
+            print(f"  {pkg.name:20s} {pkg.version:10s} {pkg.description}")
+
+    elif args.ip_command == 'show':
+        packages = discover()
+        match = [p for p in packages if p.name == args.name]
+        if not match:
+            sys.exit(f"error: IP package '{args.name}' not found")
+        pkg = match[0]
+        print(f"Name:        {pkg.name}")
+        print(f"Version:     {pkg.version}")
+        print(f"Module:      {pkg.module_path}")
+        print(f"Description: {pkg.description}")
+
+    elif args.ip_command == 'init':
+        path = scaffold(args.name, output_dir=args.output or '.')
+        print(f"Created IP package skeleton at {path}/")
+        print(f"  {path}/pyproject.toml")
+        print(f"  {path}/veripy_{args.name}/__init__.py")
+        print(f"\nTo install for development: pip install -e {path}")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="veripy", description="VeriPy HDL toolchain")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -417,10 +449,20 @@ def main():
     p_equiv.add_argument("--gate-param", action="append", default=[], help="Gate module param (e.g. --gate-param n=4)")
     p_equiv.add_argument("--run", action="store_true", help="Run Yosys automatically (requires yosys on PATH)")
 
+    # ip
+    p_ip = sub.add_parser("ip", help="Manage VeriPy IP packages")
+    ip_sub = p_ip.add_subparsers(dest="ip_command", required=True)
+    ip_sub.add_parser("list", help="List installed VeriPy IP packages")
+    p_ip_show = ip_sub.add_parser("show", help="Show details of an installed IP package")
+    p_ip_show.add_argument("name", help="IP package name")
+    p_ip_init = ip_sub.add_parser("init", help="Scaffold a new VeriPy IP package")
+    p_ip_init.add_argument("name", help="IP package name (e.g. 'axi' creates veripy-axi)")
+    p_ip_init.add_argument("-o", "--output", help="Output directory (default: current dir)")
+
     args = parser.parse_args()
     {"build": cmd_build, "test": cmd_test, "import": cmd_import,
      "lint": cmd_lint, "formal": cmd_formal, "profile": cmd_profile,
-     "equiv": cmd_equiv, "doc": cmd_doc}[args.command](args)
+     "equiv": cmd_equiv, "doc": cmd_doc, "ip": cmd_ip}[args.command](args)
 
 
 if __name__ == "__main__":
