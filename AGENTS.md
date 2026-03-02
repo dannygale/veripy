@@ -45,6 +45,11 @@ All 358+ tests must pass before committing.
 - **Width inference**: The lowerer infers widths from RHS expressions in @comb blocks. Only declare `Register(width)` for locals when the RHS references other locals.
 - **Pipelines**: Lambda-chain for simple cases, `pipe.stage('name', stall, flush, field=source)` for CPU-style pipelines.
 - **Testing**: `VeripyTestCase` runs each test twice (Python sim + iverilog). Don't add tests unless the work requires them.
+  - Subclass `VeripyTestCase`, implement `create_module()` to return your module instance.
+  - Each `test_*` method runs automatically in both Python simulation and compiled Verilog — outputs are compared cycle-by-cycle.
+  - Use `@self.always` for clocks, `@self.initial` for stimulus. `self.set()` drives inputs, `self.out()` reads outputs.
+  - Reactive helpers: `yield until(lambda: cond)`, `self.fork()`, `self.fork_any()` for parallel blocks.
+  - New modules and non-trivial functions should have tests. Put them in `tests/` following existing patterns.
 - **Minimal code**: Follow existing patterns. Don't over-abstract. Explicit wiring over magic.
 - **No separate Wire type**: `Signal` is the wire type.
 
