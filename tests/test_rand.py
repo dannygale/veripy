@@ -1,9 +1,16 @@
 """Tests for constrained random stimulus generation."""
 import unittest
 
+try:
+    import constrainedrandom
+    _has_cr = True
+except ImportError:
+    _has_cr = False
+
 from veripy.rand import Rand, Range
 
 
+@unittest.skipUnless(_has_cr, 'constrainedrandom not installed')
 class TestRand(unittest.TestCase):
 
     def test_basic_range(self):
