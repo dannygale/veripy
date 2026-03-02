@@ -9,6 +9,7 @@ from .context import (comb, always, fsm, assert_always, cover, pipeline,
                       create_clock, max_delay, false_path)
 
 from .sim import until
+from .driver import Driver
 from .cdc import Synchronizer, AsyncFIFO
 from .verify import VeripyTestCase
 
