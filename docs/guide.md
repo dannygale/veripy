@@ -459,6 +459,74 @@ def connect():
 Matching is by signal name. Direction is respected: outputs on the source wire to inputs on the destination. This replaces tedious per-signal wiring when two sub-modules share the same interface type.
 
 
+## CSR Register Maps
+
+Define register maps in Python and generate RTL, C headers, Python drivers, and documentation from a single source.
+
+### Defining a Register Map
+
+```python
+from veripy import Field, Reg, RegisterMap
+
+rmap = RegisterMap([
+    Reg('ctrl', 0x00, [
+        Field('enable', bits=0, access='rw', reset=1, desc='Global enable'),
+        Field('mode',   bits=(2, 1), access='rw', desc='Operating mode'),
+    ]),
+    Reg('status', 0x04, [
+        Field('busy',  bits=0, access='ro', desc='Transfer in progress'),
+        Field('error', bits=1, access='ro', desc='Error flag'),
+    ]),
+    Reg('data', 0x08, [
+        Field('value', bits=(31, 0), access='rw', desc='Data register'),
+    ]),
+])
+```
+
+`Field` takes a bit index (single bit) or `(msb, lsb)` tuple. Access types: `'rw'`, `'ro'`, `'wo'`.
+
+### RTL Generation
+
+`to_module()` generates an AXI4-Lite subordinate with decode logic for all registers:
+
+```python
+mod = rmap.to_module()
+verilog = mod.to_verilog('my_csr')
+```
+
+The generated module has full AXI4-Lite handshake, byte enables via `wstrb`, and returns `DECERR` for unmapped addresses.
+
+### C Header Generation
+
+```python
+header = rmap.to_c_header(prefix='MY_PERIPH')
+```
+
+Produces `#define` macros for offsets, reset values, field shifts, and masks:
+
+```c
+#define MY_PERIPH_CTRL_OFFSET 0x0000
+#define MY_PERIPH_CTRL_ENABLE_SHIFT 0
+#define MY_PERIPH_CTRL_ENABLE_MASK  0x00000001
+```
+
+### Python Driver Generation
+
+```python
+driver_src = rmap.to_python_driver(class_name='MyPeriphDriver')
+```
+
+Generates a class with `read_<reg>()`, `write_<reg>()`, `get_<reg>_<field>()`, and `set_<reg>_<field>()` methods. The class expects a `bus` object with `read(addr)` and `write(addr, data)` methods.
+
+### Markdown Documentation
+
+```python
+md = rmap.to_markdown(title='My Peripheral Registers')
+```
+
+Generates a register reference with per-register sections, field tables, access types, and reset values.
+
+
 ## CDC
 
 Cross clock domain signals must be synchronized. VeriPy provides two primitives and lint detection.

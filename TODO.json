@@ -18,11 +18,17 @@
     {
       "id": 2,
       "type": "task",
-      "status": "open",
+      "status": "resolved",
       "priority": "medium",
       "title": "Document CSR/RegisterMap in docs",
       "description": "csr.py (Field, Reg, RegisterMap, to_module, to_c_header, to_python_driver, to_markdown) is implemented with tests but undocumented.",
-      "created": "2026-03-02"
+      "created": "2026-03-02",
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Added CSR Register Maps section to docs/guide.md: Field, Reg, RegisterMap, to_module, to_c_header, to_python_driver, to_markdown. Updated README features list."
+        }
+      ]
     },
     {
       "id": 3,

@@ -121,10 +121,12 @@ veripy formal <file.py>            # emit .sby + Verilog for SymbiYosys
 - **Pipelines** — lambda-chain for simple stages, named stages with per-stage stall/flush for CPU pipelines ([docs](docs/guide.md#pipelines))
 - **Timing constraints** — SDC output co-located with logic ([docs](docs/guide.md#timing-constraints))
 - **Interface bundles** — reusable signal groups, parameterized widths, bulk connect ([docs](docs/guide.md#interfaces))
+- **CSR register maps** — define once, generate RTL, C headers, Python drivers, markdown docs ([docs](docs/guide.md#csr-register-maps))
 - **Verilog import** — convert existing RTL to VeriPy ([docs](docs/verilog.md))
-- **Lint** — undriven outputs, multi-driven signals, missing reset, unused signals, CDC violations ([docs](docs/verilog.md#lint))
+- **Lint** — undriven outputs, multi-driven signals, missing reset, unused signals, CDC violations, combinational loops ([docs](docs/verilog.md#lint))
 - **CDC primitives** — `Synchronizer`, `AsyncFIFO` with gray-code pointers ([docs](docs/guide.md#cdc))
 - **Event-driven simulation** — `SimEngine` with proper Verilog scheduling ([docs](docs/testing.md#simengine))
+- **Verilator co-simulation** — compile to shared lib, drive from Python via ctypes for 100-1000x speedup
 - **Reactive testing** — `yield until(cond)`, `fork`/`join`, constrained random, coverage reporting ([docs](docs/testing.md#reactive-waits))
 - **Protocol drivers** — reusable `Driver` base class for transaction-level bus helpers ([docs](docs/testing.md#protocol-drivers))
 
