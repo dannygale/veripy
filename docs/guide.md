@@ -591,3 +591,177 @@ fifo = AsyncFIFO(width=8, depth=16)  # depth must be power of 2
 ```
 
 Gray-code pointers ensure only one bit changes per clock cycle during pointer synchronization, preventing metastability-induced corruption.
+
+
+## IP Library
+
+VeriPy ships reusable, parameterized IP blocks in `veripy.ip`. All are class-based `Module` subclasses with `clock` and `reset` inputs, fully synthesizable, and dual-path tested.
+
+```python
+from veripy import (SyncFifo, EdgeDetector, Debouncer,
+                    RoundRobinArbiter, PriorityArbiter,
+                    ClockDivider, CreditFlowControl)
+```
+
+### SyncFifo
+
+Synchronous FIFO with configurable width and depth.
+
+```python
+fifo = SyncFifo(width=8, depth=16)
+```
+
+| Port    | Dir    | Width              | Description            |
+|---------|--------|--------------------|------------------------|
+| clock   | input  | 1                  | System clock           |
+| reset   | input  | 1                  | Synchronous reset      |
+| push    | input  | 1                  | Write enable           |
+| din     | input  | `width`            | Write data             |
+| full    | output | 1                  | FIFO is full           |
+| pop     | input  | 1                  | Read enable            |
+| dout    | output | `width`            | Read data (head)       |
+| empty   | output | 1                  | FIFO is empty          |
+| count   | output | log2(depth)+1      | Current occupancy      |
+
+Pushing when full or popping when empty is ignored. Read data (`dout`) reflects the head of the FIFO combinationally.
+
+```python
+@module
+def top():
+    clock = Input()
+    reset = Input()
+    din   = Input(8)
+    dout  = Output(8)
+    fifo  = SyncFifo(width=8, depth=4)
+
+    @comb
+    def wire():
+        fifo.clock = clock
+        fifo.reset = reset
+        fifo.push  = 1
+        fifo.din   = din
+        fifo.pop   = 1
+        dout       = fifo.dout
+```
+
+### EdgeDetector
+
+Detects rising, falling, and any-edge transitions. All outputs are registered (one cycle latency).
+
+```python
+ed = EdgeDetector()
+```
+
+| Port    | Dir    | Description                          |
+|---------|--------|--------------------------------------|
+| clock   | input  | System clock                         |
+| reset   | input  | Synchronous reset                    |
+| d       | input  | Input signal                         |
+| rise    | output | High for one cycle on rising edge    |
+| fall    | output | High for one cycle on falling edge   |
+| toggle  | output | High for one cycle on any edge       |
+
+### Debouncer
+
+Holds output stable until input is steady for `threshold` consecutive clock cycles. Use for buttons, switches, or noisy external signals.
+
+```python
+db = Debouncer(threshold=1000)
+```
+
+| Port    | Dir    | Description              |
+|---------|--------|--------------------------|
+| clock   | input  | System clock             |
+| reset   | input  | Synchronous reset        |
+| d       | input  | Noisy input              |
+| q       | output | Debounced output         |
+
+Short glitches (shorter than `threshold` cycles) are rejected.
+
+### RoundRobinArbiter
+
+Fair round-robin arbiter for N requestors. Rotates priority after each grant.
+
+```python
+arb = RoundRobinArbiter(n=4)
+```
+
+| Port    | Dir    | Width | Description                              |
+|---------|--------|-------|------------------------------------------|
+| clock   | input  | 1     | System clock                             |
+| reset   | input  | 1     | Synchronous reset                        |
+| req     | input  | `n`   | Request vector (multi-hot)               |
+| grant   | output | `n`   | Grant vector (one-hot, at most one set)  |
+
+When multiple bits in `req` are set, the arbiter grants the next requestor in round-robin order from the current pointer. Grant is zero when no requests are active.
+
+### PriorityArbiter
+
+Fixed-priority arbiter for N requestors. Lowest index = highest priority.
+
+```python
+arb = PriorityArbiter(n=4)
+```
+
+| Port    | Dir    | Width | Description                              |
+|---------|--------|-------|------------------------------------------|
+| clock   | input  | 1     | System clock                             |
+| reset   | input  | 1     | Synchronous reset                        |
+| req     | input  | `n`   | Request vector (multi-hot)               |
+| grant   | output | `n`   | Grant vector (one-hot)                   |
+
+Bit 0 always wins when asserted. Use `RoundRobinArbiter` when fairness is needed.
+
+### ClockDivider
+
+Divides the input clock by `2 × divisor`. Output toggles every `divisor` input cycles.
+
+```python
+div = ClockDivider(divisor=4)  # output period = 8× input period
+```
+
+| Port    | Dir    | Description              |
+|---------|--------|--------------------------|
+| clock   | input  | Input clock              |
+| reset   | input  | Synchronous reset        |
+| clk_out | output | Divided clock            |
+
+### CreditFlowControl
+
+Credit-based flow control. The sender may transmit when credits are available. Each send consumes a credit; each receive returns one.
+
+```python
+fc = CreditFlowControl(credits=4)
+```
+
+| Port       | Dir    | Description                                    |
+|------------|--------|------------------------------------------------|
+| clock      | input  | System clock                                   |
+| reset      | input  | Synchronous reset (restores all credits)       |
+| send_valid | input  | Sender has data                                |
+| send_ready | output | Credits available (OK to send)                 |
+| recv_valid | input  | Receiver consumed data (returns a credit)      |
+| recv_ready | output | Receiver can accept (credits below max)        |
+
+After reset, all credits are available. `send_ready` deasserts when credits reach zero. Simultaneous send and receive is a no-op on the credit count.
+
+### Using IP Blocks as Sub-Modules
+
+All IP blocks are standard `Module` subclasses — instantiate them inside `@module` or class-based modules and wire their ports from `@comb` blocks, just like any other sub-module:
+
+```python
+@module
+def arbiter_demo(n=4):
+    clock = Input()
+    reset = Input()
+    req   = Input(n)
+    grant = Output(n)
+    arb   = RoundRobinArbiter(n=n)
+
+    @comb
+    def wire():
+        arb.clock = clock
+        arb.reset = reset
+        arb.req   = req
+        grant     = arb.grant
+```

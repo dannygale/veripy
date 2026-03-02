@@ -125,6 +125,7 @@ veripy formal <file.py>            # emit .sby + Verilog for SymbiYosys
 - **Verilog import** — convert existing RTL to VeriPy ([docs](docs/verilog.md))
 - **Lint** — undriven outputs, multi-driven signals, missing reset, unused signals, CDC violations, combinational loops ([docs](docs/verilog.md#lint))
 - **CDC primitives** — `Synchronizer`, `AsyncFIFO` with gray-code pointers ([docs](docs/guide.md#cdc))
+- **IP library** — `SyncFifo`, `EdgeDetector`, `Debouncer`, `RoundRobinArbiter`, `PriorityArbiter`, `ClockDivider`, `CreditFlowControl` ([docs](docs/guide.md#ip-library))
 - **Event-driven simulation** — `SimEngine` with proper Verilog scheduling ([docs](docs/testing.md#simengine))
 - **Verilator co-simulation** — compile to shared lib, drive from Python via ctypes for 100-1000x speedup
 - **Reactive testing** — `yield until(cond)`, `fork`/`join`, constrained random, coverage reporting ([docs](docs/testing.md#reactive-waits))
