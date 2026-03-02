@@ -286,5 +286,95 @@ class TestLatchInference(unittest.TestCase):
         self.assertTrue(any('latch inferred' in m for m in msgs))
 
 
+class TestCombLoop(unittest.TestCase):
+    def test_detects_simple_loop(self):
+        """Two @comb blocks forming a cycle: a→b and b→a."""
+        class M(Module):
+            def __init__(self):
+                self.a = Signal(8)
+                self.b = Signal(8)
+                super().__init__()
+
+                @self.comb
+                def f1():
+                    self.b = self.a
+
+                @self.comb
+                def f2():
+                    self.a = self.b
+
+        m = M()
+        results = lint(m)
+        msgs = [msg for lvl, msg in results if 'combinational loop' in msg]
+        self.assertEqual(len(msgs), 1)
+        self.assertIn('a', msgs[0])
+        self.assertIn('b', msgs[0])
+
+    def test_no_loop_clean(self):
+        """Linear chain: a→b→c should not trigger."""
+        class M(Module):
+            def __init__(self):
+                self.inp = Input(8)
+                self.mid = Signal(8)
+                self.out = Output(8)
+                super().__init__()
+
+                @self.comb
+                def f1():
+                    self.mid = self.inp
+
+                @self.comb
+                def f2():
+                    self.out = self.mid
+
+        m = M()
+        results = lint(m)
+        msgs = [msg for lvl, msg in results if 'combinational loop' in msg]
+        self.assertEqual(len(msgs), 0)
+
+    def test_self_loop_excluded(self):
+        """Reading and writing the same signal in one block is not a loop."""
+        class M(Module):
+            def __init__(self):
+                self.inp = Input(8)
+                self.out = Output(8)
+                super().__init__()
+
+                @self.comb
+                def f():
+                    self.out = self.inp
+
+        m = M()
+        results = lint(m)
+        msgs = [msg for lvl, msg in results if 'combinational loop' in msg]
+        self.assertEqual(len(msgs), 0)
+
+    def test_three_signal_loop(self):
+        """Three-signal cycle: a→b→c→a."""
+        class M(Module):
+            def __init__(self):
+                self.a = Signal(8)
+                self.b = Signal(8)
+                self.c = Signal(8)
+                super().__init__()
+
+                @self.comb
+                def f1():
+                    self.b = self.a
+
+                @self.comb
+                def f2():
+                    self.c = self.b
+
+                @self.comb
+                def f3():
+                    self.a = self.c
+
+        m = M()
+        results = lint(m)
+        msgs = [msg for lvl, msg in results if 'combinational loop' in msg]
+        self.assertEqual(len(msgs), 1)
+
+
 if __name__ == '__main__':
     unittest.main()

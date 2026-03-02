@@ -110,7 +110,7 @@
       "category": "core",
       "title": "Advanced lint checks",
       "description": "Combinational loop detection, latch inference warnings, clock domain annotation with automatic CDC violation flagging for raw signal crossings between annotated domains.",
-      "status": "planned",
+      "status": "partial",
       "priority": "medium",
       "package": "veripy"
     },

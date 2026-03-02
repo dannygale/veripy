@@ -54,11 +54,17 @@
     {
       "id": 6,
       "type": "feature",
-      "status": "open",
+      "status": "resolved",
       "priority": "low",
       "title": "Add combinational loop detection to lint",
       "description": "Detect circular dependencies in @comb blocks where signal A depends on B and B depends on A.",
-      "created": "2026-03-02"
+      "created": "2026-03-02",
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Implemented as part of lint-v2 feature, task #34."
+        }
+      ]
     },
     {
       "id": 7,
@@ -494,6 +500,32 @@
           "msg": "10 tests: 6 pass (wrapper codegen, error handling, has_verilator), 4 skip (require verilator). All 525 tests pass."
         }
       ]
+    },
+    {
+      "id": 34,
+      "type": "task",
+      "status": "resolved",
+      "priority": "medium",
+      "title": "Add combinational loop detection to lint",
+      "description": "Add combinational loop detection to lint",
+      "created": "2026-03-02",
+      "feature": "lint-v2",
+      "notes": [
+        {
+          "ts": "2026-03-02",
+          "msg": "Added combinational loop detection as Check 7 in lint.py. Builds dependency graph from @comb block reads/writes, detects cycles via DFS. Reports as error level. 4 tests added."
+        }
+      ]
+    },
+    {
+      "id": 35,
+      "type": "task",
+      "status": "open",
+      "priority": "low",
+      "title": "Add explicit clock domain annotation API for enhanced CDC checking",
+      "description": "Add explicit clock domain annotation API for enhanced CDC checking",
+      "created": "2026-03-02",
+      "feature": "lint-v2"
     }
   ]
 }

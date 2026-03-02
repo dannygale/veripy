@@ -223,4 +223,49 @@ def lint(module):
                 f"signal '{name}' not assigned on all paths in @comb "
                 f"{method.__name__} (latch inferred)"))
 
+    # Check 7: Combinational loop detection
+    # Build dependency graph across @comb blocks: read → write edges
+    comb_graph = {}  # signal → set of signals it feeds into
+    for method in module._comb_blocks:
+        reads, writes = _collect_reads_writes(method)
+        for r in reads:
+            if r in signals:
+                for w in writes:
+                    if w in signals and w != r:
+                        comb_graph.setdefault(r, set()).add(w)
+
+    # DFS cycle detection
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {s: WHITE for s in comb_graph}
+    path = []
+
+    def _dfs(node):
+        color[node] = GRAY
+        path.append(node)
+        for nxt in comb_graph.get(node, ()):
+            if nxt not in color:
+                continue
+            if color[nxt] == GRAY:
+                cycle_start = path.index(nxt)
+                return path[cycle_start:]
+            if color[nxt] == WHITE:
+                result = _dfs(nxt)
+                if result:
+                    return result
+        path.pop()
+        color[node] = BLACK
+        return None
+
+    reported = set()
+    for node in list(comb_graph):
+        if color.get(node, WHITE) == WHITE:
+            cycle = _dfs(node)
+            if cycle:
+                key = tuple(sorted(cycle))
+                if key not in reported:
+                    reported.add(key)
+                    loop_str = ' → '.join(cycle + [cycle[0]])
+                    warnings.append(('error',
+                        f"combinational loop detected: {loop_str}"))
+
     return warnings
