@@ -455,6 +455,7 @@ class _Pipeline:
         self._stage_funcs = []
         self._stage_regs = []   # list of list-of-Register
         self._valid_regs = []   # list of Register|None
+        self._named_stages = [] # list of _NamedStage
         self._finalized = False
 
     def stage(self, func_or_name, stall=None, flush=None, **fields):
@@ -475,8 +476,10 @@ class _Pipeline:
         if callable(func_or_name):
             self._stage_funcs.append(func_or_name)
             return self
-        return _NamedStage(self, func_or_name, stall=stall,
-                           flush=flush, **fields)
+        ns = _NamedStage(self, func_or_name, stall=stall,
+                         flush=flush, **fields)
+        self._named_stages.append(ns)
+        return ns
 
     # ── finalization ─────────────────────────────────────────────
 
@@ -484,8 +487,11 @@ class _Pipeline:
         if self._finalized:
             return
         self._finalized = True
+        # Generate deferred emit sources for named stages
+        for ns in self._named_stages:
+            ns._gen_emit_source()
         if not self._stage_funcs:
-            return  # named-stage pipeline — nothing to finalize
+            return  # named-stage pipeline — nothing else to finalize
 
         import inspect
 
@@ -766,7 +772,7 @@ class _NamedStage:
         self._stall = stall
         self._flush = flush
         self._regs = {}
-        self._source_names = []  # [(field_name, source_signal_name)]
+        self._field_sources = []  # [(field_name, source_signal)]
 
         module = pipeline._module
         field_pairs = []  # (reg, source) for posedge closure
@@ -778,15 +784,7 @@ class _NamedStage:
             setattr(module, reg.name, reg)
             self._regs[fname] = reg
             field_pairs.append((reg, source))
-            # Resolve source name for Verilog emission
-            src_name = getattr(source, 'name', '') or ''
-            if not src_name:
-                # Find attribute name on module
-                for attr in dir(module):
-                    if getattr(module, attr, None) is source:
-                        src_name = attr
-                        break
-            self._source_names.append((fname, src_name))
+            self._field_sources.append((fname, source))
 
         # ── posedge block ────────────────────────────────────────
         clock = pipeline._clock
@@ -809,35 +807,48 @@ class _NamedStage:
             for r, src in field_pairs:
                 r._assign(int(src) & r._mask)
 
-        self._gen_emit_source(_advance)
+        self._advance_func = _advance
 
-    def _gen_emit_source(self, func):
+    def _resolve_name(self, sig):
+        """Resolve a signal's Verilog name, searching the module if needed."""
+        name = getattr(sig, 'name', '') or ''
+        if name:
+            return name
+        module = self._pipeline._module
+        for attr in dir(module):
+            if getattr(module, attr, None) is sig:
+                return attr
+        return ''
+
+    def _gen_emit_source(self):
+        """Generate Verilog emit source — called at to_verilog() time."""
         reset = self._pipeline._reset
-        rn = reset.name if isinstance(reset, Signal) else 'reset'
+        rn = self._resolve_name(reset) or 'reset'
         stall, flush = self._stall, self._flush
         name = self._name
 
         lines = [f'def _{name}_advance(self):']
         lines.append(f'    if self.{rn}:')
-        for fname, _ in self._source_names:
+        for fname, _ in self._field_sources:
             lines.append(f'        self.{name}_{fname} = 0')
 
         if stall is not None:
-            sn = stall.name if isinstance(stall, Signal) else 'stall'
+            sn = self._resolve_name(stall) or 'stall'
             lines.append(f'    elif self.{sn}:')
             lines.append('        pass')
 
         if flush is not None:
-            fn = flush.name if isinstance(flush, Signal) else 'flush'
+            fn = self._resolve_name(flush) or 'flush'
             lines.append(f'    elif self.{fn}:')
-            for fname, _ in self._source_names:
+            for fname, _ in self._field_sources:
                 lines.append(f'        self.{name}_{fname} = 0')
 
         lines.append('    else:')
-        for fname, src_name in self._source_names:
+        for fname, src in self._field_sources:
+            src_name = self._resolve_name(src)
             lines.append(f'        self.{name}_{fname} = self.{src_name}')
 
-        func._veripy_emit_source = '\n'.join(lines)
+        self._advance_func._veripy_emit_source = '\n'.join(lines)
 
     def __getattr__(self, name):
         if name.startswith('_'):
