@@ -76,6 +76,7 @@ class Module:
         self._covers = []          # [(clock_signal, func, hit), ...]
         self._assumes = []         # [(clock_signal, func), ...]
         self._timing = []          # [(constraint_type, kwargs), ...]
+        self._clock_domains = {}   # {domain_name: clock_signal_name}
         self._behavioral = None    # optional behavioral model function
         if params is not None:
             self._params = params
@@ -139,6 +140,11 @@ class Module:
         """Decorator: register a method as combinational logic."""
         self._comb_blocks.append(method)
         return method
+
+    def clock_domain(self, name, clock):
+        """Declare a named clock domain for enhanced CDC checking."""
+        clk_name = clock.name if isinstance(clock, Signal) else clock
+        self._clock_domains[name] = clk_name
 
     def assert_always(self, clock):
         """Decorator: register a property that must hold every cycle.

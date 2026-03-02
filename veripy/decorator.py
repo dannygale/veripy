@@ -232,6 +232,10 @@ def module(func):
                                         fr.name if isinstance(fr, Signal) else fr,
                                         to.name if isinstance(to, Signal) else to))
         instance._timing = resolved_timing
+        instance._clock_domains = {
+            name: (clk.name if isinstance(clk, Signal) else clk)
+            for name, clk in ctx.clock_domains.items()
+        }
 
         # Attach any FSM signals registered on context
         for name, sig in ctx.signals.items():

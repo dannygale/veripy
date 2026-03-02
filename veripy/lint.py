@@ -189,13 +189,25 @@ def lint(module):
             if w in registers:
                 reg_clock[w] = clk
 
+    # Build reverse map: clock_signal_name → domain_name (if declared)
+    domains = getattr(module, '_clock_domains', {})
+    clk_to_domain = {clk: name for name, clk in domains.items()}
+
     if len(clocks) > 1:
         for i, clk in block_clock.items():
             for r in block_reads[i]:
                 if r in reg_clock and reg_clock[r] != clk:
-                    warnings.append(('warning',
-                        f"CDC: register '{r}' (clocked by {reg_clock[r]}) "
-                        f"read in block clocked by {clk}"))
+                    src_clk = reg_clock[r]
+                    src_dom = clk_to_domain.get(src_clk)
+                    dst_dom = clk_to_domain.get(clk)
+                    if src_dom and dst_dom:
+                        warnings.append(('warning',
+                            f"CDC: register '{r}' (domain '{src_dom}') "
+                            f"read in domain '{dst_dom}'"))
+                    else:
+                        warnings.append(('warning',
+                            f"CDC: register '{r}' (clocked by {src_clk}) "
+                            f"read in block clocked by {clk}"))
 
     # Check 5: Unused signals (declared but never read)
     submodules = set()
