@@ -149,14 +149,14 @@ def cover(clock):
     def decorator(func):
         ctx = _get_context()
         if ctx is not None:
-            ctx.covers.append((clock, func, [False]))
+            ctx.covers.append((clock, func, [0]))
         return func
     return decorator
 
 
 # --- Pipeline ---
 
-def pipeline(clock, reset, width=1):
+def pipeline(clock, reset, width=1, *, stall=None, flush=None, valid_in=None):
     """Context-aware pipeline — creates pipeline registers and returns a _Pipeline.
 
     Usage:
@@ -167,6 +167,12 @@ def pipeline(clock, reset, width=1):
         @comb
         def output():
             out = pipe.result
+
+    Multi-value stages return tuples; the next stage unpacks them:
+        pipe.stage(lambda: (a, b))
+        pipe.stage(lambda a, b: a + b)
+
+    Optional *stall*, *flush*, *valid_in* add flow control.
     """
     from .module import _Pipeline, Module
 
@@ -195,7 +201,8 @@ def pipeline(clock, reset, width=1):
             return decorator
 
     host = _PipelineHost()
-    return _Pipeline(host, clock, reset, width)
+    return _Pipeline(host, clock, reset, width,
+                     stall=stall, flush=flush, valid_in=valid_in)
 
 
 # --- Timing constraints ---
