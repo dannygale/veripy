@@ -177,5 +177,82 @@ class TestToCHeader(unittest.TestCase):
         self.assertIn('#define MY_IP_CTRL_MODE_MASK  0x00000006', self.hdr)
 
 
+# ── to_python_driver() ──────────────────────────────────────────────
+
+class TestToPythonDriver(unittest.TestCase):
+    def setUp(self):
+        self.src = _make_rmap().to_python_driver('TestDrv')
+
+    def test_class_name(self):
+        self.assertIn('class TestDrv:', self.src)
+
+    def test_default_class_name(self):
+        src = _make_rmap().to_python_driver()
+        self.assertIn('class RegDriver:', src)
+
+    def test_offset_constants(self):
+        self.assertIn('CTRL_OFFSET = 0x0000', self.src)
+        self.assertIn('STATUS_OFFSET = 0x0004', self.src)
+        self.assertIn('DATA_OFFSET = 0x0008', self.src)
+
+    def test_field_constants(self):
+        self.assertIn('CTRL_ENABLE_SHIFT = 0', self.src)
+        self.assertIn('CTRL_ENABLE_MASK = 0x00000001', self.src)
+        self.assertIn('CTRL_MODE_SHIFT = 1', self.src)
+        self.assertIn('CTRL_MODE_MASK = 0x00000006', self.src)
+
+    def test_rw_reg_has_read_and_write(self):
+        self.assertIn('def read_ctrl(self):', self.src)
+        self.assertIn('def write_ctrl(self, val):', self.src)
+
+    def test_ro_reg_has_read_only(self):
+        self.assertIn('def read_status(self):', self.src)
+        self.assertNotIn('def write_status(', self.src)
+
+    def test_ro_field_has_get_only(self):
+        self.assertIn('def get_status_busy(self):', self.src)
+        self.assertNotIn('def set_status_busy(', self.src)
+
+    def test_rw_field_has_get_and_set(self):
+        self.assertIn('def get_ctrl_enable(self):', self.src)
+        self.assertIn('def set_ctrl_enable(self, val):', self.src)
+
+    def test_generated_code_executes(self):
+        """Compile the generated driver and exercise read/write via a mock bus."""
+        ns = {}
+        exec(self.src, ns)
+        Drv = ns['TestDrv']
+
+        class MockBus:
+            def __init__(self):
+                self.mem = {}
+            def read(self, addr):
+                return self.mem.get(addr, 0)
+            def write(self, addr, data):
+                self.mem[addr] = data
+
+        bus = MockBus()
+        drv = Drv(bus)
+        drv.write_ctrl(0xFF)
+        self.assertEqual(drv.read_ctrl(), 0xFF)
+        self.assertEqual(drv.get_ctrl_enable(), 1)
+        self.assertEqual(drv.get_ctrl_mode(), 3)
+        # field-level set (read-modify-write)
+        drv.set_ctrl_mode(0)
+        self.assertEqual(drv.get_ctrl_mode(), 0)
+        self.assertEqual(drv.get_ctrl_enable(), 1)  # untouched
+
+    def test_wo_reg(self):
+        """A write-only register should have write but no read."""
+        rmap = RegisterMap([
+            Reg('txdata', 0x00, [Field('payload', bits=(7, 0), access='wo')]),
+        ])
+        src = rmap.to_python_driver()
+        self.assertIn('def write_txdata(self, val):', src)
+        self.assertNotIn('def read_txdata(', src)
+        self.assertNotIn('def get_txdata_', src)
+        self.assertIn('def set_txdata_payload(self, val):', src)
+
+
 if __name__ == '__main__':
     unittest.main()

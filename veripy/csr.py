@@ -173,3 +173,54 @@ class RegisterMap:
         lines.append(f'#endif /* _{p}_REGS_H */')
         lines.append('')
         return '\n'.join(lines)
+
+    def to_python_driver(self, class_name='RegDriver'):
+        """Generate a Python driver class for register-level read/write access.
+
+        The generated class expects a *bus* object with ``read(addr)`` and
+        ``write(addr, data)`` methods (e.g. an AXI-Lite transaction helper).
+        """
+        ind = '    '
+        lines = [
+            f'class {class_name}:',
+        ]
+        # ── offset / mask / shift constants ──
+        for r in self.regs:
+            rn = r.name.upper()
+            lines.append(f'{ind}{rn}_OFFSET = 0x{r.offset:04X}')
+            for f in r.fields:
+                fn = f.name.upper()
+                lines.append(f'{ind}{rn}_{fn}_SHIFT = {f.lsb}')
+                lines.append(f'{ind}{rn}_{fn}_MASK = 0x{f.mask:08X}')
+        lines.append('')
+        # ── __init__ ──
+        lines.append(f'{ind}def __init__(self, bus):')
+        lines.append(f'{ind}{ind}self.bus = bus')
+        lines.append('')
+        # ── per-register read/write ──
+        for r in self.regs:
+            rn = r.name
+            RN = rn.upper()
+            if r.access != 'wo':
+                lines.append(f'{ind}def read_{rn}(self):')
+                lines.append(f'{ind}{ind}return self.bus.read(self.{RN}_OFFSET)')
+                lines.append('')
+            if r.access != 'ro':
+                lines.append(f'{ind}def write_{rn}(self, val):')
+                lines.append(f'{ind}{ind}self.bus.write(self.{RN}_OFFSET, val)')
+                lines.append('')
+            # ── per-field get/set ──
+            for f in r.fields:
+                fn = f.name
+                FN = fn.upper()
+                if f.access != 'wo':
+                    lines.append(f'{ind}def get_{rn}_{fn}(self):')
+                    lines.append(f'{ind}{ind}return (self.read_{rn}() >> self.{RN}_{FN}_SHIFT) & 0x{(1 << f.width) - 1:X}')
+                    lines.append('')
+                if f.access != 'ro':
+                    lines.append(f'{ind}def set_{rn}_{fn}(self, val):')
+                    lines.append(f'{ind}{ind}cur = self.read_{rn}()')
+                    lines.append(f'{ind}{ind}cur = (cur & ~self.{RN}_{FN}_MASK) | ((val << self.{RN}_{FN}_SHIFT) & self.{RN}_{FN}_MASK)')
+                    lines.append(f'{ind}{ind}self.write_{rn}(cur)')
+                    lines.append('')
+        return '\n'.join(lines)
