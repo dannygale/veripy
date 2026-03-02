@@ -26,6 +26,12 @@ def VerilatorModel(*args, **kwargs):
     return compile_module(*args, **kwargs)
 
 
+def CSimModel(*args, **kwargs):
+    """Lazy-loaded native C simulation model (requires cc on PATH)."""
+    from .backend_csim import compile_module
+    return compile_module(*args, **kwargs)
+
+
 def GpuSim(*args, **kwargs):
     """Lazy-loaded GPU simulator (requires ``pip install veripy[gpu]``)."""
     from .gpu_sim import GpuSim as _GpuSim
