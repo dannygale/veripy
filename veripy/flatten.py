@@ -58,7 +58,7 @@ def flatten_ir(parent: IRModule, registry: dict[str, IRModule],
             if w.name not in child_port_names:
                 out.wires.append(WireDecl(prefix + w.name, w.width))
         for m in child.mems:
-            out.mems.append(MemDecl(prefix + m.name, m.depth, m.width))
+            out.mems.append(MemDecl(prefix + m.name, m.depth, m.width, style=m.style))
 
         # Inline comb blocks: assigns and comb_blocks
         for a in child.assigns:

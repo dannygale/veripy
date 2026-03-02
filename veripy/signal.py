@@ -407,7 +407,11 @@ class Mem:
              write as name[addr] <= data inside always @(posedge).
     """
 
-    def __init__(self, depth, width=1):
+    VALID_STYLES = (None, 'block', 'distributed', 'ultra')
+
+    def __init__(self, depth, width=1, style=None):
+        if style not in self.VALID_STYLES:
+            raise ValueError(f"Mem style must be one of {self.VALID_STYLES}, got {style!r}")
         from .parameter import is_param
         self._width_param = width if is_param(width) else None
         self._depth_param = depth if is_param(depth) else None
@@ -417,6 +421,7 @@ class Mem:
             depth = depth.default
         self.depth = depth
         self.width = width
+        self.style = style
         self.name = ''
         self._mask = (1 << width) - 1
         self._data = [0] * depth
@@ -427,7 +432,7 @@ class Mem:
         from .parameter import is_param
         width = self._width_param.resolve(param_values) if self._width_param else self.width
         depth = self._depth_param.resolve(param_values) if self._depth_param else self.depth
-        m = Mem(depth, width)
+        m = Mem(depth, width, style=self.style)
         m.name = self.name
         return m
 

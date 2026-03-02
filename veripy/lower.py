@@ -758,7 +758,7 @@ def lower_module(module, module_name=None):
     for mem_name, mem in sorted(mems.items()):
         w = mem._width_param.name if mem._width_param else mem.width
         d = mem._depth_param.name if mem._depth_param else mem.depth
-        ir.mems.append(MemDecl(mem_name, d, w))
+        ir.mems.append(MemDecl(mem_name, d, w, style=mem.style))
 
     # Sub-module wires and instances
     lowerer = _Lowerer(signals, mems, submodules, interfaces, params, module)

@@ -186,6 +186,7 @@ class MemDecl:
     name: str
     depth: int
     width: Union[int, str]
+    style: str = None
 
 @dataclass
 class Instance:

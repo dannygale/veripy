@@ -67,7 +67,8 @@ def _emit_internals(ir, lines):
     for m in ir.mems:
         w = _width_decl(m.width)
         d = m.depth
-        lines.append(f'    reg {w}{m.name} [0:{_sub1(d)}];')
+        attr = f'(* ram_style = "{m.style}" *) ' if m.style else ''
+        lines.append(f'    {attr}reg {w}{m.name} [0:{_sub1(d)}];')
 
     if ir.mems:
         lines.append('    integer _i;')
