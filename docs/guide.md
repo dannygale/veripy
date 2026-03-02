@@ -765,3 +765,75 @@ def arbiter_demo(n=4):
         arb.req   = req
         grant     = arb.grant
 ```
+
+
+## Build System
+
+The `Project` class tracks modules, resolves sub-module dependencies, and generates vendor tool scripts.
+
+### Basic Usage
+
+```python
+from veripy import Project
+
+proj = Project()
+proj.add(top_module)
+
+# Write Verilog files in dependency order
+proj.write('build/rtl')
+
+# Incremental — only rewrite changed files
+proj.write('build/rtl', incremental=True)
+```
+
+`write()` returns the list of file paths that were actually written. With `incremental=True`, unchanged files are skipped (preserving mtime for downstream tools).
+
+### Dependency Order
+
+`modules()` and `file_list()` return sub-modules before the modules that instantiate them. BlackBox modules are excluded — their definitions come from vendor libraries.
+
+```python
+proj = Project()
+proj.add(my_soc)
+
+for name, verilog in proj.file_list():
+    print(f"{name}.v")
+# inner_alu.v
+# datapath.v
+# my_soc.v
+```
+
+### Tcl Script Generation
+
+Generate project scripts for FPGA and ASIC tools:
+
+```python
+# Xilinx Vivado
+print(proj.to_vivado_tcl('build/rtl'))
+# read_verilog build/rtl/inner_alu.v
+# read_verilog build/rtl/datapath.v
+# read_verilog build/rtl/my_soc.v
+# set_property top my_soc [current_fileset]
+
+# Intel Quartus
+print(proj.to_quartus_tcl('build/rtl'))
+# set_global_assignment -name VERILOG_FILE build/rtl/inner_alu.v
+# ...
+# set_global_assignment -name TOP_LEVEL_ENTITY my_soc
+
+# Synopsys Design Compiler
+print(proj.to_dc_tcl('build/rtl'))
+# analyze -format verilog build/rtl/inner_alu.v
+# ...
+# elaborate my_soc
+```
+
+### Multiple Top Modules
+
+```python
+proj = Project()
+proj.add(cpu_core, name='cpu')
+proj.add(memory_controller, name='memctl')
+```
+
+Shared sub-modules appear only once in the file list. The last added module is used as the top-level entity in Tcl scripts.
