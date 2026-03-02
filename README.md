@@ -124,6 +124,7 @@ veripy lint <file.py>               # static checks
 - **CDC primitives** — `Synchronizer`, `AsyncFIFO` with gray-code pointers ([docs](docs/guide.md#cdc))
 - **Event-driven simulation** — `SimEngine` with proper Verilog scheduling ([docs](docs/testing.md#simengine))
 - **Reactive testing** — `yield until(cond)`, `fork`/`join`, constrained random, coverage reporting ([docs](docs/testing.md#reactive-waits))
+- **Protocol drivers** — reusable `Driver` base class for transaction-level bus helpers ([docs](docs/testing.md#protocol-drivers))
 
 ## Omnibus Example
 

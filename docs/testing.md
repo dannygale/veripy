@@ -122,6 +122,45 @@ def send_data():
 
 In `VeripyTestCase`, use `self.fork()` and `self.fork_any()`.
 
+## Protocol Drivers
+
+Subclass `Driver` to build reusable transaction-level helpers that drive and monitor bus protocols. Drivers use `yield` and `until()` internally — call them with `yield from` in testbench blocks:
+
+```python
+from veripy.driver import Driver
+from veripy.sim import until
+
+class SpiDriver(Driver):
+    def send(self, data):
+        m = self.mod
+        m.cs_n.set(0)
+        for bit in range(7, -1, -1):
+            m.mosi.set((data >> bit) & 1)
+            m.sclk.set(0); yield 5
+            m.sclk.set(1); yield 5
+        m.sclk.set(0)
+        m.cs_n.set(1)
+        yield 5
+
+    def recv(self):
+        m = self.mod
+        yield until(lambda: int(m.rx_valid) == 1)
+        return int(m.rx_data)
+```
+
+Usage in a testbench:
+
+```python
+drv = SpiDriver(sim, dut)
+
+@sim.initial
+def stim():
+    yield from drv.send(0xA5)
+    val = yield from drv.recv()
+```
+
+Override `send(txn)`, `recv()`, and optionally `reset()`. See [`examples/spi_driver.py`](../examples/spi_driver.py) for a complete example.
+
 ## Constrained Random
 
 Generate random stimulus with constraints:
