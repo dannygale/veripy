@@ -114,6 +114,7 @@ veripy lint <file.py>               # static checks
 - **Signal types** — `Input`, `Output`, `Register`, `Signal`, `Mem`, bit slicing, concatenation ([docs](docs/signals.md))
 - **Lazy expressions** — signal operators return composable `_Expr` objects with width tracking ([docs](docs/signals.md#operators))
 - **Sub-modules** — hierarchical composition with automatic port wiring ([docs](docs/guide.md#sub-modules))
+- **BlackBox** — port-only wrappers for vendor/external IP instantiation ([docs](docs/guide.md#blackbox))
 - **FSM sugar** — declarative state machines ([docs](docs/guide.md#fsm))
 - **Formal properties** — `assert_always`, `cover` ([docs](docs/guide.md#formal-properties))
 - **Pipelines** — lambda-chain for simple stages, named stages with per-stage stall/flush for CPU pipelines ([docs](docs/guide.md#pipelines))

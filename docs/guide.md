@@ -158,6 +158,60 @@ def datapath(width=16):
 
 Sub-modules with parameters emit `#(.param(value))` overrides in Verilog. Each module emits its own `.v` file via `to_verilog()`.
 
+## BlackBox
+
+Use `BlackBox` to instantiate external or vendor IP (Xilinx BRAMs, PLLs, ASIC memories) that has no VeriPy implementation. A BlackBox declares ports and parameters but no logic — it emits a Verilog instance without a module definition.
+
+```python
+from veripy import BlackBox, Input, Output
+
+class XilinxBRAM(BlackBox):
+    def __init__(self, data_width=32, addr_width=10):
+        self.clk  = Input()
+        self.we   = Input()
+        self.addr = Input(addr_width)
+        self.din  = Input(data_width)
+        self.dout = Output(data_width)
+        super().__init__(verilog_module_name='RAMB36E2')
+```
+
+`verilog_module_name` overrides the Verilog module type name in the instance. Without it, the snake_case class name is used (e.g. `XilinxBRAM` → `xilinx_bram`).
+
+Constructor parameters are auto-captured and emitted as Verilog parameter overrides:
+
+```python
+@module
+def top():
+    clk  = Input()
+    we   = Input()
+    addr = Input(10)
+    din  = Input(32)
+    dout = Output(32)
+    mem  = XilinxBRAM(data_width=32, addr_width=10)
+
+    @comb
+    def wire():
+        mem.clk  = clk
+        mem.we   = we
+        mem.addr = addr
+        mem.din  = din
+        dout     = mem.dout
+```
+
+Generated Verilog:
+
+```verilog
+RAMB36E2 #(.data_width(32), .addr_width(10)) mem (
+    .clk(mem_clk),
+    .we(mem_we),
+    .addr(mem_addr),
+    .din(mem_din),
+    .dout(mem_dout)
+);
+```
+
+No `module RAMB36E2 ... endmodule` block is emitted — the definition is expected to come from the vendor library. `veripy build` skips BlackBox sub-modules when collecting Verilog files.
+
 ## FSM
 
 Declarative state machines with `@fsm`:
