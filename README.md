@@ -128,6 +128,7 @@ veripy formal <file.py>            # emit .sby + Verilog for SymbiYosys
 - **IP library** — `SyncFifo`, `EdgeDetector`, `Debouncer`, `RoundRobinArbiter`, `PriorityArbiter`, `ClockDivider`, `CreditFlowControl` ([docs](docs/guide.md#ip-library))
 - **Event-driven simulation** — `SimEngine` with proper Verilog scheduling ([docs](docs/testing.md#simengine))
 - **Verilator co-simulation** — compile to shared lib, drive from Python via ctypes for 100-1000x speedup
+- **GPU simulation** — batch-parallel verification on WebGPU, thousands of instances per dispatch ([docs](docs/gpu.md))
 - **Reactive testing** — `yield until(cond)`, `fork`/`join`, constrained random, coverage reporting ([docs](docs/testing.md#reactive-waits))
 - **Protocol drivers** — reusable `Driver` base class for transaction-level bus helpers ([docs](docs/testing.md#protocol-drivers))
 
@@ -156,3 +157,4 @@ veripy formal <file.py>            # emit .sby + Verilog for SymbiYosys
 - **[Signals](docs/signals.md)** — signal types, operations, slicing, memory arrays
 - **[Testing](docs/testing.md)** — dual-path testing, SimEngine, VCD waveforms
 - **[Verilog](docs/verilog.md)** — import, export, emission, lint
+- **[GPU Simulation](docs/gpu.md)** — WGPU backend, batch-parallel verification, flattening
