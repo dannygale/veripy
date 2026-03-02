@@ -12,6 +12,7 @@ from .context import (comb, always, fsm, assert_always, cover, pipeline,
 from .sim import until
 from .driver import Driver
 from .cdc import Synchronizer, AsyncFIFO
+from .ip import SyncFifo, EdgeDetector, Debouncer
 from .axi4lite import Axi4LiteBus, Axi4LiteSub
 from .csr import Field, Reg, RegisterMap
 from .verify import VeripyTestCase
