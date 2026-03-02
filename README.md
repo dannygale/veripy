@@ -112,16 +112,18 @@ veripy lint <file.py>               # static checks
 
 - **Dual-path testing** — one test verifies both Python sim and generated Verilog ([docs](docs/testing.md))
 - **Signal types** — `Input`, `Output`, `Register`, `Signal`, `Mem`, bit slicing, concatenation ([docs](docs/signals.md))
+- **Lazy expressions** — signal operators return composable `_Expr` objects with width tracking ([docs](docs/signals.md#operators))
 - **Sub-modules** — hierarchical composition with automatic port wiring ([docs](docs/guide.md#sub-modules))
 - **FSM sugar** — declarative state machines ([docs](docs/guide.md#fsm))
 - **Formal properties** — `assert_always`, `cover` ([docs](docs/guide.md#formal-properties))
-- **Pipelines** — explicit stage boundaries with automatic registers ([docs](docs/guide.md#pipelines))
+- **Pipelines** — lambda-chain for simple stages, named stages with per-stage stall/flush for CPU pipelines ([docs](docs/guide.md#pipelines))
 - **Timing constraints** — SDC output co-located with logic ([docs](docs/guide.md#timing-constraints))
 - **Interface bundles** — reusable signal groups, parameterized widths, bulk connect ([docs](docs/guide.md#interfaces))
 - **Verilog import** — convert existing RTL to VeriPy ([docs](docs/verilog.md))
 - **Lint** — undriven outputs, multi-driven signals, missing reset, unused signals, CDC violations ([docs](docs/verilog.md#lint))
 - **CDC primitives** — `Synchronizer`, `AsyncFIFO` with gray-code pointers ([docs](docs/guide.md#cdc))
 - **Event-driven simulation** — `SimEngine` with proper Verilog scheduling ([docs](docs/testing.md#simengine))
+- **Reactive testing** — `yield until(cond)`, `fork`/`join`, constrained random, coverage reporting ([docs](docs/testing.md#reactive-waits))
 
 ## Omnibus Example
 
