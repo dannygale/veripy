@@ -457,16 +457,27 @@ class _Pipeline:
         self._valid_regs = []   # list of Register|None
         self._finalized = False
 
-    def stage(self, func):
+    def stage(self, func_or_name, *, stall=None, flush=None, **fields):
         """Add a pipeline stage.
 
-        *func* receives no args for the first stage, or the previous
-        stage's registered outputs for subsequent stages.  Return a
-        tuple to pass multiple values to the next stage; the next
-        stage's lambda parameters unpack them.
+        Two calling conventions:
+
+        Lambda-chain (existing):
+            pipe.stage(lambda prev: prev + 1)
+
+        Named-stage (new):
+            pipe.stage('id_ex', stall=stall_sig, flush=flush_sig,
+                       rs1=id_rs1_data, rd=dec.rd_addr, valid=if_id.valid)
+
+        Named stages create registers automatically and generate the
+        posedge block with reset/stall/flush gating.  Field sources
+        must be Signals so they can be read each cycle.
         """
-        self._stage_funcs.append(func)
-        return self
+        if callable(func_or_name):
+            self._stage_funcs.append(func_or_name)
+            return self
+        return _NamedStage(self, func_or_name, stall=stall,
+                           flush=flush, **fields)
 
     # ── finalization ─────────────────────────────────────────────
 
@@ -474,6 +485,8 @@ class _Pipeline:
         if self._finalized:
             return
         self._finalized = True
+        if not self._stage_funcs:
+            return  # named-stage pipeline — nothing to finalize
 
         import inspect
 
@@ -732,6 +745,109 @@ class _Pipeline:
         for func in self._stage_funcs[1:]:
             val = func(*val) if isinstance(val, tuple) else func(val)
         return val
+
+
+class _NamedStage:
+    """A named pipeline stage with auto-generated registers and clocking.
+
+    Created via ``pipe.stage('name', stall=..., flush=..., field=source)``.
+    Each *field=source* pair becomes a ``Register`` on the parent module
+    (named ``{stage}_{field}``).  Width is inferred from the source signal.
+
+    On each posedge:
+      reset  → zero all registers
+      stall  → hold
+      flush  → zero all registers
+      else   → latch ``int(source)`` into each register
+    """
+
+    def __init__(self, pipeline, name, *, stall=None, flush=None, **fields):
+        self._pipeline = pipeline
+        self._name = name
+        self._stall = stall
+        self._flush = flush
+        self._regs = {}
+        self._source_names = []  # [(field_name, source_signal_name)]
+
+        module = pipeline._module
+        field_pairs = []  # (reg, source) for posedge closure
+
+        for fname, source in fields.items():
+            width = getattr(source, '_width', None) or getattr(source, 'width', 1)
+            reg = Register(width)
+            reg.name = f'{name}_{fname}'
+            setattr(module, reg.name, reg)
+            self._regs[fname] = reg
+            field_pairs.append((reg, source))
+            # Resolve source name for Verilog emission
+            src_name = getattr(source, 'name', '') or ''
+            if not src_name:
+                # Find attribute name on module
+                for attr in dir(module):
+                    if getattr(module, attr, None) is source:
+                        src_name = attr
+                        break
+            self._source_names.append((fname, src_name))
+
+        # ── posedge block ────────────────────────────────────────
+        clock = pipeline._clock
+        reset = pipeline._reset
+        stall_sig = stall
+        flush_sig = flush
+
+        @module.posedge(clock)
+        def _advance():
+            if reset:
+                for r, _ in field_pairs:
+                    r._assign(0)
+                return
+            if stall_sig is not None and int(stall_sig):
+                return
+            if flush_sig is not None and int(flush_sig):
+                for r, _ in field_pairs:
+                    r._assign(0)
+                return
+            for r, src in field_pairs:
+                r._assign(int(src) & r._mask)
+
+        self._gen_emit_source(_advance)
+
+    def _gen_emit_source(self, func):
+        reset = self._pipeline._reset
+        rn = reset.name if isinstance(reset, Signal) else 'reset'
+        stall, flush = self._stall, self._flush
+        name = self._name
+
+        lines = [f'def _{name}_advance(self):']
+        lines.append(f'    if self.{rn}:')
+        for fname, _ in self._source_names:
+            lines.append(f'        self.{name}_{fname} = 0')
+
+        if stall is not None:
+            sn = stall.name if isinstance(stall, Signal) else 'stall'
+            lines.append(f'    elif self.{sn}:')
+            lines.append('        pass')
+
+        if flush is not None:
+            fn = flush.name if isinstance(flush, Signal) else 'flush'
+            lines.append(f'    elif self.{fn}:')
+            for fname, _ in self._source_names:
+                lines.append(f'        self.{name}_{fname} = 0')
+
+        lines.append('    else:')
+        for fname, src_name in self._source_names:
+            lines.append(f'        self.{name}_{fname} = self.{src_name}')
+
+        func._veripy_emit_source = '\n'.join(lines)
+
+    def __getattr__(self, name):
+        if name.startswith('_'):
+            raise AttributeError(name)
+        regs = object.__getattribute__(self, '_regs')
+        if name in regs:
+            return regs[name]
+        raise AttributeError(
+            f"Stage {self._name!r} has no field {name!r}")
 
 
 class _PipeASTTransformer(_ast.NodeTransformer):
