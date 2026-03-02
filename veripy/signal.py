@@ -47,6 +47,67 @@ def negedge(signal):
     return Edge(signal, 'negedge')
 
 
+def _iv(x):
+    """Get int value from Signal, _Expr, _SliceProxy, or int."""
+    return int(x)
+
+def _w(x, default=1):
+    """Get width of an operand."""
+    return getattr(x, '_width', None) or getattr(x, 'width', default)
+
+
+class _Expr:
+    """Lazy expression returned by Signal/Register operators.
+
+    Evaluates its function on each ``int()`` / ``bool()`` call, so it
+    always reflects the current signal values.  Carries ``_width`` for
+    width inference in pipeline stages and other contexts.
+    """
+    __slots__ = ('_fn', '_width', '_mask')
+
+    def __init__(self, fn, width):
+        self._fn = fn
+        self._width = width
+        self._mask = (1 << width) - 1
+
+    @property
+    def width(self):    return self._width
+    @property
+    def _val(self):     return self._fn()
+    @property
+    def name(self):     return ''
+
+    def __int__(self):   return self._fn()
+    def __index__(self): return self._fn()
+    def __bool__(self):  return self._fn() != 0
+    def __hash__(self):  return id(self)
+    def __repr__(self):  return f"_Expr(w={self._width}, val={self._fn()})"
+
+    # --- operators (return new _Expr) ---
+    def __add__(self, o):       return _Expr(lambda: (self._fn() + _iv(o)) & self._mask, self._width)
+    def __radd__(self, o):      return _Expr(lambda: (_iv(o) + self._fn()) & self._mask, self._width)
+    def __sub__(self, o):       return _Expr(lambda: (self._fn() - _iv(o)) & self._mask, self._width)
+    def __rsub__(self, o):      return _Expr(lambda: (_iv(o) - self._fn()) & self._mask, self._width)
+    def __and__(self, o):       return _Expr(lambda: self._fn() & _iv(o), max(self._width, _w(o)))
+    def __rand__(self, o):      return _Expr(lambda: _iv(o) & self._fn(), max(self._width, _w(o)))
+    def __or__(self, o):        return _Expr(lambda: self._fn() | _iv(o), max(self._width, _w(o)))
+    def __ror__(self, o):       return _Expr(lambda: _iv(o) | self._fn(), max(self._width, _w(o)))
+    def __xor__(self, o):       return _Expr(lambda: self._fn() ^ _iv(o), max(self._width, _w(o)))
+    def __rxor__(self, o):      return _Expr(lambda: _iv(o) ^ self._fn(), max(self._width, _w(o)))
+    def __lshift__(self, o):    return _Expr(lambda: (self._fn() << _iv(o)) & self._mask, self._width)
+    def __rlshift__(self, o):   return _Expr(lambda: _iv(o) << self._fn(), _w(o))
+    def __rshift__(self, o):    return _Expr(lambda: self._fn() >> _iv(o), self._width)
+    def __rrshift__(self, o):   return _Expr(lambda: _iv(o) >> self._fn(), _w(o))
+    def __invert__(self):       return _Expr(lambda: (~self._fn()) & self._mask, self._width)
+    def __neg__(self):          return _Expr(lambda: (-self._fn()) & self._mask, self._width)
+    def __eq__(self, o):        return _Expr(lambda: int(self._fn() == _iv(o)), 1)
+    def __ne__(self, o):        return _Expr(lambda: int(self._fn() != _iv(o)), 1)
+    def __lt__(self, o):        return _Expr(lambda: int(self._fn() < _iv(o)), 1)
+    def __le__(self, o):        return _Expr(lambda: int(self._fn() <= _iv(o)), 1)
+    def __gt__(self, o):        return _Expr(lambda: int(self._fn() > _iv(o)), 1)
+    def __ge__(self, o):        return _Expr(lambda: int(self._fn() >= _iv(o)), 1)
+
+
 class Signal:
     """A named, width-constrained hardware value."""
 
@@ -86,29 +147,29 @@ class Signal:
         """Immediately set the signal value (for testbenches)."""
         self._val = self._int(value) & self._mask
 
-    # --- simulation operators (return plain ints) ---
-    def __add__(self, o):       return (self._val + self._int(o)) & self._mask
-    def __radd__(self, o):      return (self._int(o) + self._val) & self._mask
-    def __sub__(self, o):       return (self._val - self._int(o)) & self._mask
-    def __rsub__(self, o):      return (self._int(o) - self._val) & self._mask
-    def __and__(self, o):       return self._val & self._int(o)
-    def __rand__(self, o):      return self._int(o) & self._val
-    def __or__(self, o):        return self._val | self._int(o)
-    def __ror__(self, o):       return self._int(o) | self._val
-    def __xor__(self, o):       return self._val ^ self._int(o)
-    def __rxor__(self, o):      return self._int(o) ^ self._val
-    def __lshift__(self, o):    return (self._val << self._int(o)) & self._mask
-    def __rlshift__(self, o):   return self._int(o) << self._val
-    def __rshift__(self, o):    return self._val >> self._int(o)
-    def __rrshift__(self, o):   return self._int(o) >> self._val
-    def __invert__(self):       return (~self._val) & self._mask
-    def __neg__(self):          return (-self._val) & self._mask
-    def __eq__(self, o):        return self._val == self._int(o)
-    def __ne__(self, o):        return self._val != self._int(o)
-    def __lt__(self, o):        return self._val < self._int(o)
-    def __le__(self, o):        return self._val <= self._int(o)
-    def __gt__(self, o):        return self._val > self._int(o)
-    def __ge__(self, o):        return self._val >= self._int(o)
+    # --- simulation operators (return _Expr for lazy evaluation) ---
+    def __add__(self, o):       return _Expr(lambda: (self._val + _iv(o)) & self._mask, self.width)
+    def __radd__(self, o):      return _Expr(lambda: (_iv(o) + self._val) & self._mask, self.width)
+    def __sub__(self, o):       return _Expr(lambda: (self._val - _iv(o)) & self._mask, self.width)
+    def __rsub__(self, o):      return _Expr(lambda: (_iv(o) - self._val) & self._mask, self.width)
+    def __and__(self, o):       return _Expr(lambda: self._val & _iv(o), max(self.width, _w(o)))
+    def __rand__(self, o):      return _Expr(lambda: _iv(o) & self._val, max(self.width, _w(o)))
+    def __or__(self, o):        return _Expr(lambda: self._val | _iv(o), max(self.width, _w(o)))
+    def __ror__(self, o):       return _Expr(lambda: _iv(o) | self._val, max(self.width, _w(o)))
+    def __xor__(self, o):       return _Expr(lambda: self._val ^ _iv(o), max(self.width, _w(o)))
+    def __rxor__(self, o):      return _Expr(lambda: _iv(o) ^ self._val, max(self.width, _w(o)))
+    def __lshift__(self, o):    return _Expr(lambda: (self._val << _iv(o)) & self._mask, self.width)
+    def __rlshift__(self, o):   return _Expr(lambda: _iv(o) << self._val, _w(o))
+    def __rshift__(self, o):    return _Expr(lambda: self._val >> _iv(o), self.width)
+    def __rrshift__(self, o):   return _Expr(lambda: _iv(o) >> self._val, _w(o))
+    def __invert__(self):       return _Expr(lambda: (~self._val) & self._mask, self.width)
+    def __neg__(self):          return _Expr(lambda: (-self._val) & self._mask, self.width)
+    def __eq__(self, o):        return _Expr(lambda: int(self._val == _iv(o)), 1)
+    def __ne__(self, o):        return _Expr(lambda: int(self._val != _iv(o)), 1)
+    def __lt__(self, o):        return _Expr(lambda: int(self._val < _iv(o)), 1)
+    def __le__(self, o):        return _Expr(lambda: int(self._val <= _iv(o)), 1)
+    def __gt__(self, o):        return _Expr(lambda: int(self._val > _iv(o)), 1)
+    def __ge__(self, o):        return _Expr(lambda: int(self._val >= _iv(o)), 1)
     def __bool__(self):         return self._val != 0
     def __int__(self):          return self._val
     def __index__(self):        return self._val
@@ -182,31 +243,31 @@ class _SliceProxy:
         return (self._val >> key) & 1
 
     def _int(self, o):
-        return o._val if isinstance(o, (Signal, _SliceProxy)) else int(o)
+        return o._val if isinstance(o, (Signal, _SliceProxy, _Expr)) else int(o)
 
-    # --- arithmetic / bitwise (return plain ints, same as Signal) ---
-    def __add__(self, o):       return self._val + self._int(o)
-    def __radd__(self, o):      return self._int(o) + self._val
-    def __sub__(self, o):       return self._val - self._int(o)
-    def __rsub__(self, o):      return self._int(o) - self._val
-    def __and__(self, o):       return self._val & self._int(o)
-    def __rand__(self, o):      return self._int(o) & self._val
-    def __or__(self, o):        return self._val | self._int(o)
-    def __ror__(self, o):       return self._int(o) | self._val
-    def __xor__(self, o):       return self._val ^ self._int(o)
-    def __rxor__(self, o):      return self._int(o) ^ self._val
-    def __lshift__(self, o):    return self._val << self._int(o)
-    def __rlshift__(self, o):   return self._int(o) << self._val
-    def __rshift__(self, o):    return self._val >> self._int(o)
-    def __rrshift__(self, o):   return self._int(o) >> self._val
-    def __invert__(self):       return ~self._val & self._mask
-    def __neg__(self):          return (-self._val) & self._mask
-    def __eq__(self, o):        return self._val == self._int(o)
-    def __ne__(self, o):        return self._val != self._int(o)
-    def __lt__(self, o):        return self._val < self._int(o)
-    def __le__(self, o):        return self._val <= self._int(o)
-    def __gt__(self, o):        return self._val > self._int(o)
-    def __ge__(self, o):        return self._val >= self._int(o)
+    # --- arithmetic / bitwise (return _Expr for lazy evaluation) ---
+    def __add__(self, o):       return _Expr(lambda: self._val + _iv(o), self._bits)
+    def __radd__(self, o):      return _Expr(lambda: _iv(o) + self._val, self._bits)
+    def __sub__(self, o):       return _Expr(lambda: self._val - _iv(o), self._bits)
+    def __rsub__(self, o):      return _Expr(lambda: _iv(o) - self._val, self._bits)
+    def __and__(self, o):       return _Expr(lambda: self._val & _iv(o), max(self._bits, _w(o)))
+    def __rand__(self, o):      return _Expr(lambda: _iv(o) & self._val, max(self._bits, _w(o)))
+    def __or__(self, o):        return _Expr(lambda: self._val | _iv(o), max(self._bits, _w(o)))
+    def __ror__(self, o):       return _Expr(lambda: _iv(o) | self._val, max(self._bits, _w(o)))
+    def __xor__(self, o):       return _Expr(lambda: self._val ^ _iv(o), max(self._bits, _w(o)))
+    def __rxor__(self, o):      return _Expr(lambda: _iv(o) ^ self._val, max(self._bits, _w(o)))
+    def __lshift__(self, o):    return _Expr(lambda: self._val << _iv(o), self._bits)
+    def __rlshift__(self, o):   return _Expr(lambda: _iv(o) << self._val, _w(o))
+    def __rshift__(self, o):    return _Expr(lambda: self._val >> _iv(o), self._bits)
+    def __rrshift__(self, o):   return _Expr(lambda: _iv(o) >> self._val, _w(o))
+    def __invert__(self):       return _Expr(lambda: ~self._val & self._mask, self._bits)
+    def __neg__(self):          return _Expr(lambda: (-self._val) & self._mask, self._bits)
+    def __eq__(self, o):        return _Expr(lambda: int(self._val == _iv(o)), 1)
+    def __ne__(self, o):        return _Expr(lambda: int(self._val != _iv(o)), 1)
+    def __lt__(self, o):        return _Expr(lambda: int(self._val < _iv(o)), 1)
+    def __le__(self, o):        return _Expr(lambda: int(self._val <= _iv(o)), 1)
+    def __gt__(self, o):        return _Expr(lambda: int(self._val > _iv(o)), 1)
+    def __ge__(self, o):        return _Expr(lambda: int(self._val >= _iv(o)), 1)
 
     def _assign(self, value):
         """Partial write: schedule update to just this bit range."""
