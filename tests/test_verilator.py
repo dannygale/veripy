@@ -141,8 +141,10 @@ class TestVeripyTestCaseVerilator(unittest.TestCase):
             USE_VERILATOR = True
             def create_module(self):
                 return Counter(4)
+            def runTest(self):
+                pass
 
-        tc = TC('test_run_verilator_integration')
+        tc = TC()
         tc._begin()
         tc.set(reset=1, enable=1, clock=0)
         tc.out('count')
