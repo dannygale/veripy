@@ -73,6 +73,52 @@ def _build_sig_widths(ir: IRModule) -> dict[str, int]:
     return w
 
 
+def _eval_order_sigs(ir: IRModule) -> list[str]:
+    """Return signal names ordered by first access in evaluation order.
+
+    Walks comb_blocks (already topo-sorted) then seq_blocks, collecting
+    writes then reads for each block.  Signals accessed by the same block
+    end up adjacent in the returned list, improving spatial locality in
+    the State struct.
+    """
+    from .flatten import _expr_reads, _stmt_writes_reads
+    seen = set()
+    order = []
+
+    def _add(name):
+        if name not in seen:
+            seen.add(name)
+            order.append(name)
+
+    # Continuous assigns
+    for a in ir.assigns:
+        for s in sorted(_expr_reads(a.value)):
+            _add(s)
+        _add(a.target)
+
+    # Comb blocks in topo order
+    for blk in ir.comb_blocks:
+        w, r = set(), set()
+        for stmt in blk.stmts:
+            _stmt_writes_reads(stmt, w, r)
+        for s in sorted(r):
+            _add(s)
+        for s in sorted(w):
+            _add(s)
+
+    # Seq blocks
+    for blk in ir.seq_blocks:
+        w, r = set(), set()
+        for stmt in blk.stmts:
+            _stmt_writes_reads(stmt, w, r)
+        for s in sorted(r):
+            _add(s)
+        for s in sorted(w):
+            _add(s)
+
+    return order
+
+
 # ── Expression emitter ───────────────────────────────────────────────
 
 def _expr(node, sig_w) -> str:
@@ -290,32 +336,28 @@ def emit_c(ir: IRModule) -> str:
     # ── State struct ─────────────────────────────────────────────
     lines.append('typedef struct {')
 
-    # Signals (ports, wires, regs)
-    all_sigs = []
+    # Build name→width for all signals
+    all_sigs = {}
     for p in ir.ports:
-        w = _resolve_width(p.width, ir.params)
-        all_sigs.append((p.name, w))
+        all_sigs.setdefault(p.name, _resolve_width(p.width, ir.params))
     for d in ir.wires:
-        w = _resolve_width(d.width, ir.params)
-        all_sigs.append((d.name, w))
+        all_sigs.setdefault(d.name, _resolve_width(d.width, ir.params))
     for d in ir.regs:
-        w = _resolve_width(d.width, ir.params)
-        all_sigs.append((d.name, w))
-    # Block locals
+        all_sigs.setdefault(d.name, _resolve_width(d.width, ir.params))
     for blk in ir.comb_blocks:
         for name, width in blk.locals.items():
-            w = _resolve_width(width, ir.params)
-            all_sigs.append((name, w))
+            all_sigs.setdefault(name, _resolve_width(width, ir.params))
     for blk in ir.seq_blocks:
         for name, width in blk.locals.items():
-            w = _resolve_width(width, ir.params)
-            all_sigs.append((name, w))
+            all_sigs.setdefault(name, _resolve_width(width, ir.params))
 
-    seen_sigs = set()
-    for name, w in all_sigs:
-        if name not in seen_sigs:
-            seen_sigs.add(name)
-            lines.append(f'    {_ctype(w)} {name};')
+    # Order fields by evaluation access pattern for spatial locality
+    eval_order = _eval_order_sigs(ir)
+    eval_rank = {name: i for i, name in enumerate(eval_order)}
+    ordered_names = sorted(all_sigs, key=lambda n: eval_rank.get(n, len(eval_order)))
+
+    for name in ordered_names:
+        lines.append(f'    {_ctype(all_sigs[name])} {name};')
 
     # Memory arrays
     for m in ir.mems:
