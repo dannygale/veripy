@@ -121,7 +121,39 @@ def _eval_order_sigs(ir: IRModule) -> list[str]:
 
 # ── Expression emitter ───────────────────────────────────────────────
 
-def _expr(node, sig_w) -> str:
+def _pack_read(name, pack_map):
+    """C expression to read a 1-bit packed signal."""
+    word, bit = pack_map[name]
+    return f'((s->{word} >> {bit}ULL) & 1ULL)'
+
+
+def _pack_write(name, val_expr, pack_map):
+    """C statement to write a 1-bit packed signal."""
+    word, bit = pack_map[name]
+    return (f's->{word} = (s->{word} & ~(1ULL << {bit}ULL)) '
+            f'| ((({val_expr}) & 1ULL) << {bit}ULL);')
+
+
+def _build_pack_map(all_sigs, ordered_names):
+    """Build packing map for 1-bit signals.
+
+    Returns (pack_map, pack_words) where pack_map maps
+    signal_name → (word_name, bit_offset) and pack_words is the
+    list of uint64_t word names needed in the struct.
+    """
+    one_bit = [n for n in ordered_names if all_sigs.get(n) == 1]
+    pack_map = {}
+    pack_words = []
+    for i, name in enumerate(one_bit):
+        word_idx, bit = divmod(i, 64)
+        word_name = f'_pack_{word_idx}'
+        if bit == 0:
+            pack_words.append(word_name)
+        pack_map[name] = (word_name, bit)
+    return pack_map, pack_words
+
+
+def _expr(node, sig_w, pack_map=None) -> str:
     """Emit a C expression string from an IR Expr node."""
     if isinstance(node, Const):
         v = node.value
@@ -131,56 +163,58 @@ def _expr(node, sig_w) -> str:
     if isinstance(node, Param):
         return str(node.name)
     if isinstance(node, Sig):
+        if pack_map and node.name in pack_map:
+            return _pack_read(node.name, pack_map)
         return f's->{node.name}'
     if isinstance(node, BinOp):
-        l, r = _expr(node.left, sig_w), _expr(node.right, sig_w)
+        l, r = _expr(node.left, sig_w, pack_map), _expr(node.right, sig_w, pack_map)
         return f'({l} {node.op} {r})'
     if isinstance(node, UnaryOp):
         op = node.op
         if op == '!':
-            return f'(!{_expr(node.operand, sig_w)})'
-        return f'({op}{_expr(node.operand, sig_w)})'
+            return f'(!{_expr(node.operand, sig_w, pack_map)})'
+        return f'({op}{_expr(node.operand, sig_w, pack_map)})'
     if isinstance(node, Compare):
-        l, r = _expr(node.left, sig_w), _expr(node.right, sig_w)
+        l, r = _expr(node.left, sig_w, pack_map), _expr(node.right, sig_w, pack_map)
         return f'({l} {node.op} {r})'
     if isinstance(node, BoolOp):
         parts = []
         for v in node.values:
-            s = _expr(v, sig_w)
+            s = _expr(v, sig_w, pack_map)
             if isinstance(v, BoolOp):
                 s = f'({s})'
             parts.append(s)
         return f' {node.op} '.join(parts)
     if isinstance(node, Mux):
-        s, t, f = (_expr(node.sel, sig_w), _expr(node.true_val, sig_w),
-                   _expr(node.false_val, sig_w))
+        s, t, f = (_expr(node.sel, sig_w, pack_map), _expr(node.true_val, sig_w, pack_map),
+                   _expr(node.false_val, sig_w, pack_map))
         return f'({s} ? {t} : {f})'
     if isinstance(node, Slice):
-        sig = _expr(node.signal, sig_w)
-        lo = _expr(node.lo, sig_w)
+        sig = _expr(node.signal, sig_w, pack_map)
+        lo = _expr(node.lo, sig_w, pack_map)
         if node.hi is None:
             return f'(({sig} >> {lo}) & 1ULL)'
-        hi = _expr(node.hi, sig_w)
+        hi = _expr(node.hi, sig_w, pack_map)
         return f'(({sig} >> {lo}) & ((1ULL << ({hi} - {lo} + 1ULL)) - 1ULL))'
     if isinstance(node, Index):
         name = node.signal.name if isinstance(node.signal, Sig) else None
-        idx = _expr(node.idx, sig_w)
+        idx = _expr(node.idx, sig_w, pack_map)
         # Check if this is a memory (array) or a bit index on a register
         if name and sig_w.get(f'__mem_{name}'):
             return f's->{name}[{idx}]'
         # Bit index on a register/wire
-        sig = _expr(node.signal, sig_w)
+        sig = _expr(node.signal, sig_w, pack_map)
         return f'(({sig} >> {idx}) & 1ULL)'
     if isinstance(node, Concat):
         # MSB-first: parts[0] is MSB
         parts = node.parts
         if not parts:
             return '0ULL'
-        result = _expr(parts[-1], sig_w)
+        result = _expr(parts[-1], sig_w, pack_map)
         shift = _expr_width(parts[-1], sig_w)
         for p in reversed(parts[:-1]):
             pw = _expr_width(p, sig_w)
-            result = f'(({_expr(p, sig_w)} << {shift}ULL) | {result})'
+            result = f'(({_expr(p, sig_w, pack_map)} << {shift}ULL) | {result})'
             shift += pw
         return result
     raise ValueError(f'Unknown IR expr: {node}')
@@ -219,22 +253,24 @@ def _expr_width(node, sig_w) -> int:
 
 # ── Statement emitter ────────────────────────────────────────────────
 
-def _emit_stmt(stmt, lines, sig_w, indent=1):
+def _emit_stmt(stmt, lines, sig_w, indent=1, pack_map=None):
     """Emit C statements from an IR Stmt node."""
     pad = '    ' * indent
 
     if isinstance(stmt, Assign):
         w = sig_w.get(stmt.target, 0)
-        val = _expr(stmt.value, sig_w)
-        if w and w < 64:
+        val = _expr(stmt.value, sig_w, pack_map)
+        if pack_map and stmt.target in pack_map:
+            lines.append(f'{pad}{_pack_write(stmt.target, val, pack_map)}')
+        elif w and w < 64:
             lines.append(f'{pad}s->{stmt.target} = ({_ctype(w)})({val} & {_mask(w)});')
         else:
             lines.append(f'{pad}s->{stmt.target} = {val};')
 
     elif isinstance(stmt, SliceAssign):
-        lo = _expr(stmt.lo, sig_w)
-        hi = _expr(stmt.hi, sig_w)
-        val = _expr(stmt.value, sig_w)
+        lo = _expr(stmt.lo, sig_w, pack_map)
+        hi = _expr(stmt.hi, sig_w, pack_map)
+        val = _expr(stmt.value, sig_w, pack_map)
         # Clear bits [hi:lo], then set them
         lines.append(f'{pad}{{')
         lines.append(f'{pad}    uint64_t _lo = {lo};')
@@ -246,39 +282,40 @@ def _emit_stmt(stmt, lines, sig_w, indent=1):
         lines.append(f'{pad}}}')
 
     elif isinstance(stmt, MemWrite):
-        val = _expr(stmt.data, sig_w)
-        addr = _expr(stmt.addr, sig_w)
+        val = _expr(stmt.data, sig_w, pack_map)
+        addr = _expr(stmt.addr, sig_w, pack_map)
         lines.append(f'{pad}s->{stmt.mem}[{addr}] = {val};')
 
     elif isinstance(stmt, If):
-        lines.append(f'{pad}if ({_expr(stmt.cond, sig_w)}) {{')
+        lines.append(f'{pad}if ({_expr(stmt.cond, sig_w, pack_map)}) {{')
         for s in stmt.then_body:
-            _emit_stmt(s, lines, sig_w, indent + 1)
+            _emit_stmt(s, lines, sig_w, indent + 1, pack_map)
         if stmt.else_body:
             if len(stmt.else_body) == 1 and isinstance(stmt.else_body[0], If):
                 lines.append(f'{pad}}} else')
-                _emit_stmt(stmt.else_body[0], lines, sig_w, indent)
+                _emit_stmt(stmt.else_body[0], lines, sig_w, indent, pack_map)
             else:
                 lines.append(f'{pad}}} else {{')
                 for s in stmt.else_body:
-                    _emit_stmt(s, lines, sig_w, indent + 1)
+                    _emit_stmt(s, lines, sig_w, indent + 1, pack_map)
                 lines.append(f'{pad}}}')
         else:
             lines.append(f'{pad}}}')
 
     elif isinstance(stmt, Case):
-        lines.append(f'{pad}switch ({_expr(stmt.sel, sig_w)}) {{')
+        lines.append(f'{pad}switch ({_expr(stmt.sel, sig_w, pack_map)}) {{')
         for val, body in stmt.cases:
-            lines.append(f'{pad}    case {_expr(val, sig_w)}:')
+            lines.append(f'{pad}    case {_expr(val, sig_w, pack_map)}:')
             for s in body:
-                _emit_stmt(s, lines, sig_w, indent + 2)
+                _emit_stmt(s, lines, sig_w, indent + 2, pack_map)
             lines.append(f'{pad}        break;')
         if stmt.default:
             lines.append(f'{pad}    default:')
             for s in stmt.default:
-                _emit_stmt(s, lines, sig_w, indent + 2)
+                _emit_stmt(s, lines, sig_w, indent + 2, pack_map)
             lines.append(f'{pad}        break;')
         lines.append(f'{pad}}}')
+
 
 
 # ── Inline hint helpers ──────────────────────────────────────────────
@@ -356,8 +393,14 @@ def emit_c(ir: IRModule) -> str:
     eval_rank = {name: i for i, name in enumerate(eval_order)}
     ordered_names = sorted(all_sigs, key=lambda n: eval_rank.get(n, len(eval_order)))
 
+    # Pack 1-bit signals into uint64_t bitfield words
+    pack_map, pack_words = _build_pack_map(all_sigs, ordered_names)
+
     for name in ordered_names:
-        lines.append(f'    {_ctype(all_sigs[name])} {name};')
+        if name not in pack_map:
+            lines.append(f'    {_ctype(all_sigs[name])} {name};')
+    for pw in pack_words:
+        lines.append(f'    uint64_t {pw};')
 
     # Memory arrays
     for m in ir.mems:
@@ -394,8 +437,10 @@ def emit_c(ir: IRModule) -> str:
         cont_stmts = []
         for a in ir.assigns:
             w = sig_w.get(a.target, 0)
-            val = _expr(a.value, sig_w)
-            if w and w < 64:
+            val = _expr(a.value, sig_w, pack_map)
+            if pack_map and a.target in pack_map:
+                cont_stmts.append(f'    {_pack_write(a.target, val, pack_map)}')
+            elif w and w < 64:
                 cont_stmts.append(f'    s->{a.target} = ({_ctype(w)})({val} & {_mask(w)});')
             else:
                 cont_stmts.append(f'    s->{a.target} = {val};')
@@ -409,7 +454,7 @@ def emit_c(ir: IRModule) -> str:
     for i, blk in enumerate(ir.comb_blocks):
         body = []
         for stmt in blk.stmts:
-            _emit_stmt(stmt, body, sig_w)
+            _emit_stmt(stmt, body, sig_w, pack_map=pack_map)
         attr = _inline_attr(_count_stmts(blk.stmts))
         lines.append(f'static {attr}void _comb_{i}(State* s) {{')
         lines.extend(body)
@@ -420,7 +465,7 @@ def emit_c(ir: IRModule) -> str:
     for i, blk in enumerate(ir.seq_blocks):
         body = []
         for stmt in blk.stmts:
-            _emit_stmt(stmt, body, sig_w)
+            _emit_stmt(stmt, body, sig_w, pack_map=pack_map)
         attr = _inline_attr(_count_stmts(blk.stmts))
         lines.append(f'static {attr}void _seq_{i}(State* s) {{')
         lines.extend(body)
@@ -444,10 +489,11 @@ def emit_c(ir: IRModule) -> str:
             edge_blocks.setdefault((edge_kind, sig_name), []).append(i)
 
     for (edge_kind, clk), block_ids in sorted(edge_blocks.items()):
+        clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
         if edge_kind == 'posedge':
-            cond = f's->{clk} && !s->_prev_{clk}'
+            cond = f'{clk_expr} && !s->_prev_{clk}'
         else:
-            cond = f'!s->{clk} && s->_prev_{clk}'
+            cond = f'!{clk_expr} && s->_prev_{clk}'
         lines.append(f'    if ({cond}) {{')
         for idx in block_ids:
             lines.append(f'        _seq_{idx}(s);')
@@ -461,7 +507,8 @@ def emit_c(ir: IRModule) -> str:
 
     # 4. Update previous values
     for clk in sorted(clocks):
-        lines.append(f'    s->_prev_{clk} = s->{clk};')
+        clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
+        lines.append(f'    s->_prev_{clk} = {clk_expr};')
 
     lines.append('}')
     lines.append('')
@@ -469,11 +516,23 @@ def emit_c(ir: IRModule) -> str:
     # ── Per-signal set/get ───────────────────────────────────────
     for p in ir.ports:
         w = _resolve_width(p.width, ir.params)
-        if p.direction == 'input':
-            lines.append(f'void veripy_set_{p.name}(void* p, uint64_t v) '
-                         f'{{ ((State*)p)->{p.name} = ({_ctype(w)})(v & {_mask(w)}); }}')
-        lines.append(f'uint64_t veripy_get_{p.name}(void* p) '
-                     f'{{ return ((State*)p)->{p.name}; }}')
+        if p.name in pack_map:
+            word, bit = pack_map[p.name]
+            if p.direction == 'input':
+                lines.append(
+                    f'void veripy_set_{p.name}(void* p, uint64_t v) '
+                    f'{{ State* s = (State*)p; '
+                    f's->{word} = (s->{word} & ~(1ULL << {bit}ULL)) '
+                    f'| ((v & 1ULL) << {bit}ULL); }}')
+            lines.append(
+                f'uint64_t veripy_get_{p.name}(void* p) '
+                f'{{ return (((State*)p)->{word} >> {bit}ULL) & 1ULL; }}')
+        else:
+            if p.direction == 'input':
+                lines.append(f'void veripy_set_{p.name}(void* p, uint64_t v) '
+                             f'{{ ((State*)p)->{p.name} = ({_ctype(w)})(v & {_mask(w)}); }}')
+            lines.append(f'uint64_t veripy_get_{p.name}(void* p) '
+                         f'{{ return ((State*)p)->{p.name}; }}')
         lines.append('')
 
     return '\n'.join(lines) + '\n'
