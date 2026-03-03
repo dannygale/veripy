@@ -263,6 +263,37 @@ class TestTopoSort(unittest.TestCase):
         targets = self._comb_targets(out)
         self.assertEqual(len(targets), 2)
 
+    def test_consumer_grouping(self):
+        """Nodes feeding the same consumer are adjacent within a topo level.
+
+        Graph:  inp → a ─→ c (= a + b)
+                inp → b ─↗
+                inp → d ─→ e (= d)
+
+        a and b both feed c, so they should be adjacent.  d feeds e.
+        The consumer-grouping heuristic should place a,b together
+        (both have consumer c) and d separately (consumer e).
+        """
+        mod = IRModule(name='t',
+            ports=[Port('inp', 'input', 1),
+                   Port('c', 'output', 1), Port('e', 'output', 1)],
+            wires=[WireDecl('a', 1), WireDecl('b', 1), WireDecl('d', 1)],
+            assigns=[
+                ContAssign('a', Sig('inp')),
+                ContAssign('b', Sig('inp')),
+                ContAssign('d', Sig('inp')),
+                ContAssign('c', BinOp('+', Sig('a'), Sig('b'))),
+                ContAssign('e', Sig('d')),
+            ])
+        out = topo_sort_comb(mod)
+        targets = self._comb_targets(out)
+        # a and b must both precede c; d must precede e
+        self.assertLess(targets.index('a'), targets.index('c'))
+        self.assertLess(targets.index('b'), targets.index('c'))
+        self.assertLess(targets.index('d'), targets.index('e'))
+        # a and b should be adjacent (grouped by shared consumer c)
+        self.assertEqual(abs(targets.index('a') - targets.index('b')), 1)
+
 
 if __name__ == '__main__':
     unittest.main()

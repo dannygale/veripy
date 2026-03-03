@@ -175,6 +175,30 @@ class TestEmitC(unittest.TestCase):
         defn_line = c[line_start:line_end]
         self.assertNotIn('always_inline', defn_line)
 
+    def test_struct_eval_order(self):
+        """State struct fields ordered by evaluation access pattern.
+
+        comb_0 writes 'mid' reading 'inp'; comb_1 writes 'out' reading 'mid'.
+        Struct should place inp, mid, out in that order (not alphabetical
+        or declaration order).
+        """
+        ir = IRModule(name='t',
+            ports=[Port('inp', 'input', 8), Port('out', 'output', 8)],
+            wires=[WireDecl('mid', 8)],
+            comb_blocks=[
+                CombBlock(stmts=[Assign('mid', Sig('inp'))], locals={}),
+                CombBlock(stmts=[Assign('out', Sig('mid'))], locals={}),
+            ])
+        c = emit_c(ir)
+        # Extract struct field order
+        struct_start = c.index('typedef struct {')
+        struct_end = c.index('} State;')
+        struct_body = c[struct_start:struct_end]
+        import re
+        fields = re.findall(r'uint\d+_t (\w+);', struct_body)
+        self.assertEqual(fields.index('mid'), fields.index('inp') + 1)
+        self.assertLess(fields.index('mid'), fields.index('out'))
+
 
 class TestCountStmts(unittest.TestCase):
     """Test _count_stmts helper."""
