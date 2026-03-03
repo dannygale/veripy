@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 
 from .ir import (
     Const, Param, Sig, BinOp, UnaryOp, Compare, BoolOp, Mux,
@@ -17,6 +18,7 @@ from .ir import (
     Assign, SliceAssign, If, Case, MemWrite,
     ContAssign, CombBlock, SeqBlock, IRModule,
     Port, WireDecl, RegDecl, MemDecl,
+    Delay, Display, Finish, ForLoop, Repeat, Disable,
 )
 
 
@@ -65,6 +67,9 @@ def _build_sig_widths(ir: IRModule) -> dict[str, int]:
     for blk in ir.seq_blocks:
         for name, width in blk.locals.items():
             w[name] = _resolve_width(width, params)
+    # Mark memory arrays so Index can distinguish mem[addr] from reg[bit]
+    for m in ir.mems:
+        w[f'__mem_{m.name}'] = True
     return w
 
 
@@ -112,7 +117,14 @@ def _expr(node, sig_w) -> str:
         hi = _expr(node.hi, sig_w)
         return f'(({sig} >> {lo}) & ((1ULL << ({hi} - {lo} + 1ULL)) - 1ULL))'
     if isinstance(node, Index):
-        return f's->{node.signal.name}[{_expr(node.idx, sig_w)}]'
+        name = node.signal.name if isinstance(node.signal, Sig) else None
+        idx = _expr(node.idx, sig_w)
+        # Check if this is a memory (array) or a bit index on a register
+        if name and sig_w.get(f'__mem_{name}'):
+            return f's->{name}[{idx}]'
+        # Bit index on a register/wire
+        sig = _expr(node.signal, sig_w)
+        return f'(({sig} >> {idx}) & 1ULL)'
     if isinstance(node, Concat):
         # MSB-first: parts[0] is MSB
         parts = node.parts
@@ -223,13 +235,46 @@ def _emit_stmt(stmt, lines, sig_w, indent=1):
         lines.append(f'{pad}}}')
 
 
+# ── Inline hint helpers ──────────────────────────────────────────────
+
+_INLINE_THRESHOLD = 10  # max statements for always_inline
+
+
+def _count_stmts(stmts) -> int:
+    """Recursively count statements in a block."""
+    n = 0
+    for s in stmts:
+        n += 1
+        if isinstance(s, If):
+            n += _count_stmts(s.then_body) + _count_stmts(s.else_body)
+        elif isinstance(s, Case):
+            for _, body in s.cases:
+                n += _count_stmts(body)
+            if s.default:
+                n += _count_stmts(s.default)
+    return n
+
+
+def _inline_attr(stmt_count: int) -> str:
+    """Return always_inline attribute for small blocks, empty string otherwise."""
+    if stmt_count <= _INLINE_THRESHOLD:
+        return '__attribute__((always_inline)) '
+    return ''
+
+
 # ── Top-level C emitter ──────────────────────────────────────────────
+
 
 def emit_c(ir: IRModule) -> str:
     """Emit C source from a flat, topo-sorted IRModule.
 
     The module should have been processed through ``flatten_ir`` and
     ``topo_sort_comb`` before calling this function.
+
+    Each comb_block and seq_block is emitted as its own ``static`` C
+    function.  Small blocks (≤ ``_INLINE_THRESHOLD`` statements) are
+    annotated with ``always_inline``.  ``veripy_eval()`` calls them in
+    topological order.
 
     Returns:
         Complete C source string.
@@ -299,42 +344,80 @@ def emit_c(ir: IRModule) -> str:
     lines.append('}')
     lines.append('')
 
+    # ── Per-block static functions ───────────────────────────────
+
+    # Continuous assigns → _cont_assigns()
+    has_cont = bool(ir.assigns)
+    if has_cont:
+        cont_stmts = []
+        for a in ir.assigns:
+            w = sig_w.get(a.target, 0)
+            val = _expr(a.value, sig_w)
+            if w and w < 64:
+                cont_stmts.append(f'    s->{a.target} = ({_ctype(w)})({val} & {_mask(w)});')
+            else:
+                cont_stmts.append(f'    s->{a.target} = {val};')
+        attr = _inline_attr(len(ir.assigns))
+        lines.append(f'static {attr}void _cont_assigns(State* s) {{')
+        lines.extend(cont_stmts)
+        lines.append('}')
+        lines.append('')
+
+    # Each comb_block → _comb_N()
+    for i, blk in enumerate(ir.comb_blocks):
+        body = []
+        for stmt in blk.stmts:
+            _emit_stmt(stmt, body, sig_w)
+        attr = _inline_attr(_count_stmts(blk.stmts))
+        lines.append(f'static {attr}void _comb_{i}(State* s) {{')
+        lines.extend(body)
+        lines.append('}')
+        lines.append('')
+
+    # Each seq_block → _seq_N()
+    for i, blk in enumerate(ir.seq_blocks):
+        body = []
+        for stmt in blk.stmts:
+            _emit_stmt(stmt, body, sig_w)
+        attr = _inline_attr(_count_stmts(blk.stmts))
+        lines.append(f'static {attr}void _seq_{i}(State* s) {{')
+        lines.extend(body)
+        lines.append('}')
+        lines.append('')
+
     # ── eval ─────────────────────────────────────────────────────
     lines.append('void veripy_eval(void* p) {')
     lines.append('    State* s = (State*)p;')
 
-    # Edge detection + sequential blocks
-    # Group seq blocks by (edge_kind, clock)
-    edge_blocks = {}
-    for blk in ir.seq_blocks:
-        for edge_kind, sig_name in blk.edges:
-            edge_blocks.setdefault((edge_kind, sig_name), []).append(blk)
+    # 1. Settle combinational logic
+    if has_cont:
+        lines.append('    _cont_assigns(s);')
+    for i in range(len(ir.comb_blocks)):
+        lines.append(f'    _comb_{i}(s);')
 
-    for (edge_kind, clk), blocks in sorted(edge_blocks.items()):
+    # 2. Edge detection + sequential block calls
+    edge_blocks = {}
+    for i, blk in enumerate(ir.seq_blocks):
+        for edge_kind, sig_name in blk.edges:
+            edge_blocks.setdefault((edge_kind, sig_name), []).append(i)
+
+    for (edge_kind, clk), block_ids in sorted(edge_blocks.items()):
         if edge_kind == 'posedge':
             cond = f's->{clk} && !s->_prev_{clk}'
         else:
             cond = f'!s->{clk} && s->_prev_{clk}'
         lines.append(f'    if ({cond}) {{')
-        for blk in blocks:
-            for stmt in blk.stmts:
-                _emit_stmt(stmt, lines, sig_w, indent=2)
+        for idx in block_ids:
+            lines.append(f'        _seq_{idx}(s);')
         lines.append('    }')
 
-    # Combinational logic (topo-sorted: assigns first, then comb_blocks)
-    for a in ir.assigns:
-        w = sig_w.get(a.target, 0)
-        val = _expr(a.value, sig_w)
-        if w and w < 64:
-            lines.append(f'    s->{a.target} = ({_ctype(w)})({val} & {_mask(w)});')
-        else:
-            lines.append(f'    s->{a.target} = {val};')
+    # 3. Re-settle combinational logic
+    if has_cont:
+        lines.append('    _cont_assigns(s);')
+    for i in range(len(ir.comb_blocks)):
+        lines.append(f'    _comb_{i}(s);')
 
-    for blk in ir.comb_blocks:
-        for stmt in blk.stmts:
-            _emit_stmt(stmt, lines, sig_w)
-
-    # Update previous values
+    # 4. Update previous values
     for clk in sorted(clocks):
         lines.append(f'    s->_prev_{clk} = s->{clk};')
 
@@ -352,7 +435,6 @@ def emit_c(ir: IRModule) -> str:
         lines.append('')
 
     return '\n'.join(lines) + '\n'
-
 
 # ── Compile + load ───────────────────────────────────────────────────
 
@@ -487,3 +569,232 @@ class CSimModel:
 
     def __exit__(self, *exc):
         self.close()
+
+
+# ── Native C testbench ───────────────────────────────────────────────
+
+def _extract_half_period(always_stmts):
+    """Extract the half-period T from an always block like: clk=0; delay T; clk=1; delay T."""
+    for s in always_stmts:
+        if isinstance(s, Delay):
+            if isinstance(s.value, Const):
+                return s.value.value
+            if isinstance(s.value, BinOp) and s.value.op == '*':
+                l = s.value.left.value if isinstance(s.value.left, Const) else None
+                r = s.value.right.value if isinstance(s.value.right, Const) else None
+                if l is not None and r is not None:
+                    return l * r
+    return 10  # fallback
+
+
+def _extract_clock_name(always_stmts):
+    """Extract clock signal name from always block assigns."""
+    for s in always_stmts:
+        if isinstance(s, Assign):
+            return s.target
+    return 'clock'
+
+
+def emit_tb_c(tb_ir, model_c_src, half_period=10):
+    """Emit a self-contained C file: model + testbench run_bench() entry point.
+
+    The always block is folded into a step() helper. The initial block
+    becomes straight-line C inside run_bench().
+    """
+    sig_w = {}  # TB locals don't need widths for _expr; model signals accessed via s->
+
+    # Identify model signal names (anything in the model State struct)
+    model_sigs = set()
+    for line in model_c_src.split('\n'):
+        stripped = line.strip()
+        if stripped.startswith(('uint8_t ', 'uint16_t ', 'uint32_t ', 'uint64_t ')):
+            # e.g. "uint8_t clock;"
+            name = stripped.split()[1].rstrip(';').split('[')[0]
+            if not name.startswith('_prev_'):
+                model_sigs.add(name)
+
+    clock_name = _extract_clock_name(tb_ir.always_blocks[0].stmts) if tb_ir.always_blocks else 'clock'
+
+    lines = [model_c_src.rstrip()]
+    lines.append('')
+    lines.append('/* ── Testbench ─────────────────────────────────── */')
+    lines.append('')
+    lines.append(f'static void _step(State* s, int time_units) {{')
+    lines.append(f'    int n = time_units / {half_period};')
+    lines.append(f'    for (int _i = 0; _i < n; _i++) {{')
+    lines.append(f'        s->{clock_name} ^= 1;')
+    lines.append(f'        veripy_eval(s);')
+    lines.append(f'    }}')
+    lines.append(f'}}')
+    lines.append('')
+    lines.append('uint64_t run_bench(void) {')
+    lines.append('    State* s = (State*)veripy_create();')
+
+    # Collect local variables from initial blocks (ForLoop vars)
+    locals_declared = set()
+
+    def _collect_locals(stmts):
+        for s in stmts:
+            if isinstance(s, ForLoop):
+                locals_declared.add(s.var)
+                _collect_locals(s.body)
+            elif isinstance(s, (Repeat, If)):
+                body = s.body if hasattr(s, 'body') else s.then_body
+                _collect_locals(body)
+                if hasattr(s, 'else_body') and s.else_body:
+                    _collect_locals(s.else_body)
+            elif isinstance(s, Assign) and s.target not in model_sigs:
+                locals_declared.add(s.target)
+
+    for blk in tb_ir.initial_blocks:
+        _collect_locals(blk.stmts)
+
+    for v in sorted(locals_declared):
+        lines.append(f'    uint64_t {v} = 0;')
+
+    def _tb_expr(node):
+        """Emit C expression — same as _expr but locals aren't prefixed with s->."""
+        if isinstance(node, Const):
+            v = node.value
+            return f'((uint64_t)({v}))' if v < 0 else f'{v}ULL'
+        if isinstance(node, Sig):
+            if node.name in locals_declared:
+                return node.name
+            return f's->{node.name}'
+        if isinstance(node, BinOp):
+            return f'({_tb_expr(node.left)} {node.op} {_tb_expr(node.right)})'
+        if isinstance(node, UnaryOp):
+            if node.op == '!':
+                return f'(!{_tb_expr(node.operand)})'
+            return f'({node.op}{_tb_expr(node.operand)})'
+        if isinstance(node, Compare):
+            return f'({_tb_expr(node.left)} {node.op} {_tb_expr(node.right)})'
+        if isinstance(node, BoolOp):
+            parts = [_tb_expr(v) for v in node.values]
+            return f' {node.op} '.join(parts)
+        if isinstance(node, Mux):
+            return f'({_tb_expr(node.sel)} ? {_tb_expr(node.true_val)} : {_tb_expr(node.false_val)})'
+        raise ValueError(f'TB emit: unsupported expr: {node}')
+
+    def _tb_stmt(stmt, indent=1):
+        pad = '    ' * indent
+        if isinstance(stmt, Assign):
+            val = _tb_expr(stmt.value)
+            if stmt.target in locals_declared:
+                lines.append(f'{pad}{stmt.target} = {val};')
+            else:
+                lines.append(f'{pad}s->{stmt.target} = {val};')
+        elif isinstance(stmt, Delay):
+            lines.append(f'{pad}_step(s, {_tb_expr(stmt.value)});')
+        elif isinstance(stmt, If):
+            lines.append(f'{pad}if ({_tb_expr(stmt.cond)}) {{')
+            for s in stmt.then_body:
+                _tb_stmt(s, indent + 1)
+            if stmt.else_body:
+                lines.append(f'{pad}}} else {{')
+                for s in stmt.else_body:
+                    _tb_stmt(s, indent + 1)
+            lines.append(f'{pad}}}')
+        elif isinstance(stmt, ForLoop):
+            lines.append(f'{pad}for ({stmt.var} = {_tb_expr(stmt.start)}; '
+                         f'{stmt.var} < {_tb_expr(stmt.stop)}; {stmt.var}++) {{')
+            for s in stmt.body:
+                _tb_stmt(s, indent + 1)
+            lines.append(f'{pad}}}')
+            if stmt.label:
+                lines.append(f'{pad}{stmt.label}_end: ;')
+        elif isinstance(stmt, Repeat):
+            cvar = f'_rep{id(stmt) % 10000}'
+            lines.append(f'{pad}for (int {cvar} = 0; {cvar} < {_tb_expr(stmt.count)}; {cvar}++) {{')
+            for s in stmt.body:
+                _tb_stmt(s, indent + 1)
+            lines.append(f'{pad}}}')
+            if stmt.label:
+                lines.append(f'{pad}{stmt.label}_end: ;')
+        elif isinstance(stmt, Disable):
+            lines.append(f'{pad}goto {stmt.label}_end;')
+        elif isinstance(stmt, Display):
+            pass  # skip for benchmark
+        elif isinstance(stmt, Finish):
+            pass  # handled by function return
+
+    for blk in tb_ir.initial_blocks:
+        for s in blk.stmts:
+            _tb_stmt(s)
+
+    lines.append('    veripy_destroy(s);')
+    lines.append('    return 0;')
+    lines.append('}')
+    return '\n'.join(lines) + '\n'
+
+
+def compile_bench(module, tb_ir, module_name=None):
+    """Compile model + native C testbench into .so, return callable.
+
+    Returns (run_fn, compile_time, cleanup_fn) where run_fn() executes
+    the full benchmark in C and cleanup_fn() removes temp files.
+    """
+    from .signal import Signal, Interface
+    from .lower import lower_module
+    from .flatten import flatten_ir, topo_sort_comb
+    from .emit_verilog import _to_snake
+
+    if module_name is None:
+        module_name = type(module).__name__.lower()
+
+    t0 = time.perf_counter()
+
+    # Build flat model IR
+    registry = {}
+    def _collect(m, mname):
+        if mname in registry:
+            return
+        factory = getattr(type(m), '_veripy_factory', None)
+        fresh = factory() if factory else type(m)()
+        for sn, sub in fresh._submodules().items():
+            _collect(sub, _to_snake(type(sub).__name__))
+        registry[mname] = lower_module(fresh, mname)
+
+    from .module import Module as _Module
+    for k in dir(module):
+        v = getattr(module, k)
+        if isinstance(v, _Module) and v is not module:
+            _collect(v, _to_snake(type(v).__name__))
+
+    top_ir = lower_module(module, module_name)
+    flat_ir = flatten_ir(top_ir, registry) if top_ir.instances else top_ir
+    flat_ir = topo_sort_comb(flat_ir)
+
+    model_c = emit_c(flat_ir)
+
+    # Extract half-period from always block
+    hp = _extract_half_period(tb_ir.always_blocks[0].stmts) if tb_ir.always_blocks else 10
+    combined_c = emit_tb_c(tb_ir, model_c, hp)
+
+    build_dir = tempfile.mkdtemp(prefix='veripy_bench_')
+    c_path = os.path.join(build_dir, 'bench.c')
+    with open(c_path, 'w') as f:
+        f.write(combined_c)
+
+    ext = '.dylib' if os.uname().sysname == 'Darwin' else '.so'
+    lib_path = os.path.join(build_dir, f'libbench{ext}')
+
+    cc = os.environ.get('CC', 'cc')
+    flag = '-dynamiclib' if ext == '.dylib' else '-shared'
+    r = subprocess.run([cc, '-O2', '-fPIC', flag, '-o', lib_path, c_path],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f'Bench compilation failed:\n{r.stderr}\n\nSource:\n{combined_c}')
+
+    compile_t = time.perf_counter() - t0
+
+    lib = ctypes.CDLL(lib_path)
+    lib.run_bench.restype = ctypes.c_uint64
+
+    def run():
+        lib.run_bench()
+
+    def cleanup():
+        shutil.rmtree(build_dir, ignore_errors=True)
+
+    return run, compile_t, cleanup
