@@ -492,6 +492,9 @@ class CSimModel:
                              '(call flatten_ir first)')
         ir = topo_sort_comb(ir)
 
+        from .dce import optimize
+        ir = optimize(ir)
+
         self._signals = {}
         for p in ir.ports:
             w = _resolve_width(p.width, ir.params)
@@ -764,6 +767,9 @@ def compile_bench(module, tb_ir, module_name=None):
     top_ir = lower_module(module, module_name)
     flat_ir = flatten_ir(top_ir, registry) if top_ir.instances else top_ir
     flat_ir = topo_sort_comb(flat_ir)
+
+    from .dce import optimize
+    flat_ir = optimize(flat_ir)
 
     model_c = emit_c(flat_ir)
 
