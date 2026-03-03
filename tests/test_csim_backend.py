@@ -7,7 +7,7 @@ from veripy.ir import (
     ContAssign, CombBlock, SeqBlock,
     Port, WireDecl, RegDecl, MemDecl, IRModule,
 )
-from veripy.backend_csim import emit_c, CSimModel
+from veripy.backend_csim import emit_c, CSimModel, _count_stmts, _INLINE_THRESHOLD
 
 
 class TestEmitC(unittest.TestCase):
@@ -103,6 +103,93 @@ class TestEmitC(unittest.TestCase):
         self.assertIn('switch', c)
         self.assertIn('case', c)
         self.assertIn('default', c)
+
+    def test_per_block_cont_assigns(self):
+        """Continuous assigns get their own static function."""
+        ir = IRModule(name='t',
+            ports=[Port('a', 'input', 8), Port('out', 'output', 8)],
+            assigns=[ContAssign('out', Sig('a'))])
+        c = emit_c(ir)
+        self.assertIn('static', c)
+        self.assertIn('_cont_assigns(State* s)', c)
+        self.assertIn('_cont_assigns(s);', c)
+
+    def test_per_block_comb(self):
+        """Each comb_block gets _comb_N()."""
+        ir = IRModule(name='t',
+            ports=[Port('a', 'input', 8), Port('out', 'output', 8)],
+            comb_blocks=[CombBlock(
+                stmts=[Assign('out', Sig('a'))], locals={})])
+        c = emit_c(ir)
+        self.assertIn('_comb_0(State* s)', c)
+        self.assertIn('_comb_0(s);', c)
+
+    def test_per_block_seq(self):
+        """Each seq_block gets _seq_N()."""
+        c = emit_c(self._counter_ir())
+        self.assertIn('_seq_0(State* s)', c)
+        self.assertIn('_seq_0(s);', c)
+
+    def test_eval_calls_not_inlines(self):
+        """veripy_eval should call block functions, not contain block logic."""
+        c = emit_c(self._counter_ir())
+        # Extract just the veripy_eval body
+        start = c.index('void veripy_eval(')
+        # Find the matching closing brace
+        depth = 0
+        for i, ch in enumerate(c[start:], start):
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    eval_body = c[start:i + 1]
+                    break
+        # eval body should NOT contain the actual assignment logic
+        self.assertNotIn('s->cnt =', eval_body)
+        # but should contain function calls
+        self.assertIn('_seq_0(s)', eval_body)
+        self.assertIn('_cont_assigns(s)', eval_body)
+
+    def test_inline_hint_small_block(self):
+        """Small blocks get always_inline."""
+        ir = IRModule(name='t',
+            ports=[Port('a', 'input', 8), Port('out', 'output', 8)],
+            assigns=[ContAssign('out', Sig('a'))])
+        c = emit_c(ir)
+        self.assertIn('__attribute__((always_inline))', c)
+
+    def test_no_inline_hint_large_block(self):
+        """Blocks exceeding threshold do NOT get always_inline."""
+        # Create a comb block with > _INLINE_THRESHOLD statements
+        stmts = [Assign(f'out', Const(i)) for i in range(_INLINE_THRESHOLD + 1)]
+        ir = IRModule(name='t',
+            ports=[Port('out', 'output', 8)],
+            comb_blocks=[CombBlock(stmts=stmts, locals={})])
+        c = emit_c(ir)
+        # _comb_0 should NOT have always_inline
+        idx = c.index('_comb_0')
+        # Get the line containing _comb_0 definition
+        line_start = c.rfind('\n', 0, idx) + 1
+        line_end = c.index('\n', idx)
+        defn_line = c[line_start:line_end]
+        self.assertNotIn('always_inline', defn_line)
+
+
+class TestCountStmts(unittest.TestCase):
+    """Test _count_stmts helper."""
+
+    def test_flat(self):
+        stmts = [Assign('x', Const(1)), Assign('y', Const(2))]
+        self.assertEqual(_count_stmts(stmts), 2)
+
+    def test_nested_if(self):
+        stmts = [If(Sig('a'), [Assign('x', Const(1))], [Assign('y', Const(2))])]
+        # 1 (If) + 1 (then) + 1 (else) = 3
+        self.assertEqual(_count_stmts(stmts), 3)
+
+    def test_empty(self):
+        self.assertEqual(_count_stmts([]), 0)
 
 
 class TestCSimModel(unittest.TestCase):
