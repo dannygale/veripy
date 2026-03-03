@@ -7,7 +7,7 @@ from veripy.ir import (
     ContAssign, CombBlock, SeqBlock,
     Port, WireDecl, RegDecl, MemDecl, IRModule,
 )
-from veripy.backend_csim import emit_c, CSimModel, _count_stmts, _INLINE_THRESHOLD
+from veripy.backend_csim import emit_c, CSimModel, _count_stmts, _INLINE_THRESHOLD, _build_pack_map
 
 
 class TestEmitC(unittest.TestCase):
@@ -30,8 +30,9 @@ class TestEmitC(unittest.TestCase):
 
     def test_struct_has_signals(self):
         c = emit_c(self._counter_ir())
-        self.assertIn('uint8_t clock;', c)
-        self.assertIn('uint8_t count;', c)
+        # 1-bit signals are packed into _pack_N words
+        self.assertIn('uint64_t _pack_0;', c)
+        # Wider signals remain as individual fields
         self.assertIn('uint8_t cnt;', c)
 
     def test_prev_clock(self):
@@ -40,7 +41,9 @@ class TestEmitC(unittest.TestCase):
 
     def test_posedge_detection(self):
         c = emit_c(self._counter_ir())
-        self.assertIn('s->clock && !s->_prev_clock', c)
+        # Clock is packed; edge detection reads from pack word
+        self.assertIn('_pack_0 >>', c)
+        self.assertIn('_prev_clock', c)
 
     def test_set_get_functions(self):
         c = emit_c(self._counter_ir())
@@ -358,3 +361,108 @@ class TestCSimModel(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestSignalPacking(unittest.TestCase):
+    """Test 1-bit signal packing into uint64_t bitfield words."""
+
+    def test_build_pack_map_basic(self):
+        """1-bit signals get packed, wider signals do not."""
+        all_sigs = {'a': 1, 'b': 8, 'c': 1}
+        ordered = ['a', 'b', 'c']
+        pm, words = _build_pack_map(all_sigs, ordered)
+        self.assertIn('a', pm)
+        self.assertIn('c', pm)
+        self.assertNotIn('b', pm)
+        self.assertEqual(len(words), 1)
+
+    def test_build_pack_map_multiple_words(self):
+        """More than 64 one-bit signals require multiple pack words."""
+        all_sigs = {f's{i}': 1 for i in range(65)}
+        ordered = [f's{i}' for i in range(65)]
+        pm, words = _build_pack_map(all_sigs, ordered)
+        self.assertEqual(len(words), 2)
+        self.assertEqual(pm['s0'], ('_pack_0', 0))
+        self.assertEqual(pm['s63'], ('_pack_0', 63))
+        self.assertEqual(pm['s64'], ('_pack_1', 0))
+
+    def test_build_pack_map_no_one_bit(self):
+        """No 1-bit signals → empty pack map."""
+        all_sigs = {'x': 8, 'y': 16}
+        pm, words = _build_pack_map(all_sigs, ['x', 'y'])
+        self.assertEqual(pm, {})
+        self.assertEqual(words, [])
+
+    def test_struct_has_pack_words(self):
+        """State struct uses _pack_N for 1-bit signals."""
+        ir = IRModule(name='t',
+            ports=[Port('a', 'input', 1), Port('b', 'input', 1),
+                   Port('out', 'output', 8)],
+            assigns=[ContAssign('out', BinOp('+', Sig('a'), Sig('b')))])
+        c = emit_c(ir)
+        self.assertIn('uint64_t _pack_0;', c)
+        self.assertNotIn('uint8_t a;', c)
+        self.assertNotIn('uint8_t b;', c)
+        self.assertIn('uint8_t out;', c)
+
+    def test_packed_set_get(self):
+        """set/get for packed ports use bit ops."""
+        ir = IRModule(name='t',
+            ports=[Port('a', 'input', 1), Port('b', 'input', 1),
+                   Port('out', 'output', 1)],
+            assigns=[ContAssign('out', BinOp('&', Sig('a'), Sig('b')))])
+        c = emit_c(ir)
+        self.assertIn('_pack_0', c)
+        # set uses bit insert
+        self.assertIn('& ~(1ULL <<', c)
+        # get uses bit extract
+        self.assertIn('>> ', c)
+
+    def test_packed_and_gate(self):
+        """Functional test: out = a & b with all 1-bit packed signals."""
+        ir = IRModule(name='and_gate',
+            ports=[Port('a', 'input', 1), Port('b', 'input', 1),
+                   Port('out', 'output', 1)],
+            assigns=[ContAssign('out', BinOp('&', Sig('a'), Sig('b')))])
+        with CSimModel(ir) as m:
+            m.set('a', 1); m.set('b', 1); m.eval()
+            self.assertEqual(m.get('out'), 1)
+            m.set('a', 0); m.eval()
+            self.assertEqual(m.get('out'), 0)
+
+    def test_packed_counter_functional(self):
+        """Counter with packed clock/reset/enable works correctly."""
+        ir = IRModule(name='counter',
+            ports=[Port('clock', 'input', 1), Port('reset', 'input', 1),
+                   Port('enable', 'input', 1), Port('count', 'output', 4)],
+            regs=[RegDecl('cnt', 4)],
+            assigns=[ContAssign('count', Sig('cnt'))],
+            seq_blocks=[SeqBlock(
+                edges=[('posedge', 'clock')],
+                stmts=[If(Sig('reset'),
+                          [Assign('cnt', Const(0), False)],
+                          [If(Sig('enable'),
+                              [Assign('cnt', BinOp('+', Sig('cnt'), Const(1)), False)],
+                              [])])],
+                locals={})])
+        with CSimModel(ir) as m:
+            m.set('reset', 1); m.set('enable', 1)
+            m.step('clock')
+            m.set('reset', 0)
+            for _ in range(3):
+                m.step('clock')
+            m.eval()
+            self.assertEqual(m.get('count'), 3)
+
+    def test_packed_1bit_output_assign(self):
+        """1-bit output assigned from comb block uses packed write."""
+        ir = IRModule(name='inv',
+            ports=[Port('a', 'input', 1), Port('out', 'output', 1)],
+            comb_blocks=[CombBlock(
+                stmts=[Assign('out', UnaryOp('!', Sig('a')))],
+                locals={})])
+        with CSimModel(ir) as m:
+            m.set('a', 0); m.eval()
+            self.assertEqual(m.get('out'), 1)
+            m.set('a', 1); m.eval()
+            self.assertEqual(m.get('out'), 0)
