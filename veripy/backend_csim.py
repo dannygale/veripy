@@ -119,6 +119,27 @@ def _eval_order_sigs(ir: IRModule) -> list[str]:
     return order
 
 
+def _collect_nba_signals(ir: IRModule) -> set:
+    """Return set of state signal names written in any seq block.
+
+    Only state signals (ports/wires/regs) need NBA temporaries.
+    Block-local variables are excluded.
+    """
+    from .flatten import _stmt_writes_reads
+    state_sigs = (
+        {p.name for p in ir.ports}
+        | {d.name for d in ir.wires}
+        | {d.name for d in ir.regs}
+    )
+    nba: set = set()
+    for blk in ir.seq_blocks:
+        w: set = set()
+        for stmt in blk.stmts:
+            _stmt_writes_reads(stmt, w, set())
+        nba |= w & state_sigs
+    return nba
+
+
 # ── Expression emitter ───────────────────────────────────────────────
 
 def _pack_read(name, pack_map):
@@ -253,14 +274,25 @@ def _expr_width(node, sig_w) -> int:
 
 # ── Statement emitter ────────────────────────────────────────────────
 
-def _emit_stmt(stmt, lines, sig_w, indent=1, pack_map=None):
-    """Emit C statements from an IR Stmt node."""
+def _emit_stmt(stmt, lines, sig_w, indent=1, pack_map=None, nba_sigs=None):
+    """Emit C statements from an IR Stmt node.
+
+    When *nba_sigs* is provided (seq block context), writes to those signals
+    are redirected to ``s->_nba_<name>`` temporaries so that NBA semantics
+    are preserved across concurrent seq blocks.
+    """
     pad = '    ' * indent
 
     if isinstance(stmt, Assign):
         w = sig_w.get(stmt.target, 0)
         val = _expr(stmt.value, sig_w, pack_map)
-        if pack_map and stmt.target in pack_map:
+        if nba_sigs and stmt.target in nba_sigs:
+            # NBA: write to temporary; type matches signal width
+            if w and w < 64:
+                lines.append(f'{pad}s->_nba_{stmt.target} = ({_ctype(w)})({val} & {_mask(w)});')
+            else:
+                lines.append(f'{pad}s->_nba_{stmt.target} = {val};')
+        elif pack_map and stmt.target in pack_map:
             lines.append(f'{pad}{_pack_write(stmt.target, val, pack_map)}')
         elif w and w < 64:
             lines.append(f'{pad}s->{stmt.target} = ({_ctype(w)})({val} & {_mask(w)});')
@@ -272,13 +304,13 @@ def _emit_stmt(stmt, lines, sig_w, indent=1, pack_map=None):
         hi = _expr(stmt.hi, sig_w, pack_map)
         val = _expr(stmt.value, sig_w, pack_map)
         # Clear bits [hi:lo], then set them
+        tgt = f's->_nba_{stmt.target}' if (nba_sigs and stmt.target in nba_sigs) else f's->{stmt.target}'
         lines.append(f'{pad}{{')
         lines.append(f'{pad}    uint64_t _lo = {lo};')
         lines.append(f'{pad}    uint64_t _hi = {hi};')
         lines.append(f'{pad}    uint64_t _w = _hi - _lo + 1;')
         lines.append(f'{pad}    uint64_t _mask = ((1ULL << _w) - 1) << _lo;')
-        lines.append(f'{pad}    s->{stmt.target} = (s->{stmt.target} & ~_mask) | '
-                     f'((({val}) << _lo) & _mask);')
+        lines.append(f'{pad}    {tgt} = ({tgt} & ~_mask) | ((({val}) << _lo) & _mask);')
         lines.append(f'{pad}}}')
 
     elif isinstance(stmt, MemWrite):
@@ -289,15 +321,15 @@ def _emit_stmt(stmt, lines, sig_w, indent=1, pack_map=None):
     elif isinstance(stmt, If):
         lines.append(f'{pad}if ({_expr(stmt.cond, sig_w, pack_map)}) {{')
         for s in stmt.then_body:
-            _emit_stmt(s, lines, sig_w, indent + 1, pack_map)
+            _emit_stmt(s, lines, sig_w, indent + 1, pack_map, nba_sigs)
         if stmt.else_body:
             if len(stmt.else_body) == 1 and isinstance(stmt.else_body[0], If):
                 lines.append(f'{pad}}} else')
-                _emit_stmt(stmt.else_body[0], lines, sig_w, indent, pack_map)
+                _emit_stmt(stmt.else_body[0], lines, sig_w, indent, pack_map, nba_sigs)
             else:
                 lines.append(f'{pad}}} else {{')
                 for s in stmt.else_body:
-                    _emit_stmt(s, lines, sig_w, indent + 1, pack_map)
+                    _emit_stmt(s, lines, sig_w, indent + 1, pack_map, nba_sigs)
                 lines.append(f'{pad}}}')
         else:
             lines.append(f'{pad}}}')
@@ -307,12 +339,12 @@ def _emit_stmt(stmt, lines, sig_w, indent=1, pack_map=None):
         for val, body in stmt.cases:
             lines.append(f'{pad}    case {_expr(val, sig_w, pack_map)}:')
             for s in body:
-                _emit_stmt(s, lines, sig_w, indent + 2, pack_map)
+                _emit_stmt(s, lines, sig_w, indent + 2, pack_map, nba_sigs)
             lines.append(f'{pad}        break;')
         if stmt.default:
             lines.append(f'{pad}    default:')
             for s in stmt.default:
-                _emit_stmt(s, lines, sig_w, indent + 2, pack_map)
+                _emit_stmt(s, lines, sig_w, indent + 2, pack_map, nba_sigs)
             lines.append(f'{pad}        break;')
         lines.append(f'{pad}}}')
 
@@ -416,6 +448,12 @@ def emit_c(ir: IRModule) -> str:
     for clk in sorted(clocks):
         lines.append(f'    uint8_t _prev_{clk};')
 
+    # NBA temporaries for signals written in seq blocks
+    nba_sigs = _collect_nba_signals(ir)
+    for name in sorted(nba_sigs):
+        w = all_sigs.get(name, 32)
+        lines.append(f'    {_ctype(w)} _nba_{name};')
+
     lines.append('} State;')
     lines.append('')
 
@@ -465,7 +503,7 @@ def emit_c(ir: IRModule) -> str:
     for i, blk in enumerate(ir.seq_blocks):
         body = []
         for stmt in blk.stmts:
-            _emit_stmt(stmt, body, sig_w, pack_map=pack_map)
+            _emit_stmt(stmt, body, sig_w, pack_map=pack_map, nba_sigs=nba_sigs)
         attr = _inline_attr(_count_stmts(blk.stmts))
         lines.append(f'static {attr}void _seq_{i}(State* s) {{')
         lines.extend(body)
@@ -495,8 +533,14 @@ def emit_c(ir: IRModule) -> str:
         else:
             cond = f'!{clk_expr} && s->_prev_{clk}'
         lines.append(f'    if ({cond}) {{')
+        # Init NBA temporaries to current values before any seq block runs
+        for name in sorted(nba_sigs):
+            lines.append(f'        s->_nba_{name} = s->{name};')
         for idx in block_ids:
             lines.append(f'        _seq_{idx}(s);')
+        # Commit NBA temporaries to state after all seq blocks
+        for name in sorted(nba_sigs):
+            lines.append(f'        s->{name} = s->_nba_{name};')
         lines.append('    }')
 
     # 3. Re-settle combinational logic
