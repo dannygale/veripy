@@ -486,7 +486,10 @@ class _Lowerer:
                 elif name not in self.signals:
                     w = self._infer_rhs_width(node.value)
                     if w is not None:
-                        regs[name] = max(regs.get(name, 0), w)
+                        if isinstance(w, int):
+                            regs[name] = max(regs.get(name, 0), w)
+                        else:
+                            regs.setdefault(name, w)  # param name string
         return regs
 
     # ── Get function AST ─────────────────────────────────────────────
