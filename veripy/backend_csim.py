@@ -393,6 +393,63 @@ def _inline_attr(stmt_count: int) -> str:
     return ''
 
 
+def _find_merge_groups(ir: IRModule) -> list:
+    """Group adjacent comb blocks that can be merged into a single function.
+
+    Two adjacent blocks i and i+1 can be merged when every signal written
+    by block i is:
+      - not an output port (must remain visible after eval),
+      - not read by any seq block (seq blocks run after comb settle), and
+      - only read by block i+1 (no other comb block consumes it).
+
+    Returns a list of groups; each group is a list of consecutive block
+    indices.  Single-element groups are not merged but may be inlined.
+    """
+    from .flatten import _stmt_writes_reads
+
+    n = len(ir.comb_blocks)
+    if n == 0:
+        return []
+
+    block_writes, block_reads = [], []
+    for blk in ir.comb_blocks:
+        w: set = set()
+        r: set = set()
+        for stmt in blk.stmts:
+            _stmt_writes_reads(stmt, w, r)
+        block_writes.append(w)
+        block_reads.append(r)
+
+    seq_reads: set = set()
+    for blk in ir.seq_blocks:
+        for stmt in blk.stmts:
+            _stmt_writes_reads(stmt, set(), seq_reads)
+
+    output_ports = {p.name for p in ir.ports if p.direction == 'output'}
+
+    sig_readers: dict = {}
+    for i, reads in enumerate(block_reads):
+        for sig in reads:
+            sig_readers.setdefault(sig, set()).add(i)
+
+    groups: list = []
+    current = [0]
+    for i in range(n - 1):
+        mergeable = all(
+            sig not in output_ports
+            and sig not in seq_reads
+            and sig_readers.get(sig, set()) == {i + 1}
+            for sig in block_writes[i]
+        )
+        if mergeable:
+            current.append(i + 1)
+        else:
+            groups.append(current)
+            current = [i + 1]
+    groups.append(current)
+    return groups
+
+
 # ── Top-level C emitter ──────────────────────────────────────────────
 
 
@@ -413,8 +470,12 @@ def emit_c(ir: IRModule) -> str:
     sig_w = _build_sig_widths(ir)
     nba_sigs = _collect_nba_signals(ir)
     comb_deps = _build_comb_deps(ir)
-    # Indices of comb blocks that read at least one seq-written signal (task #71)
-    resettl_idxs = [i for i, deps in enumerate(comb_deps) if deps & nba_sigs]
+    merge_groups = _find_merge_groups(ir)
+    # Which groups contain at least one block that reads a seq-written signal
+    resettl_groups = [
+        g for g in merge_groups
+        if any(comb_deps[i] & nba_sigs for i in g)
+    ]
     lines = [
         '#include <stdint.h>',
         '#include <stdlib.h>',
@@ -507,13 +568,19 @@ def emit_c(ir: IRModule) -> str:
         lines.append('}')
         lines.append('')
 
-    # Each comb_block → _comb_N()
-    for i, blk in enumerate(ir.comb_blocks):
+    # Each comb group → _comb_N() (merged), or inlined if trivial (1 stmt, 1 block)
+    for gi, group in enumerate(merge_groups):
+        all_stmts = []
+        for idx in group:
+            all_stmts.extend(ir.comb_blocks[idx].stmts)
+        total = _count_stmts(all_stmts)
+        if len(group) == 1 and total == 1:
+            continue  # will be inlined into veripy_eval()
         body = []
-        for stmt in blk.stmts:
+        for stmt in all_stmts:
             _emit_stmt(stmt, body, sig_w, pack_map=pack_map)
-        attr = _inline_attr(_count_stmts(blk.stmts))
-        lines.append(f'static {attr}void _comb_{i}(State* s) {{')
+        attr = _inline_attr(total)
+        lines.append(f'static {attr}void _comb_{gi}(State* s) {{')
         lines.extend(body)
         lines.append('}')
         lines.append('')
@@ -536,8 +603,17 @@ def emit_c(ir: IRModule) -> str:
     # 1. Settle combinational logic
     if has_cont:
         lines.append('    _cont_assigns(s);')
-    for i in range(len(ir.comb_blocks)):
-        lines.append(f'    _comb_{i}(s);')
+    for gi, group in enumerate(merge_groups):
+        all_stmts = []
+        for idx in group:
+            all_stmts.extend(ir.comb_blocks[idx].stmts)
+        if len(group) == 1 and _count_stmts(all_stmts) == 1:
+            # Inline trivial single-statement block directly
+            body = []
+            _emit_stmt(all_stmts[0], body, sig_w, pack_map=pack_map)
+            lines.extend('    ' + ln.lstrip() for ln in body)
+        else:
+            lines.append(f'    _comb_{gi}(s);')
 
     # 2. Edge detection + sequential block calls
     edge_blocks = {}
@@ -562,11 +638,20 @@ def emit_c(ir: IRModule) -> str:
             lines.append(f'        s->{name} = s->_nba_{name};')
         lines.append('    }')
 
-    # 3. Re-settle combinational logic (only blocks that read seq-written signals)
+    # 3. Re-settle combinational logic (only groups that read seq-written signals)
     if has_cont:
         lines.append('    _cont_assigns(s);')
-    for i in resettl_idxs:
-        lines.append(f'    _comb_{i}(s);')
+    for group in resettl_groups:
+        gi = merge_groups.index(group)
+        all_stmts = []
+        for idx in group:
+            all_stmts.extend(ir.comb_blocks[idx].stmts)
+        if len(group) == 1 and _count_stmts(all_stmts) == 1:
+            body = []
+            _emit_stmt(all_stmts[0], body, sig_w, pack_map=pack_map)
+            lines.extend('    ' + ln.lstrip() for ln in body)
+        else:
+            lines.append(f'    _comb_{gi}(s);')
 
     # 4. Update previous values
     for clk in sorted(clocks):
