@@ -513,10 +513,16 @@ def _find_merge_groups(ir: IRModule) -> list:
 def _resolve_clock_aliases(ir: IRModule) -> dict:
     """Return map from aliased clock name → physical clock name.
 
-    Traces chains of continuous assigns where the RHS is a bare signal
-    (``assign a = b``).  Stops when no further alias exists.
+    Traces chains of continuous assigns *and* trivial comb blocks
+    (single ``Assign(target, Sig(name))`` statements) where the RHS is
+    a bare signal.  Stops when no further alias exists.
     """
     direct = {a.target: a.value.name for a in ir.assigns if isinstance(a.value, Sig)}
+    for blk in ir.comb_blocks:
+        if len(blk.stmts) == 1 and isinstance(blk.stmts[0], Assign):
+            a = blk.stmts[0]
+            if isinstance(a.value, Sig):
+                direct.setdefault(a.target, a.value.name)
     alias_map = {}
     for blk in ir.seq_blocks:
         for _, sig in blk.edges:
@@ -639,8 +645,8 @@ def _inline_cont_assigns(ir: IRModule) -> IRModule:
 # ── Dirty-flag helpers ───────────────────────────────────────────────
 
 
-def _build_dirty_indices(sig_w: dict) -> tuple:
-    """Assign a dirty bit index to every signal in sig_w.
+def _build_dirty_indices(sig_w: dict, mems=()) -> tuple:
+    """Assign a dirty bit index to every signal in sig_w and every mem.
 
     Returns (dirty_idx, n_words) where dirty_idx maps
     signal_name → (word_idx, bit_mask) and n_words is the number of
@@ -652,6 +658,9 @@ def _build_dirty_indices(sig_w: dict) -> tuple:
         if not name.startswith('__'):   # skip internal markers like __mem_X
             dirty_idx[name] = (idx // 64, 1 << (idx % 64))
             idx += 1
+    for m in mems:
+        dirty_idx[m.name] = (idx // 64, 1 << (idx % 64))
+        idx += 1
     return dirty_idx, max(1, (idx + 63) // 64)
 
 
@@ -700,7 +709,7 @@ def emit_c(ir: IRModule) -> str:
     comb_deps = _build_comb_deps(ir)
     merge_groups = _find_merge_groups(ir)
     clock_aliases = _resolve_clock_aliases(ir)
-    dirty_idx, n_dirty_words = _build_dirty_indices(sig_w)
+    dirty_idx, n_dirty_words = _build_dirty_indices(sig_w, ir.mems)
 
     # Compute write sets for each comb block (for dirty output marking)
     from .flatten import _stmt_writes_reads as _swr
@@ -720,10 +729,37 @@ def emit_c(ir: IRModule) -> str:
         seq_writes.append(ws & set(dirty_idx))
 
     # Which groups contain at least one block that reads a seq-written signal
-    resettl_groups = [
-        g for g in merge_groups
-        if any(comb_deps[i] & nba_sigs for i in g)
-    ]
+    # Must include transitive closure: if group A reads an NBA signal and
+    # writes signal X, then group B that reads X must also re-settle.
+    group_writes: list[set] = []
+    for g in merge_groups:
+        ws = set()
+        for i in g:
+            ws |= comb_writes[i]
+        group_writes.append(ws)
+
+    affected = set()
+    # Seed frontier with NBA signals AND mem arrays written by seq blocks
+    # (mem writes are immediate, not NBA-deferred, but still need re-settle)
+    seq_mem_writes = set()
+    mem_names = {m.name for m in ir.mems}
+    for blk in ir.seq_blocks:
+        ws = set()
+        for stmt in blk.stmts:
+            _swr(stmt, ws, set())
+        seq_mem_writes |= ws & mem_names
+    frontier = nba_sigs | seq_mem_writes
+    changed = True
+    while changed:
+        changed = False
+        for gi, g in enumerate(merge_groups):
+            if gi in affected:
+                continue
+            if any(comb_deps[i] & frontier for i in g):
+                affected.add(gi)
+                frontier |= group_writes[gi]
+                changed = True
+    resettl_groups = [g for gi, g in enumerate(merge_groups) if gi in affected]
     lines = [
         '#include <stdint.h>',
         '#include <stdlib.h>',
@@ -851,18 +887,19 @@ def emit_c(ir: IRModule) -> str:
     lines.append('void veripy_eval(void* p) {')
     lines.append('    State* s = (State*)p;')
 
-    def _emit_comb_group(gi, group, mark_outputs):
-        """Emit dirty-guarded comb group dispatch."""
+    def _emit_comb_group(gi, group, mark_outputs, force=False):
+        """Emit comb group dispatch.  When *force* is True the dirty
+        guard is omitted (used for the initial settle so that every
+        comb block runs unconditionally)."""
         all_stmts = []
         for idx in group:
             all_stmts.extend(ir.comb_blocks[idx].stmts)
-        # Compute group read/write sets
         group_reads: set = set()
         group_writes: set = set()
         for idx in group:
             group_reads |= comb_deps[idx]
             group_writes |= comb_writes[idx]
-        cond = _dirty_cond(group_reads, dirty_idx)
+        cond = '1' if force else _dirty_cond(group_reads, dirty_idx)
         out_lines = _dirty_set_lines(group_writes, dirty_idx, indent=2) if mark_outputs else []
         trivial = len(group) == 1 and _count_stmts(all_stmts) == 1
         if cond == '1':
@@ -884,11 +921,13 @@ def emit_c(ir: IRModule) -> str:
             lines.extend(out_lines)
             lines.append('    }')
 
-    # 1. Settle combinational logic (dirty-driven; mark outputs dirty for propagation)
+    # 1. Settle combinational logic (unconditional — every comb block
+    #    runs so that all signals reflect the current state, including
+    #    signals updated by NBA commits from the previous eval).
     if has_cont:
         lines.append('    _cont_assigns(s);')
     for gi, group in enumerate(merge_groups):
-        _emit_comb_group(gi, group, mark_outputs=True)
+        _emit_comb_group(gi, group, mark_outputs=False, force=True)
 
     # Clear dirty bits after initial comb settle
     lines.append(f'    memset(s->_dirty, 0, {n_dirty_words * 8});')
@@ -928,20 +967,23 @@ def emit_c(ir: IRModule) -> str:
         lines.extend(_dirty_set_lines(group_seq_writes, dirty_idx, indent=2))
         lines.append('    }')
 
-    # 3. Re-settle combinational logic (dirty-driven; no output marking needed)
+    # 3. Re-settle combinational logic (dirty-driven; mark outputs so
+    #    downstream comb blocks in the chain also fire)
     if has_cont:
         lines.append('    _cont_assigns(s);')
     for group in resettl_groups:
         gi = merge_groups.index(group)
-        _emit_comb_group(gi, group, mark_outputs=False)
+        _emit_comb_group(gi, group, mark_outputs=True)
 
     # 4. Update previous values
     for clk in sorted(clocks):
         clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
         lines.append(f'    s->_prev_{clk} = {clk_expr};')
 
-    # Clear dirty bits at end of eval
-    lines.append(f'    memset(s->_dirty, 0, {n_dirty_words * 8});')
+    # NOTE: do NOT clear dirty bits here.  The re-settle (and seq dirty
+    # marks) must persist so the *next* eval's initial comb settle sees
+    # which NBA-committed signals changed and re-evaluates dependent
+    # comb blocks (e.g. the instruction decoder after IF/ID updates).
 
     lines.append('}')
     lines.append('')
