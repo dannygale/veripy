@@ -797,7 +797,7 @@ class CSimModel:
         cc = os.environ.get('CC', 'cc')
         flag = '-dynamiclib' if ext == '.dylib' else '-shared'
         r = subprocess.run(
-            [cc, '-O2', '-fPIC', flag, '-o', lib_path, c_path],
+            [cc, '-O3', '-march=native', '-flto', '-fPIC', flag, '-o', lib_path, c_path],
             capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(f'C compilation failed:\n{r.stderr}')
@@ -1119,7 +1119,7 @@ def compile_bench(module, tb_ir, module_name=None):
 
     cc = os.environ.get('CC', 'cc')
     flag = '-dynamiclib' if ext == '.dylib' else '-shared'
-    r = subprocess.run([cc, '-O2', '-fPIC', flag, '-o', lib_path, c_path],
+    r = subprocess.run([cc, '-O3', '-march=native', '-flto', '-fPIC', flag, '-o', lib_path, c_path],
                        capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f'Bench compilation failed:\n{r.stderr}\n\nSource:\n{combined_c}')
