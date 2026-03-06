@@ -305,18 +305,19 @@ class VeripyTestCase(unittest.TestCase):
         self._rtl_outputs = out
         return True
 
-    def _run_csim(self):
+    def _run_csim(self, force_hier=False):
         """Replay recorded stimuli through native C sim, collect outputs."""
         from .backend_csim import compile_module as csim_compile
         mod = self._mod
         module_name = type(mod).__name__.lower()
         try:
-            with csim_compile(mod, module_name) as cm:
+            with csim_compile(mod, module_name, force_hier=force_hier) as cm:
                 out = self._replay_stimuli(cm)
         except Exception:
             return False
+        key = 'csim_hier' if force_hier else 'csim'
         if hasattr(self, '_all_outputs'):
-            self._all_outputs['csim'] = out
+            self._all_outputs[key] = out
         self._rtl_outputs = out
         return True
 
@@ -342,11 +343,12 @@ def _wrap_dual(fn):
         except SyntaxError:
             pass
 
-        # Pass 3: csim (always-on)
+        # Pass 3: csim flat (always-on)
         skip_csim = getattr(self, 'SKIP_CSIM', False) or \
                     os.environ.get('VERIPY_SKIP_CSIM', '') == '1'
         if not skip_csim:
             self._run_csim()
+            self._run_csim(force_hier=True)
 
         # Pass 4 (opt-in): Verilator
         use_verilator = getattr(self, 'USE_VERILATOR', False) or \

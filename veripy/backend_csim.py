@@ -1405,11 +1405,11 @@ def _emit_hier_eval(top_ir, lines):
 
 # ── Compile + load ───────────────────────────────────────────────────
 
-def compile_module(module, module_name=None):
+def compile_module(module, module_name=None, force_hier=False):
     """Compile a VeriPy Module to a CSimModel.
 
     Uses hierarchical per-module compilation when the design has
-    sub-module instances, flat compilation otherwise.
+    sub-module instances (or force_hier=True), flat compilation otherwise.
     """
     from .lower import lower_module
 
@@ -1420,7 +1420,7 @@ def compile_module(module, module_name=None):
     top_ir = lower_module(module, module_name)
     patch_fn(top_ir)
 
-    if top_ir.instances:
+    if top_ir.instances or force_hier:
         return CSimModel(top_ir, registry=registry)
     return CSimModel(top_ir)
 
