@@ -66,9 +66,21 @@ def flatten_ir(parent: IRModule, registry: dict[str, IRModule],
         for w in child.wires:
             if w.name not in child_port_names:
                 out.wires.append(WireDecl(prefix + w.name, w.width))
+        def _resolve_dim(val, params):
+            if isinstance(val, int):
+                return val
+            if isinstance(val, str):
+                if val in params:
+                    return params[val]
+                try:
+                    return int(eval(val, {"__builtins__": {}}, params))
+                except Exception:
+                    return val
+            return val
+
         for m in child.mems:
-            depth = child_params.get(m.depth, m.depth) if isinstance(m.depth, str) else m.depth
-            width = child_params.get(m.width, m.width) if isinstance(m.width, str) else m.width
+            depth = _resolve_dim(m.depth, child_params)
+            width = _resolve_dim(m.width, child_params)
             if isinstance(m, TrueDualPortMemDecl):
                 out.mems.append(TrueDualPortMemDecl(
                     prefix + m.name, depth, width, style=m.style,
@@ -140,10 +152,31 @@ def flatten_ir(parent: IRModule, registry: dict[str, IRModule],
             stmts=[_rename_stmt(s, identity, params) for s in blk.stmts],
             locals=blk.locals)
 
+    # Post-pass: reclassify registers that are only driven by comb blocks.
+    # Pipeline stage wiring can create submodule port signals as regs when
+    # they should be wires (e.g. lsu.wb_mem_data = mem_wb.mem_data).
+    seq_writes: set = set()
+    for blk in out.seq_blocks:
+        for stmt in blk.stmts:
+            _stmt_writes_reads(stmt, seq_writes, set())
+    comb_writes: set = set()
+    for blk in out.comb_blocks:
+        for stmt in blk.stmts:
+            _stmt_writes_reads(stmt, comb_writes, set())
+    for a in out.assigns:
+        _stmt_writes_reads(a, comb_writes, set())
+    reg_names = {r.name for r in out.regs}
+    comb_only_regs = (comb_writes & reg_names) - seq_writes
+    if comb_only_regs:
+        kept_regs = []
+        for r in out.regs:
+            if r.name in comb_only_regs:
+                out.wires.append(WireDecl(r.name, r.width))
+            else:
+                kept_regs.append(r)
+        out.regs = kept_regs
+
     return out
-
-
-# ── Topological sort ─────────────────────────────────────────────────
 
 def topo_sort_comb(mod: IRModule) -> IRModule:
     """Return a copy of *mod* with assigns and comb_blocks topologically
@@ -153,16 +186,31 @@ def topo_sort_comb(mod: IRModule) -> IRModule:
     """
     # Merge assigns and comb_blocks into a single list of nodes.
     # Each node is ('assign', ContAssign) or ('comb', CombBlock).
+    # Multi-statement comb blocks are exploded into per-statement nodes
+    # so the topo sort can order statements independently and break false
+    # cycles caused by a single block both writing and reading across a
+    # dependency boundary.
     nodes = []
     for a in mod.assigns:
         nodes.append(('assign', a))
     for b in mod.comb_blocks:
-        nodes.append(('comb', b))
+        if len(b.stmts) <= 1:
+            nodes.append(('comb', b))
+        else:
+            for stmt in b.stmts:
+                nodes.append(('comb', CombBlock(stmts=[stmt], locals=b.locals)))
 
     if not nodes:
         return deepcopy(mod)
 
-    # For each node, compute writes and reads.
+    # Collect all comb-block-local variable names — these use blocking
+    # assignment semantics and must not participate in the inter-node
+    # dependency graph.
+    all_locals: set = set()
+    for b in mod.comb_blocks:
+        all_locals |= set(b.locals)
+
+    # For each node, compute writes and reads (excluding locals).
     node_writes = []  # list[set[str]]
     node_reads = []   # list[set[str]]
     for kind, obj in nodes:
@@ -173,8 +221,8 @@ def topo_sort_comb(mod: IRModule) -> IRModule:
             w, r = set(), set()
             for s in obj.stmts:
                 _stmt_writes_reads(s, w, r)
-            node_writes.append(w)
-            node_reads.append(r)
+            node_writes.append(w - all_locals)
+            node_reads.append(r - all_locals)
 
     # Map signal → node index that writes it (comb only)
     writer = {}
