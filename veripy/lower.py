@@ -967,6 +967,10 @@ class _TBLowerer:
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Yield):
             return [Delay(self._expr(node.value.value))]
 
+        # yield from self._method() → inline the method body
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.YieldFrom):
+            return self._inline_yield_from(node.value.value)
+
         # self.set(name=val, ...) → blocking assigns
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
             call = node.value
@@ -1045,7 +1049,63 @@ class _TBLowerer:
                 return [Disable(self._break_label)]
             return []
 
-        return []  # skip unrecognized
+        # Fallback: scan for self.out() calls anywhere in the statement
+        return self._scan_out_calls(node)
+
+    def _scan_out_calls(self, node):
+        """Walk an AST node and emit Display for any self.out('name') calls."""
+        stmts = []
+        for child in ast.walk(node):
+            if not (isinstance(child, ast.Call)
+                    and self._is_tc_method(child, 'out') and child.args):
+                continue
+            arg = child.args[0]
+            if isinstance(arg, ast.Constant):
+                stmts.append(self._make_display(arg.value))
+        # If no constant-arg out() found, check for comprehensions over output_names
+        if not stmts:
+            for child in ast.walk(node):
+                if isinstance(child, (ast.DictComp, ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+                    for gen in child.generators:
+                        if self._is_tc_attr(gen.iter, '_output_names'):
+                            for name in self.output_names:
+                                stmts.append(self._make_display(name))
+                            return stmts
+        return stmts
+
+    def _inline_yield_from(self, call_node):
+        """Inline a yield from self._method(...) call by parsing the method source."""
+        if not (isinstance(call_node, ast.Call) and isinstance(call_node.func, ast.Attribute)):
+            return []
+        obj = call_node.func.value
+        method_name = call_node.func.attr
+        if not (isinstance(obj, ast.Name) and obj.id == self._tc_var):
+            return []
+        # Find the method
+        method = None
+        if hasattr(self._func, '__globals__'):
+            for cls in self._func.__globals__.values():
+                if isinstance(cls, type) and hasattr(cls, method_name):
+                    method = getattr(cls, method_name)
+                    break
+        if method is None:
+            return []
+        src = textwrap.dedent(inspect.getsource(method))
+        tree = ast.parse(src)
+        func_def = tree.body[0]
+        # Build param→arg substitution (skip 'self')
+        params = [p.arg for p in func_def.args.args[1:]]  # skip self
+        if params and call_node.args:
+            mapping = dict(zip(params, call_node.args))
+            func_def = _SubstArgs(mapping).visit(func_def)
+        return self._stmts(func_def.body)
+
+    def _is_tc_attr(self, node, attr):
+        """Check if node is self.<attr>."""
+        return (isinstance(node, ast.Attribute)
+                and node.attr == attr
+                and isinstance(node.value, ast.Name)
+                and node.value.id == self._tc_var)
 
     def _expr(self, node):
         if isinstance(node, ast.Constant):
@@ -1194,9 +1254,10 @@ class _TBLowerer:
         """Extract self.out('name') calls from assertion args → Display stmts."""
         stmts = []
         for arg in call.args:
-            if (isinstance(arg, ast.Call) and self._is_tc_method(arg, 'out')
-                    and arg.args):
-                stmts.append(self._make_display(arg.args[0].value))
+            for child in ast.walk(arg):
+                if (isinstance(child, ast.Call) and self._is_tc_method(child, 'out')
+                        and child.args and isinstance(child.args[0], ast.Constant)):
+                    stmts.append(self._make_display(child.args[0].value))
         return stmts
 
     def _lower_for(self, node):
@@ -1249,6 +1310,16 @@ class _TBLowerer:
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
             return -self._const_eval(node.operand)
         raise SyntaxError(f'TB: not constant: {ast.dump(node)}')
+
+
+class _SubstArgs(ast.NodeTransformer):
+    """Replace Name nodes matching parameter names with argument expressions."""
+    def __init__(self, mapping):
+        self.mapping = mapping
+    def visit_Name(self, node):
+        if node.id in self.mapping:
+            return ast.copy_location(self.mapping[node.id], node)
+        return node
 
 
 def lower_tb_block(func, mod, mod_var_name, output_names):
