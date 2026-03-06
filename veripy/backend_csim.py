@@ -453,6 +453,29 @@ def _find_merge_groups(ir: IRModule) -> list:
     return groups
 
 
+# ── Clock alias resolution ───────────────────────────────────────────
+
+
+def _resolve_clock_aliases(ir: IRModule) -> dict:
+    """Return map from aliased clock name → physical clock name.
+
+    Traces chains of continuous assigns where the RHS is a bare signal
+    (``assign a = b``).  Stops when no further alias exists.
+    """
+    direct = {a.target: a.value.name for a in ir.assigns if isinstance(a.value, Sig)}
+    alias_map = {}
+    for blk in ir.seq_blocks:
+        for _, sig in blk.edges:
+            if sig in alias_map:
+                continue
+            src, visited = sig, set()
+            while src in direct and src not in visited:
+                visited.add(src)
+                src = direct[src]
+            alias_map[sig] = src
+    return alias_map
+
+
 # ── Top-level C emitter ──────────────────────────────────────────────
 
 
@@ -474,6 +497,7 @@ def emit_c(ir: IRModule) -> str:
     nba_sigs, nba_per_seq = _collect_nba_signals(ir)
     comb_deps = _build_comb_deps(ir)
     merge_groups = _find_merge_groups(ir)
+    clock_aliases = _resolve_clock_aliases(ir)
     # Which groups contain at least one block that reads a seq-written signal
     resettl_groups = [
         g for g in merge_groups
@@ -524,11 +548,11 @@ def emit_c(ir: IRModule) -> str:
             w = _resolve_width(m.width, ir.params)
             lines.append(f'    {_ctype(w)} {m.name}[{m.depth}];')
 
-    # Previous values for edge detection
+    # Previous values for edge detection (use physical clock names)
     clocks = set()
     for blk in ir.seq_blocks:
         for edge_kind, sig_name in blk.edges:
-            clocks.add(sig_name)
+            clocks.add(clock_aliases.get(sig_name, sig_name))
     for clk in sorted(clocks):
         lines.append(f'    uint8_t _prev_{clk};')
 
@@ -618,11 +642,12 @@ def emit_c(ir: IRModule) -> str:
         else:
             lines.append(f'    _comb_{gi}(s);')
 
-    # 2. Edge detection + sequential block calls
+    # 2. Edge detection + sequential block calls (grouped by physical clock)
     edge_blocks = {}
     for i, blk in enumerate(ir.seq_blocks):
         for edge_kind, sig_name in blk.edges:
-            edge_blocks.setdefault((edge_kind, sig_name), []).append(i)
+            phys = clock_aliases.get(sig_name, sig_name)
+            edge_blocks.setdefault((edge_kind, phys), []).append(i)
 
     for (edge_kind, clk), block_ids in sorted(edge_blocks.items()):
         clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
