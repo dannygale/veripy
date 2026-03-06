@@ -696,22 +696,30 @@ def _extract_clock_name(always_stmts):
     return 'clock'
 
 
-def emit_tb_c(tb_ir, model_c_src, half_period=10):
+def emit_tb_c(tb_ir, model_c_src, half_period=10, model_ir=None):
     """Emit a self-contained C file: model + testbench run_bench() entry point.
 
     The always block is folded into a step() helper. The initial block
-    becomes straight-line C inside run_bench().
+    becomes straight-line C inside run_bench().  Uses veripy_set_*/get_*
+    API so it works with signal packing.
     """
-    sig_w = {}  # TB locals don't need widths for _expr; model signals accessed via s->
-
-    # Identify model signal names (anything in the model State struct)
+    # Build set of model signal names from IR ports
     model_sigs = set()
-    for line in model_c_src.split('\n'):
-        stripped = line.strip()
-        if stripped.startswith(('uint8_t ', 'uint16_t ', 'uint32_t ', 'uint64_t ')):
-            # e.g. "uint8_t clock;"
-            name = stripped.split()[1].rstrip(';').split('[')[0]
-            if not name.startswith('_prev_'):
+    input_sigs = set()
+    if model_ir:
+        for p in model_ir.ports:
+            model_sigs.add(p.name)
+            if p.direction == 'input':
+                input_sigs.add(p.name)
+    else:
+        # Fallback: scan C source for set/get functions
+        for line in model_c_src.split('\n'):
+            if 'veripy_set_' in line:
+                name = line.split('veripy_set_')[1].split('(')[0]
+                model_sigs.add(name)
+                input_sigs.add(name)
+            elif 'veripy_get_' in line and 'veripy_set_' not in line:
+                name = line.split('veripy_get_')[1].split('(')[0]
                 model_sigs.add(name)
 
     clock_name = _extract_clock_name(tb_ir.always_blocks[0].stmts) if tb_ir.always_blocks else 'clock'
@@ -720,18 +728,18 @@ def emit_tb_c(tb_ir, model_c_src, half_period=10):
     lines.append('')
     lines.append('/* ── Testbench ─────────────────────────────────── */')
     lines.append('')
-    lines.append(f'static void _step(State* s, int time_units) {{')
+    lines.append(f'static void _step(void* p, int time_units) {{')
     lines.append(f'    int n = time_units / {half_period};')
     lines.append(f'    for (int _i = 0; _i < n; _i++) {{')
-    lines.append(f'        s->{clock_name} ^= 1;')
-    lines.append(f'        veripy_eval(s);')
+    lines.append(f'        veripy_set_{clock_name}(p, veripy_get_{clock_name}(p) ^ 1);')
+    lines.append(f'        veripy_eval(p);')
     lines.append(f'    }}')
     lines.append(f'}}')
     lines.append('')
     lines.append('uint64_t run_bench(void) {')
-    lines.append('    State* s = (State*)veripy_create();')
+    lines.append('    void* p = veripy_create();')
 
-    # Collect local variables from initial blocks (ForLoop vars)
+    # Collect local variables from initial blocks (ForLoop vars, non-model assigns)
     locals_declared = set()
 
     def _collect_locals(stmts):
@@ -754,14 +762,15 @@ def emit_tb_c(tb_ir, model_c_src, half_period=10):
         lines.append(f'    uint64_t {v} = 0;')
 
     def _tb_expr(node):
-        """Emit C expression — same as _expr but locals aren't prefixed with s->."""
         if isinstance(node, Const):
             v = node.value
             return f'((uint64_t)({v}))' if v < 0 else f'{v}ULL'
         if isinstance(node, Sig):
             if node.name in locals_declared:
                 return node.name
-            return f's->{node.name}'
+            if node.name in model_sigs:
+                return f'veripy_get_{node.name}(p)'
+            return node.name
         if isinstance(node, BinOp):
             return f'({_tb_expr(node.left)} {node.op} {_tb_expr(node.right)})'
         if isinstance(node, UnaryOp):
@@ -783,10 +792,13 @@ def emit_tb_c(tb_ir, model_c_src, half_period=10):
             val = _tb_expr(stmt.value)
             if stmt.target in locals_declared:
                 lines.append(f'{pad}{stmt.target} = {val};')
+            elif stmt.target in input_sigs:
+                lines.append(f'{pad}veripy_set_{stmt.target}(p, {val});')
             else:
-                lines.append(f'{pad}s->{stmt.target} = {val};')
+                # output signal — shouldn't be assigned in TB, but handle gracefully
+                lines.append(f'{pad}veripy_set_{stmt.target}(p, {val});')
         elif isinstance(stmt, Delay):
-            lines.append(f'{pad}_step(s, {_tb_expr(stmt.value)});')
+            lines.append(f'{pad}_step(p, {_tb_expr(stmt.value)});')
         elif isinstance(stmt, If):
             lines.append(f'{pad}if ({_tb_expr(stmt.cond)}) {{')
             for s in stmt.then_body:
@@ -815,15 +827,15 @@ def emit_tb_c(tb_ir, model_c_src, half_period=10):
         elif isinstance(stmt, Disable):
             lines.append(f'{pad}goto {stmt.label}_end;')
         elif isinstance(stmt, Display):
-            pass  # skip for benchmark
+            pass
         elif isinstance(stmt, Finish):
-            pass  # handled by function return
+            pass
 
     for blk in tb_ir.initial_blocks:
         for s in blk.stmts:
             _tb_stmt(s)
 
-    lines.append('    veripy_destroy(s);')
+    lines.append('    veripy_destroy(p);')
     lines.append('    return 0;')
     lines.append('}')
     return '\n'.join(lines) + '\n'
@@ -870,7 +882,7 @@ def compile_bench(module, tb_ir, module_name=None):
 
     # Extract half-period from always block
     hp = _extract_half_period(tb_ir.always_blocks[0].stmts) if tb_ir.always_blocks else 10
-    combined_c = emit_tb_c(tb_ir, model_c, hp)
+    combined_c = emit_tb_c(tb_ir, model_c, hp, model_ir=flat_ir)
 
     build_dir = tempfile.mkdtemp(prefix='veripy_bench_')
     c_path = os.path.join(build_dir, 'bench.c')
