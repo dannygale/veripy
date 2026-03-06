@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """CPU benchmark: csim vs Verilator running RV32I programs.
 
-Assembles programs using instruction encoders, loads them into the CPU's
-memory, and benchmarks simulation performance.
+Compiles C/assembly programs from benchmarks/programs/ using the vhdl_cpu
+toolchain (crt0.S + link.ld), loads them into the CPU's memory, and
+benchmarks simulation performance across vvp, csim, and Verilator.
 """
 
 import sys, os, time, tempfile, subprocess, shutil, ctypes, struct
@@ -11,217 +12,49 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'vhdl_cpu', 'isa', 'v3'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'vhdl_cpu', 'lib', 'v3'))
 
-# ── RV32I instruction encoders ──────────────────────────────────────
-
-def _i(imm, rs1, f3, rd, op):
-    return ((imm & 0xFFF) << 20 | (rs1 & 0x1F) << 15 |
-            (f3 & 7) << 12 | (rd & 0x1F) << 7 | (op & 0x7F))
-
-def _r(f7, rs2, rs1, f3, rd, op):
-    return ((f7 & 0x7F) << 25 | (rs2 & 0x1F) << 20 | (rs1 & 0x1F) << 15 |
-            (f3 & 7) << 12 | (rd & 0x1F) << 7 | (op & 0x7F))
-
-def _s(imm, rs2, rs1, f3, op):
-    return (((imm >> 5) & 0x7F) << 25 | (rs2 & 0x1F) << 20 |
-            (rs1 & 0x1F) << 15 | (f3 & 7) << 12 |
-            (imm & 0x1F) << 7 | (op & 0x7F))
-
-def _b(imm, rs2, rs1, f3):
-    return (((imm >> 12) & 1) << 31 | ((imm >> 5) & 0x3F) << 25 |
-            (rs2 & 0x1F) << 20 | (rs1 & 0x1F) << 15 | (f3 & 7) << 12 |
-            ((imm >> 1) & 0xF) << 8 | ((imm >> 11) & 1) << 7 | 0x63)
-
-def _u(imm20, rd, op):
-    return ((imm20 & 0xFFFFF) << 12 | (rd & 0x1F) << 7 | (op & 0x7F))
-
-def _j(imm, rd):
-    return (((imm >> 20) & 1) << 31 | ((imm >> 1) & 0x3FF) << 21 |
-            ((imm >> 11) & 1) << 20 | ((imm >> 12) & 0xFF) << 12 |
-            (rd & 0x1F) << 7 | 0x6F)
-
-def ADDI(rd, rs1, imm):  return _i(imm & 0xFFF, rs1, 0, rd, 0x13)
-def SLTI(rd, rs1, imm):  return _i(imm & 0xFFF, rs1, 2, rd, 0x13)
-def ANDI(rd, rs1, imm):  return _i(imm & 0xFFF, rs1, 7, rd, 0x13)
-def ORI(rd, rs1, imm):   return _i(imm & 0xFFF, rs1, 6, rd, 0x13)
-def XORI(rd, rs1, imm):  return _i(imm & 0xFFF, rs1, 4, rd, 0x13)
-def SLLI(rd, rs1, sh):   return _r(0, sh, rs1, 1, rd, 0x13)
-def SRLI(rd, rs1, sh):   return _r(0, sh, rs1, 5, rd, 0x13)
-def SRAI(rd, rs1, sh):   return _r(0x20, sh, rs1, 5, rd, 0x13)
-def ADD(rd, rs1, rs2):   return _r(0, rs2, rs1, 0, rd, 0x33)
-def SUB(rd, rs1, rs2):   return _r(0x20, rs2, rs1, 0, rd, 0x33)
-def SLT(rd, rs1, rs2):   return _r(0, rs2, rs1, 2, rd, 0x33)
-def AND(rd, rs1, rs2):   return _r(0, rs2, rs1, 7, rd, 0x33)
-def OR(rd, rs1, rs2):    return _r(0, rs2, rs1, 6, rd, 0x33)
-def XOR(rd, rs1, rs2):   return _r(0, rs2, rs1, 4, rd, 0x33)
-def SW(rs1, rs2, imm):   return _s(imm & 0xFFF, rs2, rs1, 2, 0x23)
-def LW(rd, rs1, imm):    return _i(imm & 0xFFF, rs1, 2, rd, 0x03)
-def LUI(rd, imm20):      return _u(imm20, rd, 0x37)
-def BEQ(rs1, rs2, imm):  return _b(imm, rs2, rs1, 0)
-def BNE(rs1, rs2, imm):  return _b(imm, rs2, rs1, 1)
-def BLT(rs1, rs2, imm):  return _b(imm, rs2, rs1, 4)
-def BGE(rs1, rs2, imm):  return _b(imm, rs2, rs1, 5)
-def JAL(rd, imm):        return _j(imm, rd)
-def JALR(rd, rs1, imm):  return _i(imm & 0xFFF, rs1, 0, rd, 0x67)
-def NOP():               return ADDI(0, 0, 0)
-def WFI():               return 0x10500073
-
 
 # ── Benchmark programs ──────────────────────────────────────────────
 
-def _assemble(asm_src):
-    """Assemble RV32I source with the toolchain, return list of uint32 words."""
+_VHDL_CPU = os.path.join(os.path.dirname(__file__), '..', '..', 'vhdl_cpu')
+_CRT0 = os.path.join(_VHDL_CPU, 'isa', 'v2', 'programs', 'crt0.S')
+_LINK_LD = os.path.join(_VHDL_CPU, 'isa', 'v2', 'programs', 'link.ld')
+_PROG_DIR = os.path.join(os.path.dirname(__file__), 'programs')
+
+
+def compile_program(name):
+    """Compile a .c or .S file from benchmarks/programs/ into a word list.
+
+    Uses the vhdl_cpu crt0.S and link.ld so that C programs get a stack,
+    zeroed .bss, and a call to main() followed by WFI.
+    """
+    # Find source file
+    for ext in ('.c', '.S'):
+        src = os.path.join(_PROG_DIR, name + ext)
+        if os.path.exists(src):
+            break
+    else:
+        raise FileNotFoundError(f'No .c or .S found for {name!r} in {_PROG_DIR}')
+
+    cc = 'riscv64-elf-gcc'
+    objcopy = 'riscv64-elf-objcopy'
     with tempfile.TemporaryDirectory() as tmp:
-        asm_path = os.path.join(tmp, 'prog.S')
         elf_path = os.path.join(tmp, 'prog.elf')
         bin_path = os.path.join(tmp, 'prog.bin')
-        ld_path = os.path.join(os.path.dirname(__file__), '..', '..',
-                               'vhdl_cpu', 'isa', 'v2', 'programs', 'link.ld')
-        with open(asm_path, 'w') as f:
-            f.write(asm_src)
-        cc = 'riscv64-elf-gcc'
-        objcopy = 'riscv64-elf-objcopy'
+        srcs = [_CRT0, src] if src.endswith('.c') else [src]
         r = subprocess.run(
-            [cc, '-march=rv32i', '-mabi=ilp32', '-nostdlib', '-T', ld_path,
-             '-o', elf_path, asm_path],
+            [cc, '-march=rv32i', '-mabi=ilp32', '-O2', '-nostdlib',
+             '-T', _LINK_LD, '-o', elf_path] + srcs,
             capture_output=True, text=True)
         if r.returncode != 0:
-            raise RuntimeError(f'Assembly failed:\n{r.stderr}')
+            raise RuntimeError(f'Compile failed for {name}:\n{r.stderr}')
         subprocess.run([objcopy, '-O', 'binary', elf_path, bin_path],
                        capture_output=True, text=True, check=True)
         with open(bin_path, 'rb') as f:
             data = f.read()
-    # Pad to word boundary
     while len(data) % 4:
         data += b'\x00'
     return list(struct.unpack(f'<{len(data)//4}I', data))
 
-
-def prog_fibonacci(n=500):
-    """Fibonacci: compute fib(n) mod 2^32. ALU-bound, minimal memory."""
-    return _assemble(f"""
-    .section .text.init
-    .globl _start
-_start:
-    addi x1, x0, 0
-    addi x2, x0, 1
-    li   x4, {n}
-    addi x5, x0, 0
-.Lloop:
-    beq  x5, x4, .Ldone
-    add  x3, x1, x2
-    add  x1, x2, x0
-    add  x2, x3, x0
-    addi x5, x5, 1
-    j    .Lloop
-.Ldone:
-    .word 0x10500073
-""")
-
-
-def prog_bubblesort(count=64):
-    """Bubblesort: sort `count` descending values. Memory-intensive."""
-    # Initialize array at 0x200 with descending values, then sort
-    return _assemble(f"""
-    .section .text.init
-    .globl _start
-_start:
-    # Initialize array at 0x200 with descending values
-    li   x10, 0x200         # base
-    li   x11, {count}       # count
-    add  x12, x11, x0       # val = count (descending)
-    add  x13, x10, x0       # ptr = base
-.Linit:
-    beq  x12, x0, .Lsort
-    sw   x12, 0(x13)
-    addi x13, x13, 4
-    addi x12, x12, -1
-    j    .Linit
-
-.Lsort:
-    # Bubble sort outer loop
-    addi x20, x0, 0        # swapped = 0
-    addi x14, x0, 0        # i = 0
-    addi x15, x11, -1      # limit = count - 1
-.Linner:
-    beq  x14, x15, .Lcheck
-    slli x16, x14, 2       # offset = i * 4
-    add  x17, x10, x16     # addr = base + offset
-    lw   x18, 0(x17)       # a = arr[i]
-    lw   x19, 4(x17)       # b = arr[i+1]
-    bge  x19, x18, .Lnoswap
-    sw   x19, 0(x17)       # swap
-    sw   x18, 4(x17)
-    addi x20, x0, 1        # swapped = 1
-.Lnoswap:
-    addi x14, x14, 4
-    addi x15, x15, -1      # shrink limit (optimization)
-    j    .Linner
-.Lcheck:
-    bne  x20, x0, .Lsort
-    .word 0x10500073
-""")
-
-
-def prog_sieve(limit=200):
-    """Sieve of Eratosthenes up to `limit`. Mixed ALU + memory."""
-    return _assemble(f"""
-    .section .text.init
-    .globl _start
-_start:
-    # Sieve array at 0x200, one byte per word (wasteful but simple)
-    li   x10, 0x200         # base
-    li   x11, {limit}       # limit
-
-    # Initialize: mark all as prime (1)
-    addi x12, x0, 0
-.Linit:
-    bge  x12, x11, .Lsieve
-    slli x13, x12, 2
-    add  x13, x10, x13
-    addi x14, x0, 1
-    sw   x14, 0(x13)
-    addi x12, x12, 1
-    j    .Linit
-
-.Lsieve:
-    addi x15, x0, 2        # p = 2
-.Louter:
-    bge  x15, x11, .Lcount
-    # Check if p is prime
-    slli x13, x15, 2
-    add  x13, x10, x13
-    lw   x14, 0(x13)
-    beq  x14, x0, .Lnextp
-    # Mark multiples of p
-    add  x16, x15, x15     # j = 2*p
-.Lmark:
-    bge  x16, x11, .Lnextp
-    slli x13, x16, 2
-    add  x13, x10, x13
-    sw   x0, 0(x13)         # not prime
-    add  x16, x16, x15      # j += p
-    j    .Lmark
-.Lnextp:
-    addi x15, x15, 1
-    j    .Louter
-
-.Lcount:
-    # Count primes into x1
-    addi x1, x0, 0
-    addi x12, x0, 2
-.Lcnt:
-    bge  x12, x11, .Ldone
-    slli x13, x12, 2
-    add  x13, x10, x13
-    lw   x14, 0(x13)
-    beq  x14, x0, .Lskip
-    addi x1, x1, 1
-.Lskip:
-    addi x12, x12, 1
-    j    .Lcnt
-.Ldone:
-    .word 0x10500073
-""")
 
 
 # ── Build infrastructure ────────────────────────────────────────────
@@ -231,25 +64,12 @@ def _build_cpu_ir():
     from cpu import cpu
     from veripy.lower import lower_module
     from veripy.flatten import flatten_ir, topo_sort_comb
-    from veripy.backend_csim import _inline_cont_assigns
-    from veripy.emit_verilog import _to_snake
-    from veripy.module import Module as _Module
+    from veripy.backend_csim import _inline_cont_assigns, _collect_submodule_registry
 
     m = cpu()
-    registry = {}
-    def _collect(mod, mname):
-        if mname in registry:
-            return
-        factory = getattr(type(mod), '_veripy_factory', None)
-        fresh = factory() if factory else type(mod)()
-        for sn, sub in fresh._submodules().items():
-            _collect(sub, _to_snake(type(sub).__name__))
-        registry[mname] = lower_module(fresh, mname)
-    for k in dir(m):
-        v = getattr(m, k)
-        if isinstance(v, _Module) and v is not m:
-            _collect(v, _to_snake(type(v).__name__))
+    registry, patch_fn = _collect_submodule_registry(m)
     top_ir = lower_module(m, 'cpu')
+    patch_fn(top_ir)
     flat = flatten_ir(top_ir, registry)
     flat = topo_sort_comb(flat)
     flat = _inline_cont_assigns(flat)
@@ -545,22 +365,22 @@ def main():
           f'{sum(1 for m in ir.mems)} mems\n')
 
     programs = {
-        'fibonacci(500)': prog_fibonacci(500),
-        'bubblesort(64)': prog_bubblesort(64),
-        'sieve(200)':     prog_sieve(200),
+        'fibonacci':  compile_program('fibonacci'),
+        'bubblesort': compile_program('bubblesort'),
+        'sieve':      compile_program('sieve'),
     }
 
-    # Quick correctness check
-    print('Correctness check (fib(20) = 10946)...')
-    tiny = prog_fibonacci(20)
-    run_v, _, cl_v = compile_vvp(tiny, max_cycles=10000)
+    # Quick correctness check — use the fibonacci program
+    print('Correctness check (fibonacci)...')
+    tiny = programs['fibonacci']
+    run_v, _, cl_v = compile_vvp(tiny, max_cycles=50000)
     cyc_vvp = run_v(); cl_v()
-    run_c, _, cl_c = compile_csim(ir, tiny, max_cycles=10000)
+    run_c, _, cl_c = compile_csim(ir, tiny, max_cycles=50000)
     cyc_csim = run_c(); cl_c()
-    run_vl, _, cl_vl = compile_verilator(module, tiny, max_cycles=10000)
+    run_vl, _, cl_vl = compile_verilator(module, tiny, max_cycles=50000)
     cyc_vltr = run_vl(); cl_vl()
     print(f'  vvp={cyc_vvp} cycles, csim={cyc_csim} cycles, vltr={cyc_vltr} cycles')
-    if cyc_vvp >= 10000 or cyc_csim >= 10000 or cyc_vltr >= 10000:
+    if cyc_vvp >= 50000 or cyc_csim >= 50000 or cyc_vltr >= 50000:
         print('  ERROR: one or more backends did not halt!')
         return
     if not (cyc_vvp == cyc_vltr):

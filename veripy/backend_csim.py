@@ -24,6 +24,76 @@ from .ir import (
 
 # ── C type helpers ───────────────────────────────────────────────────
 
+def _collect_submodule_registry(module):
+    """Build a registry of sub-module IRs, keyed by unique type+params.
+
+    Different parameterizations of the same module (e.g. cache with
+    LINE_SIZE=1 vs LINE_SIZE=4) get separate registry entries and
+    distinct ``mod_type`` keys in the parent IR so that ``flatten_ir``
+    resolves each instance to the correct IR.
+
+    Returns (registry, patch_fn) where patch_fn(ir) updates inst.mod_type
+    in an IR to match the registry keys.
+    """
+    from .lower import lower_module
+    from .emit_verilog import _to_snake
+    from .module import Module as _Module
+
+    registry = {}
+    # Map (base_type, frozen_int_params) → registry key
+    _key_cache: dict[tuple, str] = {}
+
+    def _cache_key(base, params_dict):
+        int_params = tuple(sorted((k, v) for k, v in params_dict.items()
+                                  if isinstance(v, (int, float))))
+        return (base, int_params)
+
+    def _make_key(mod):
+        base = _to_snake(type(mod).__name__)
+        params = getattr(mod, '_params', {})
+        ck = _cache_key(base, params)
+        if ck in _key_cache:
+            return _key_cache[ck]
+        key = base
+        if ck[1]:
+            key = base + '__' + '_'.join(f'{k}{v}' for k, v in ck[1])
+        _key_cache[ck] = key
+        return key
+
+    def _collect(mod):
+        key = _make_key(mod)
+        if key in registry:
+            return
+        factory = getattr(type(mod), '_veripy_factory', None)
+        params = getattr(mod, '_params', {})
+        int_params = {k: v for k, v in params.items()
+                      if isinstance(v, (int, float))}
+        fresh = (factory(**int_params) if factory and int_params
+                 else factory() if factory else type(mod)())
+        for _sn, sub in fresh._submodules().items():
+            _collect(sub)
+        registry[key] = lower_module(fresh, key)
+
+    for attr in dir(module):
+        v = getattr(module, attr)
+        if isinstance(v, _Module) and v is not module:
+            _collect(v)
+
+    def _patch_inst_types(ir):
+        """Update inst.mod_type in *ir* to match registry keys."""
+        for inst in ir.instances:
+            ck = _cache_key(inst.mod_type, inst.params)
+            new_key = _key_cache.get(ck)
+            if new_key and new_key != inst.mod_type:
+                inst.mod_type = new_key
+
+    # Patch all registered IRs
+    for ir in registry.values():
+        _patch_inst_types(ir)
+
+    return registry, _patch_inst_types
+
+
 def _ctype(width):
     """Return narrowest C unsigned type for *width* bits."""
     if width <= 8:
@@ -1036,24 +1106,10 @@ def compile_module(module, module_name=None):
     if module_name is None:
         module_name = type(module).__name__.lower()
 
-    # Collect sub-module IRs into registry
-    registry = {}
-    def _collect(m, mname):
-        if mname in registry:
-            return
-        factory = getattr(type(m), '_veripy_factory', None)
-        fresh = factory() if factory else type(m)()
-        for sn, sub in fresh._submodules().items():
-            _collect(sub, _to_snake(type(sub).__name__))
-        registry[mname] = lower_module(fresh, mname)
-
-    from .module import Module as _Module
-    for k in dir(module):
-        v = getattr(module, k)
-        if isinstance(v, _Module) and v is not module:
-            _collect(v, _to_snake(type(v).__name__))
+    registry, patch_fn = _collect_submodule_registry(module)
 
     top_ir = lower_module(module, module_name)
+    patch_fn(top_ir)
     flat_ir = flatten_ir(top_ir, registry) if top_ir.instances else top_ir
 
     return CSimModel(flat_ir)
@@ -1386,23 +1442,10 @@ def compile_bench(module, tb_ir, module_name=None):
     t0 = time.perf_counter()
 
     # Build flat model IR
-    registry = {}
-    def _collect(m, mname):
-        if mname in registry:
-            return
-        factory = getattr(type(m), '_veripy_factory', None)
-        fresh = factory() if factory else type(m)()
-        for sn, sub in fresh._submodules().items():
-            _collect(sub, _to_snake(type(sub).__name__))
-        registry[mname] = lower_module(fresh, mname)
-
-    from .module import Module as _Module
-    for k in dir(module):
-        v = getattr(module, k)
-        if isinstance(v, _Module) and v is not module:
-            _collect(v, _to_snake(type(v).__name__))
+    registry, patch_fn = _collect_submodule_registry(module)
 
     top_ir = lower_module(module, module_name)
+    patch_fn(top_ir)
     flat_ir = flatten_ir(top_ir, registry) if top_ir.instances else top_ir
     flat_ir = topo_sort_comb(flat_ir)
     flat_ir = _inline_cont_assigns(flat_ir)
