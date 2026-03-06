@@ -354,18 +354,33 @@ def _emit_stmt(stmt, lines, sig_w, indent=1, pack_map=None, nba_sigs=None):
             lines.append(f'{pad}}}')
 
     elif isinstance(stmt, Case):
-        lines.append(f'{pad}switch ({_expr(stmt.sel, sig_w, pack_map)}) {{')
-        for val, body in stmt.cases:
-            lines.append(f'{pad}    case {_expr(val, sig_w, pack_map)}:')
-            for s in body:
-                _emit_stmt(s, lines, sig_w, indent + 2, pack_map, nba_sigs)
-            lines.append(f'{pad}        break;')
-        if stmt.default:
-            lines.append(f'{pad}    default:')
-            for s in stmt.default:
-                _emit_stmt(s, lines, sig_w, indent + 2, pack_map, nba_sigs)
-            lines.append(f'{pad}        break;')
-        lines.append(f'{pad}}}')
+        # If any case value is non-constant (Sig), emit as if-else chain
+        has_non_const = any(not isinstance(v, Const) for v, _ in stmt.cases)
+        if has_non_const:
+            sel = _expr(stmt.sel, sig_w, pack_map)
+            for i, (val, body) in enumerate(stmt.cases):
+                kw = 'if' if i == 0 else '} else if'
+                lines.append(f'{pad}{kw} ({sel} == {_expr(val, sig_w, pack_map)}) {{')
+                for s in body:
+                    _emit_stmt(s, lines, sig_w, indent + 1, pack_map, nba_sigs)
+            if stmt.default:
+                lines.append(f'{pad}}} else {{')
+                for s in stmt.default:
+                    _emit_stmt(s, lines, sig_w, indent + 1, pack_map, nba_sigs)
+            lines.append(f'{pad}}}')
+        else:
+            lines.append(f'{pad}switch ({_expr(stmt.sel, sig_w, pack_map)}) {{')
+            for val, body in stmt.cases:
+                lines.append(f'{pad}    case {_expr(val, sig_w, pack_map)}:')
+                for s in body:
+                    _emit_stmt(s, lines, sig_w, indent + 2, pack_map, nba_sigs)
+                lines.append(f'{pad}        break;')
+            if stmt.default:
+                lines.append(f'{pad}    default:')
+                for s in stmt.default:
+                    _emit_stmt(s, lines, sig_w, indent + 2, pack_map, nba_sigs)
+                lines.append(f'{pad}        break;')
+            lines.append(f'{pad}}}')
 
 
 def _emit_stmts_batched(stmts, lines, sig_w, indent=1, pack_map=None, nba_sigs=None):
