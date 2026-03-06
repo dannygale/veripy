@@ -1323,8 +1323,33 @@ def compile_bench(module, tb_ir, module_name=None):
 
     cc = os.environ.get('CC', 'cc')
     flag = '-dynamiclib' if ext == '.dylib' else '-shared'
-    r = subprocess.run([cc, '-O3', '-march=native', '-flto', '-fPIC', flag, '-o', lib_path, c_path],
-                       capture_output=True, text=True)
+    pgo = os.environ.get('VERIPY_PGO', '0') == '1'
+
+    if pgo:
+        # Pass 1: instrument for profiling
+        prof_dir = os.path.join(build_dir, 'pgo')
+        os.makedirs(prof_dir, exist_ok=True)
+        r1 = subprocess.run(
+            [cc, '-O3', '-march=native', '-fPIC', flag,
+             '-fprofile-generate=' + prof_dir,
+             '-o', lib_path, c_path],
+            capture_output=True, text=True)
+        if r1.returncode != 0:
+            raise RuntimeError(f'PGO pass-1 failed:\n{r1.stderr}')
+        # Run once to collect profile data
+        lib_tmp = ctypes.CDLL(lib_path)
+        lib_tmp.run_bench.restype = ctypes.c_uint64
+        lib_tmp.run_bench()
+        del lib_tmp
+        # Pass 2: optimise with profile data
+        r = subprocess.run(
+            [cc, '-O3', '-march=native', '-flto', '-fPIC', flag,
+             '-fprofile-use=' + prof_dir,
+             '-o', lib_path, c_path],
+            capture_output=True, text=True)
+    else:
+        r = subprocess.run([cc, '-O3', '-march=native', '-flto', '-fPIC', flag, '-o', lib_path, c_path],
+                           capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f'Bench compilation failed:\n{r.stderr}\n\nSource:\n{combined_c}')
 
