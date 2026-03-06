@@ -4,6 +4,8 @@
 
 VeriPy is a Python HDL framework. One Python source file produces both a behavioral simulation (runs natively in Python) and synthesizable Verilog output. The goal is to write hardware once and verify it through dual-path testing — the same test runs against both the Python sim and the generated Verilog (via iverilog).
 
+A native C simulation backend (`csim`) compiles the IR to C for near-Verilator performance with much faster compile times. A Verilator co-simulation backend wraps Verilator-compiled models for Python-driven testing.
+
 ## Key directories
 
 ```
@@ -13,14 +15,28 @@ veripy/
 │   ├── module.py     # Module base class, @module decorator, pipeline, FSM
 │   ├── lower.py      # AST lowering: Python → IR (width inference, register detection)
 │   ├── ir.py         # Intermediate representation nodes
+│   ├── flatten.py    # flatten_ir(), topo_sort_comb() — hierarchical IR → flat IR
 │   ├── backend_verilog.py  # IR → Verilog emission
+│   ├── backend_csim.py     # IR → C emission, CSimModel ctypes wrapper, native TB
+│   ├── backend_verilator.py # Verilator wrapper, native TB compilation
 │   ├── sim.py        # SimEngine, reactive yields (until), fork/join
 │   ├── rand.py       # Constrained random (Rand, Range)
 │   ├── context.py    # @comb, @always, pipeline, cover decorators
 │   └── __init__.py   # Public API exports
 ├── tests/            # Unit tests (unittest, dual-path)
 ├── examples/         # Example modules (counter, SPI controller)
-├── docs/             # Documentation (guide, signals, testing, verilog, class-api)
+├── benchmarks/       # Performance benchmarks
+│   ├── sim_vs_rtl.py    # All-backend comparison (Python, vvp, C-native, Verilator)
+│   ├── stress_test.py   # SpiHub stress test (4× SPI + arbiter)
+│   └── BASELINES.md     # Recorded benchmark baselines for tracking progress
+├── docs/             # Documentation
+│   ├── guide.md      # @module tutorial, signals, sub-modules, FSM, pipelines, formal
+│   ├── class-api.md  # Module base class for advanced use
+│   ├── signals.md    # Signal types, operations, slicing, memory arrays
+│   ├── testing.md    # Dual-path testing, SimEngine, VCD, reactive waits, drivers
+│   ├── verilog.md    # Import, export, emission, lint
+│   ├── equiv.md      # Formal equivalence via Yosys
+│   └── gpu.md        # WGPU backend, batch-parallel verification
 └── scripts/          # Automation (autopilot)
 ```
 
@@ -35,9 +51,34 @@ veripy build <file.py>
 
 # Lint
 veripy lint <file.py>
+
+# Run benchmarks
+python benchmarks/sim_vs_rtl.py
+python benchmarks/stress_test.py
 ```
 
 All 358+ tests must pass before committing.
+
+## C simulation backend (csim)
+
+The csim backend in `backend_csim.py` compiles flat IR to C:
+
+- `emit_c(ir)` — generates a C source file with `State` struct, comb/seq block functions, `veripy_eval()`, and per-signal `veripy_set_*/veripy_get_*` API
+- `emit_tb_c(tb_ir, model_c_src, model_ir=)` — lowers testbench IR to C, produces a standalone `run_bench()` entry point
+- `compile_bench(module, tb_ir, name)` — end-to-end: lower → flatten → topo_sort → emit_c → emit_tb_c → cc -O2 → ctypes load
+- `CSimModel` — ctypes wrapper for driving compiled models from Python
+
+Key optimizations implemented:
+- Signal packing: 1-bit signals packed into `uint64_t` bitfields
+- Dead code elimination on flat IR
+- Per-block function splitting with `always_inline` for trivial blocks
+- Cache-aware topological sort
+- NBA (non-blocking assignment) temporaries with per-edge-group snapshot/commit
+- Selective comb re-settle: only re-evaluates comb blocks that read seq-written signals
+- Trivial comb block inlining into eval body
+- Direct struct access in native testbench (no function call overhead)
+
+See `benchmarks/BASELINES.md` for current performance numbers.
 
 ## Conventions
 
@@ -49,7 +90,7 @@ All 358+ tests must pass before committing.
   - Each `test_*` method runs automatically in both Python simulation and compiled Verilog — outputs are compared cycle-by-cycle.
   - Use `@self.always` for clocks, `@self.initial` for stimulus. `self.set()` drives inputs, `self.out()` reads outputs.
   - Reactive helpers: `yield until(lambda: cond)`, `self.fork()`, `self.fork_any()` for parallel blocks.
-  - New modules and non-trivial functions should have tests. Put them in `tests/` following existing patterns.
+  - See [docs/testing.md](docs/testing.md) for full details.
 - **Minimal code**: Follow existing patterns. Don't over-abstract. Explicit wiring over magic.
 - **No separate Wire type**: `Signal` is the wire type.
 
