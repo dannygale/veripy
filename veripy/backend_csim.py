@@ -119,8 +119,8 @@ def _eval_order_sigs(ir: IRModule) -> list[str]:
     return order
 
 
-def _collect_nba_signals(ir: IRModule) -> set:
-    """Return set of state signal names written in any seq block.
+def _collect_nba_signals(ir: IRModule) -> tuple[set, list[set]]:
+    """Return (global_nba_set, per_seq_block_write_sets).
 
     Only state signals (ports/wires/regs) need NBA temporaries.
     Block-local variables are excluded.
@@ -131,13 +131,16 @@ def _collect_nba_signals(ir: IRModule) -> set:
         | {d.name for d in ir.wires}
         | {d.name for d in ir.regs}
     )
+    per_block: list[set] = []
     nba: set = set()
     for blk in ir.seq_blocks:
         w: set = set()
         for stmt in blk.stmts:
             _stmt_writes_reads(stmt, w, set())
-        nba |= w & state_sigs
-    return nba
+        blk_nba = w & state_sigs
+        per_block.append(blk_nba)
+        nba |= blk_nba
+    return nba, per_block
 
 
 def _build_comb_deps(ir: IRModule) -> list[set]:
@@ -468,7 +471,7 @@ def emit_c(ir: IRModule) -> str:
         Complete C source string.
     """
     sig_w = _build_sig_widths(ir)
-    nba_sigs = _collect_nba_signals(ir)
+    nba_sigs, nba_per_seq = _collect_nba_signals(ir)
     comb_deps = _build_comb_deps(ir)
     merge_groups = _find_merge_groups(ir)
     # Which groups contain at least one block that reads a seq-written signal
@@ -628,14 +631,20 @@ def emit_c(ir: IRModule) -> str:
         else:
             cond = f'!{clk_expr} && s->_prev_{clk}'
         lines.append(f'    if ({cond}) {{')
-        # Init NBA temporaries to current values before any seq block runs
-        for name in sorted(nba_sigs):
-            lines.append(f'        s->_nba_{name} = s->{name};')
+        # Only snapshot/commit signals written by seq blocks in this edge group
+        group_nba = set()
+        for idx in block_ids:
+            group_nba |= nba_per_seq[idx]
+        for name in sorted(group_nba):
+            src = _pack_read(name, pack_map) if name in pack_map else f's->{name}'
+            lines.append(f'        s->_nba_{name} = {src};')
         for idx in block_ids:
             lines.append(f'        _seq_{idx}(s);')
-        # Commit NBA temporaries to state after all seq blocks
-        for name in sorted(nba_sigs):
-            lines.append(f'        s->{name} = s->_nba_{name};')
+        for name in sorted(group_nba):
+            if name in pack_map:
+                lines.append(f'        {_pack_write(name, f"s->_nba_{name}", pack_map)}')
+            else:
+                lines.append(f'        s->{name} = s->_nba_{name};')
         lines.append('    }')
 
     # 3. Re-settle combinational logic (only groups that read seq-written signals)
