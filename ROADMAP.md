@@ -25,11 +25,67 @@ Current state (2026-03-05): csim is within 16-20% of Verilator execution speed o
 | `csim-change-driven` — dirty-flag comb re-evaluation | high | Big win when most signals are stable per cycle |
 | `csim-cont-inline` — inline trivial continuous assigns | high | _cont_assigns was 23% of profiling time |
 | `csim-pack-batch` — batch writes to same pack word | medium | Reduces read-modify-write overhead |
-| `csim-pgo` — profile-guided optimization | medium | 10-15% on branch-heavy FSM code, zero code changes |
+| `csim-pgo` — profile-guided optimization | medium | 10-15% on branch-heavy FSM code; depends on model/TB split for caching |
 
 ### Real-world benchmark
 
 `csim-cpu-bench` — use the RV32I pipelined CPU from `../vhdl_cpu/isa/v3` (pipeline + multi-level cache + AXI interconnect + memory, ~15 submodules, ~2500 lines) as a large-scale benchmark. Blocked on a lowering bug in `trap_unit` (#81).
+
+## Model/testbench split compilation
+
+Currently `compile_bench()` concatenates model C and testbench C into one file and recompiles everything on every run. The model should be compiled once into a cached `.so`/`.a`, with testbenches compiled separately and linked against it.
+
+This is the same architecture Verilator uses: `verilator --cc` produces a model library, testbenches link against it. The model is the stable artifact; testbenches are what you iterate on.
+
+### Why this matters
+
+- Testbench iteration becomes near-instant (link only, no model recompile)
+- Enables PGO: profile the model once, reuse across all testbenches
+- Enables incremental compilation: cache the model `.so` by IR hash
+- Correct separation of concerns: model is design-dependent, testbench is test-dependent
+- Foundation for co-simulation: the model library is the reusable artifact external tools link against
+
+### Design decisions
+
+- Cache location: project-local build output directory (alongside other artifacts)
+- `compile_model()` returns a `CompiledModel` object wrapping the `.so` path + metadata (IR hash, signal list, compiler flags). Not a full `CSimModel` — just enough for `compile_tb()` to validate compatibility and link against.
+- PGO flow: compile model with `-fprofile-generate` → short warmup run (not full sim) → recompile with `-fprofile-use` → cache. Only pay PGO cost once per design change.
+
+### Plan
+
+1. `compile_model(module, name)` → compiles `emit_c()` output to `.so` with exported `veripy_create/destroy/eval/set_*/get_*` API, returns `CompiledModel`
+2. `compile_tb(tb_ir, compiled_model, name)` → compiles `emit_tb_c()` output, links against model `.so`
+3. Cache model `.so` in project build directory keyed on IR hash + compiler flags
+4. `compile_bench()` becomes: check cache → compile model if needed → compile TB → link
+5. PGO: compile model with `-fprofile-generate` → short warmup → recompile with `-fprofile-use` → cache
+
+### Priority
+
+Critical — this is the foundation that PGO, incremental compilation, and co-simulation all depend on.
+
+## Incremental compilation
+
+Per-block object files: each `_comb_N`/`_seq_N` function compiles to a separate `.o`. Change one block → recompile one `.o` → relink. Also enables parallel compilation (`cc -j`).
+
+This is the same approach Verilator uses with `obj_dir/` — each block is a separate `.cpp` file compiled independently.
+
+### Why per-block granularity
+
+- Incremental recompile: change one comb block, rebuild one `.o`, relink in milliseconds
+- Parallel compilation: all `.o` files can compile simultaneously (`make -j`)
+- Foundation for multi-threaded simulation: per-block `.o` files map naturally to per-thread partitions
+
+### Plan
+
+1. `emit_c()` generates one `.c` file per block + a top-level `eval.c` with `veripy_eval()` and the `State` struct
+2. Compile each block `.c` to `.o` independently (parallelizable)
+3. Link all `.o` into model `.so`
+4. Cache individual `.o` files by block content hash — only recompile changed blocks
+5. Invalidate on: block source hash mismatch, compiler flags, struct layout change
+
+### Priority
+
+Medium — nice quality-of-life improvement. Most impactful on large designs where compile time grows. Also a prerequisite for multi-threaded compilation and simulation.
 
 ## Event-driven hybrid simulation
 
@@ -59,13 +115,18 @@ An event-driven hybrid mode would keep the compiled eval kernels (`_comb_N`, `_s
 └─────────────────────────────────────────────┘
 ```
 
-### Implementation plan
+### Design decisions
+
+- Mode flag on existing `emit_c()`, not a separate emitter. The block functions are identical — only the `veripy_eval()` dispatch wrapper changes. `emit_c(ir, mode='event')` swaps out the dispatch body.
+- No mixed mode: the whole design is either cycle-accurate or event-driven. Mixing adds enormous complexity for a niche use case.
+
+### Plan
 
 1. C event scheduler: priority queue keyed on `(time, delta)`, ~200 lines
 2. Sensitivity-driven dispatch: block runs → diff outputs → enqueue dependents
 3. Change detection: compare written signals to previous values (write sets already known from `nba_per_seq` and `comb_deps`)
 4. `#delay` support: TB `Delay(N)` nodes emit `schedule(time + N, callback)` instead of `_step()` loops
-5. New emitter `emit_c_event()`: same block functions, different dispatch wrapper
+5. `emit_c(ir, mode='event')`: same block functions, event-driven dispatch wrapper
 6. Delta-cycle convergence: iterate at current time until no pending events, with loop detection
 
 ### Expected cost
@@ -76,53 +137,24 @@ An event-driven hybrid mode would keep the compiled eval kernels (`_comb_N`, `_s
 
 Low — cycle-accurate covers most verification needs. Build when mixed-clock or timing-aware simulation is required.
 
-## Model/testbench split compilation
-
-Currently `compile_bench()` concatenates model C and testbench C into one file and recompiles everything on every run. The model should be compiled once into a cached `.so`/`.a`, with testbenches compiled separately and linked against it.
-
-This is the same architecture Verilator uses: `verilator --cc` produces a model library, testbenches link against it. The model is the stable artifact; testbenches are what you iterate on.
-
-### Why this matters
-
-- Testbench iteration becomes near-instant (link only, no model recompile)
-- Enables PGO: profile the model once, reuse across all testbenches
-- Enables incremental compilation: cache the model `.so` by IR hash
-- Correct separation of concerns: model is design-dependent, testbench is test-dependent
-- Foundation for co-simulation: the model library is the reusable artifact external tools link against
-
-### Plan
-
-1. `compile_model(module, name)` → compiles `emit_c()` output to `.so` with exported `veripy_create/destroy/eval/set_*/get_*` API
-2. `compile_tb(tb_ir, model_so, model_ir, name)` → compiles `emit_tb_c()` output, links against model `.so`
-3. Cache model `.so` in `.veripy_cache/` keyed on IR hash + compiler flags
-4. `compile_bench()` becomes: check cache → compile model if needed → compile TB → link
-5. PGO becomes: compile model with `-fprofile-generate` → short warmup run → recompile with `-fprofile-use` → cache
-
-### Priority
-
-Critical — this is the foundation that PGO, incremental compilation, and co-simulation all depend on.
-
-## Multi-threaded simulation
-
-Partition the compiled eval across multiple cores. The flat IR dependency graph already identifies independent subgraphs — clock domains, submodule trees, and unconnected comb chains can run in parallel. The scheduler would fork independent partitions, barrier-sync at clock edges, then commit.
-
-Probably only matters for large designs (1000+ signals) where single-core eval is the bottleneck. Verilator supports this with `--threads` and reports 2-3× speedup on big designs with good partitioning.
-
-### Priority
-
-Low — focus on single-core optimizations first. Revisit when the CPU benchmark is running and single-core is proven to be the bottleneck.
-
 ## Waveform dumping from csim
 
 The compiled model currently runs blind — no signal trace output. Adding opt-in waveform dumping would make csim usable for debugging, not just benchmarking.
 
+### Design decisions
+
+- Both VCD and FST formats. VCD is trivial to emit and universally supported. FST is compact and preferred for large traces (GTKWave supports both).
+- Tracing always compiled into the model with a runtime enable flag. An `if (tracing)` check per eval is free (branch predictor). Avoids needing separate cached `.so` files for trace vs no-trace builds.
+- Signal selection: dump all by default, or a user-specified subset to minimize overhead.
+
 ### Plan
 
-- Instrument `veripy_eval()` with a post-eval hook that records changed signals
-- Support FST format (compact, used by GTKWave) — write via `fstapi.h` or a minimal C implementation
-- VCD as a fallback (simple but large)
-- Signal selection: dump all, or a user-specified subset to minimize overhead
-- Flag: `compile_bench(..., trace='signals.fst')` or `CSimModel(trace=True)`
+1. Add `_trace` fields to `State` struct: previous-value shadow array, file handle, enable flag
+2. Post-eval hook in `veripy_eval()`: compare current vs previous, write changed signals
+3. VCD writer: simple `fprintf`-based, ~100 lines
+4. FST writer: use `fstapi.h` from GTKWave (BSD-licensed) or minimal reimplementation
+5. API: `CSimModel(trace='out.vcd')` or `compile_bench(..., trace='out.fst')`
+6. Runtime toggle: `model.trace_enable(True/False)` to start/stop mid-simulation
 
 ### Priority
 
@@ -130,14 +162,19 @@ High — this is the main thing preventing csim from replacing vvp in day-to-day
 
 ## Co-simulation with external C/SystemVerilog
 
-DPI-like interface so csim-compiled models can call into user C code or be driven from SystemVerilog testbenches. This is how VeriPy models integrate into existing verification environments.
+Interface so csim-compiled models can be driven from external testbenches or call into user C code. This is how VeriPy models integrate into existing verification environments.
+
+### Design decisions
+
+- Both directions, but prioritize "VeriPy model inside external testbench" first — that's the common integration pattern (existing SV environment, drop in a fast model). Reverse direction (external C inside VeriPy) is less urgent since VeriPy has its own TB infrastructure.
+- Start with stable C API (already exists: `veripy_create/destroy/eval/set_*/get_*`). DPI wrapper generation is a thin SV layer on top — add later as convenience.
 
 ### Plan
 
-- Export a stable C API: `veripy_create/destroy/eval/set_*/get_*` (already exists)
-- Add callback hooks: `veripy_register_callback(signal, fn)` for monitor-style integration
-- Generate a SystemVerilog wrapper with DPI imports that maps to the C API
-- Support linking user `.c` files into `compile_bench()`
+1. Formalize and document the C API as a stable interface (versioned header)
+2. Add callback hooks: `veripy_register_callback(signal, fn)` for monitor-style integration
+3. Support linking user `.c` files into `compile_model()`
+4. Later: generate SystemVerilog DPI wrapper that maps to the C API
 
 ### Priority
 
@@ -147,64 +184,102 @@ Medium — needed when VeriPy models are used as components in larger verificati
 
 Line, toggle, and FSM state coverage collected during compiled simulation. The Python sim already has coverage reporting — extending it to csim makes the fast path usable for coverage-driven verification and signoff.
 
+### Design decisions
+
+- VeriPy-native format (simple binary/JSON written by C, read back by Python). UCDB is Synopsys-proprietary and complex. lcov is wrong domain.
+- Toggle coverage on all signals by default, with option to filter to ports only.
+- Merge with existing Python coverage reporting infrastructure for unified reports.
+
 ### Plan
 
-- Toggle coverage: instrument each signal write with a bitmask OR tracking which bits have toggled 0→1 and 1→0
-- Line coverage: counter per comb/seq block, increment on entry
-- FSM coverage: track visited states and transitions per FSM register
-- Emit coverage data to a shared struct, read back via ctypes after simulation
-- Merge with existing Python coverage reporting infrastructure
+1. Toggle coverage: instrument each signal write with a bitmask OR tracking 0→1 and 1→0 transitions per bit
+2. Line coverage: counter per comb/seq block, increment on entry
+3. FSM coverage: track visited states and transitions per FSM register
+4. Emit coverage data to a shared struct in the `.so`, read back via ctypes after simulation
+5. Python layer merges csim coverage with Python sim coverage into unified report
 
 ### Priority
 
 Medium — important for verification signoff but not blocking current development.
 
-## GPU-accelerated batch simulation
-
-Port the compiled eval to a GPU compute shader for massively parallel parameter/seed sweeps. Not about making one simulation faster — it's about running thousands of variants simultaneously.
-
-The WGPU batch-parallel backend already exists for the Python sim (`docs/gpu.md`). Extending it to csim means generating WGSL/SPIR-V from the same flat IR instead of C.
-
-### Plan
-
-- New emitter `emit_wgsl(ir)` targeting WebGPU compute shaders
-- Each workgroup instance gets its own `State` struct in shared memory
-- Testbench parameters (seed, config) vary per instance
-- Collect pass/fail + coverage per instance, reduce on readback
-- Reuse existing `wgpu` infrastructure from the Python GPU backend
-
-### Priority
-
-Low — the Python GPU backend covers this use case today. Revisit when csim performance on single instances is fully optimized and batch throughput becomes the bottleneck.
-
 ## SystemVerilog assertion support
 
-Compile SVA-like temporal assertions and cover sequences into the eval loop. The formal infrastructure (`assert_always`, `cover`) already handles single-cycle properties — temporal sequences (`##1`, `|->`, `[*N]`) would be the next step.
+Compile temporal assertions and cover sequences into the eval loop. The formal infrastructure (`assert_always`, `cover`) already handles single-cycle properties — temporal sequences (`##1`, `|->`, `[*N]`) would be the next step.
+
+### Python API
+
+Two syntaxes — method chain builder (primary) and SVA string (escape hatch):
+
+```python
+# Method chain builder — reads left-to-right like a timeline
+assert_property(posedge(clk),
+    seq(req).delay(1).then(ack))
+
+assert_property(posedge(clk),
+    seq(req).implies(seq(ack).within(3)))
+
+assert_property(posedge(clk),
+    seq(valid).repeat(4).then(done))
+
+cover(posedge(clk),
+    seq(fifo_full).eventually(fifo_empty))
+
+# SVA string — for pasting from specs or SVA familiarity
+assert_property(posedge(clk), "req |-> ##1 ack")
+```
+
+Both syntaxes parse to the same internal IR and compile to the same FSMs.
+
+### Design decisions
+
+- Assertion failures log by default (cycle number, signal values, assertion name). `halt_on_fail=True` option for debugging.
+- Each assertion compiles to a small FSM tracked in the `State` struct.
+- Integrate with formal backend: emit equivalent SVA for SymbiYosys.
 
 ### Plan
 
-- New IR nodes for sequence expressions: delay, repetition, implication
-- Python API: `assert_property(a |-> ##1 b)` or decorator syntax
-- Compile to state machines in C: each assertion becomes a small FSM tracked in the State struct
-- Report failures with cycle number and signal values
-- Integrate with formal backend (emit SVA for SymbiYosys)
+1. New IR nodes: `Sequence`, `Delay`, `Repeat`, `Implication`, `Within`, `Eventually`
+2. `seq()` builder API returning composable `Sequence` objects
+3. SVA string parser → same `Sequence` IR
+4. Compile sequences to FSMs in C: one state variable + transition logic per assertion in `veripy_eval()`
+5. Report: log failures with context, collect pass/fail/cover hit counts
+6. Formal: emit SVA from `Sequence` IR for SymbiYosys integration
 
 ### Priority
 
 Medium — valuable for complex protocol verification. The single-cycle `assert_always` covers most current use cases.
 
-## Incremental compilation
+## Multi-threaded simulation
 
-Cache compiled `.so` files and only recompile when the design changes. The current flow recompiles everything on every run — even though compile time is already fast (~0.2s), dropping it to near-zero for unchanged designs improves the edit-simulate loop.
+Partition the compiled eval across multiple cores. The flat IR dependency graph already identifies independent subgraphs — clock domains, submodule trees, and unconnected comb chains can run in parallel. The scheduler would fork independent partitions, barrier-sync at clock edges, then commit.
 
-### Plan
+Probably only matters for large designs (1000+ signals) where single-core eval is the bottleneck. Verilator supports this with `--threads` and reports 2-3× speedup on big designs with good partitioning.
 
-- Hash the generated C source (or the flat IR) and use as cache key
-- Store compiled `.so` in a cache directory (`.veripy_cache/`)
-- On `compile_bench()`, check cache before invoking `cc`
-- Invalidate on: source hash mismatch, compiler flag change, veripy version bump
-- Optional: per-block incremental recompile (only recompile changed `_comb_N`/`_seq_N` functions and relink)
+Per-block `.o` compilation (from incremental compilation) maps naturally to per-thread partitions.
 
 ### Priority
 
-Medium — nice quality-of-life improvement. Most impactful when iterating on testbenches with an unchanged design.
+Low — focus on single-core optimizations first. Revisit when the CPU benchmark is running and single-core is proven to be the bottleneck.
+
+## GPU-accelerated batch simulation
+
+Port the compiled eval to a GPU compute shader for massively parallel parameter/seed sweeps. Not about making one simulation faster — it's about running thousands of variants simultaneously.
+
+The WGPU batch-parallel backend already exists for the Python sim ([docs/gpu.md](docs/gpu.md)). Extending it to csim means generating WGSL from the same flat IR instead of C.
+
+### Design decisions
+
+- Target WGSL (WebGPU) for portability. The existing GPU backend already uses it. CUDA/Metal would be faster but platform-specific — WebGPU runs everywhere.
+- Same design, different seeds/params per instance. Different testbenches per instance adds too much complexity.
+
+### Plan
+
+1. New emitter `emit_wgsl(ir)` targeting WebGPU compute shaders
+2. Each workgroup instance gets its own `State` struct in shared memory
+3. Testbench parameters (seed, config) vary per instance
+4. Collect pass/fail + coverage per instance, reduce on readback
+5. Reuse existing `wgpu` infrastructure from the Python GPU backend
+
+### Priority
+
+Low — the Python GPU backend covers this use case today. Revisit when csim performance on single instances is fully optimized and batch throughput becomes the bottleneck.
