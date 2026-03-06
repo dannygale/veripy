@@ -574,6 +574,48 @@ def _inline_cont_assigns(ir: IRModule) -> IRModule:
     return ir
 
 
+# ── Dirty-flag helpers ───────────────────────────────────────────────
+
+
+def _build_dirty_indices(sig_w: dict) -> tuple:
+    """Assign a dirty bit index to every signal in sig_w.
+
+    Returns (dirty_idx, n_words) where dirty_idx maps
+    signal_name → (word_idx, bit_mask) and n_words is the number of
+    uint64_t words needed to hold all bits.
+    """
+    dirty_idx: dict = {}
+    idx = 0
+    for name in sorted(sig_w.keys()):
+        if not name.startswith('__'):   # skip internal markers like __mem_X
+            dirty_idx[name] = (idx // 64, 1 << (idx % 64))
+            idx += 1
+    return dirty_idx, max(1, (idx + 63) // 64)
+
+
+def _dirty_cond(sigs, dirty_idx) -> str:
+    """Return a C condition that is true when any signal in *sigs* is dirty."""
+    masks: dict = {}
+    for sig in sigs:
+        if sig in dirty_idx:
+            w, m = dirty_idx[sig]
+            masks[w] = masks.get(w, 0) | m
+    if not masks:
+        return '1'
+    return ' || '.join(f'(s->_dirty[{w}] & {m}ULL)' for w, m in sorted(masks.items()))
+
+
+def _dirty_set_lines(sigs, dirty_idx, indent: int = 1) -> list:
+    """Return C statements that set dirty bits for all signals in *sigs*."""
+    masks: dict = {}
+    for sig in sigs:
+        if sig in dirty_idx:
+            w, m = dirty_idx[sig]
+            masks[w] = masks.get(w, 0) | m
+    pad = '    ' * indent
+    return [f'{pad}s->_dirty[{w}] |= {m}ULL;' for w, m in sorted(masks.items())]
+
+
 # ── Top-level C emitter ──────────────────────────────────────────────
 
 
@@ -596,6 +638,25 @@ def emit_c(ir: IRModule) -> str:
     comb_deps = _build_comb_deps(ir)
     merge_groups = _find_merge_groups(ir)
     clock_aliases = _resolve_clock_aliases(ir)
+    dirty_idx, n_dirty_words = _build_dirty_indices(sig_w)
+
+    # Compute write sets for each comb block (for dirty output marking)
+    from .flatten import _stmt_writes_reads as _swr
+    comb_writes: list = []
+    for blk in ir.comb_blocks:
+        ws: set = set()
+        for stmt in blk.stmts:
+            _swr(stmt, ws, set())
+        comb_writes.append(ws)
+
+    # Compute write sets for each seq block (for dirty output marking)
+    seq_writes: list = []
+    for blk in ir.seq_blocks:
+        ws = set()
+        for stmt in blk.stmts:
+            _swr(stmt, ws, set())
+        seq_writes.append(ws & set(dirty_idx))
+
     # Which groups contain at least one block that reads a seq-written signal
     resettl_groups = [
         g for g in merge_groups
@@ -659,12 +720,17 @@ def emit_c(ir: IRModule) -> str:
         w = all_sigs.get(name, 32)
         lines.append(f'    {_ctype(w)} _nba_{name};')
 
+    # Dirty bits: one bit per signal, packed into uint64_t words
+    lines.append(f'    uint64_t _dirty[{n_dirty_words}];')
+
     lines.append('} State;')
     lines.append('')
 
     # ── create / destroy ─────────────────────────────────────────
     lines.append('void* veripy_create(void) {')
-    lines.append('    return calloc(1, sizeof(State));')
+    lines.append('    State* s = calloc(1, sizeof(State));')
+    lines.append('    memset(s->_dirty, 0xFF, sizeof(s->_dirty));  /* first eval runs all */')
+    lines.append('    return s;')
     lines.append('}')
     lines.append('')
     lines.append('void veripy_destroy(void* p) {')
@@ -725,20 +791,47 @@ def emit_c(ir: IRModule) -> str:
     lines.append('void veripy_eval(void* p) {')
     lines.append('    State* s = (State*)p;')
 
-    # 1. Settle combinational logic
-    if has_cont:
-        lines.append('    _cont_assigns(s);')
-    for gi, group in enumerate(merge_groups):
+    def _emit_comb_group(gi, group, mark_outputs):
+        """Emit dirty-guarded comb group dispatch."""
         all_stmts = []
         for idx in group:
             all_stmts.extend(ir.comb_blocks[idx].stmts)
-        if len(group) == 1 and _count_stmts(all_stmts) == 1:
-            # Inline trivial single-statement block directly
-            body = []
-            _emit_stmt(all_stmts[0], body, sig_w, pack_map=pack_map)
-            lines.extend('    ' + ln.lstrip() for ln in body)
+        # Compute group read/write sets
+        group_reads: set = set()
+        group_writes: set = set()
+        for idx in group:
+            group_reads |= comb_deps[idx]
+            group_writes |= comb_writes[idx]
+        cond = _dirty_cond(group_reads, dirty_idx)
+        out_lines = _dirty_set_lines(group_writes, dirty_idx, indent=2) if mark_outputs else []
+        trivial = len(group) == 1 and _count_stmts(all_stmts) == 1
+        if cond == '1':
+            if trivial:
+                body = []
+                _emit_stmt(all_stmts[0], body, sig_w, pack_map=pack_map)
+                lines.extend('    ' + ln.lstrip() for ln in body)
+            else:
+                lines.append(f'    _comb_{gi}(s);')
+            lines.extend(out_lines)
         else:
-            lines.append(f'    _comb_{gi}(s);')
+            lines.append(f'    if ({cond}) {{')
+            if trivial:
+                body = []
+                _emit_stmt(all_stmts[0], body, sig_w, pack_map=pack_map)
+                lines.extend('        ' + ln.lstrip() for ln in body)
+            else:
+                lines.append(f'        _comb_{gi}(s);')
+            lines.extend(out_lines)
+            lines.append('    }')
+
+    # 1. Settle combinational logic (dirty-driven; mark outputs dirty for propagation)
+    if has_cont:
+        lines.append('    _cont_assigns(s);')
+    for gi, group in enumerate(merge_groups):
+        _emit_comb_group(gi, group, mark_outputs=True)
+
+    # Clear dirty bits after initial comb settle
+    lines.append(f'    memset(s->_dirty, 0, {n_dirty_words * 8});')
 
     # 2. Edge detection + sequential block calls (grouped by physical clock)
     edge_blocks = {}
@@ -768,27 +861,27 @@ def emit_c(ir: IRModule) -> str:
                 lines.append(f'        {_pack_write(name, f"s->_nba_{name}", pack_map)}')
             else:
                 lines.append(f'        s->{name} = s->_nba_{name};')
+        # Mark seq outputs dirty so re-settle comb blocks run
+        group_seq_writes: set = set()
+        for idx in block_ids:
+            group_seq_writes |= seq_writes[idx]
+        lines.extend(_dirty_set_lines(group_seq_writes, dirty_idx, indent=2))
         lines.append('    }')
 
-    # 3. Re-settle combinational logic (only groups that read seq-written signals)
+    # 3. Re-settle combinational logic (dirty-driven; no output marking needed)
     if has_cont:
         lines.append('    _cont_assigns(s);')
     for group in resettl_groups:
         gi = merge_groups.index(group)
-        all_stmts = []
-        for idx in group:
-            all_stmts.extend(ir.comb_blocks[idx].stmts)
-        if len(group) == 1 and _count_stmts(all_stmts) == 1:
-            body = []
-            _emit_stmt(all_stmts[0], body, sig_w, pack_map=pack_map)
-            lines.extend('    ' + ln.lstrip() for ln in body)
-        else:
-            lines.append(f'    _comb_{gi}(s);')
+        _emit_comb_group(gi, group, mark_outputs=False)
 
     # 4. Update previous values
     for clk in sorted(clocks):
         clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
         lines.append(f'    s->_prev_{clk} = {clk_expr};')
+
+    # Clear dirty bits at end of eval
+    lines.append(f'    memset(s->_dirty, 0, {n_dirty_words * 8});')
 
     lines.append('}')
     lines.append('')
@@ -799,18 +892,27 @@ def emit_c(ir: IRModule) -> str:
         if p.name in pack_map:
             word, bit = pack_map[p.name]
             if p.direction == 'input':
+                dirty_stmt = ''
+                if p.name in dirty_idx:
+                    dw, dm = dirty_idx[p.name]
+                    dirty_stmt = f' s->_dirty[{dw}] |= {dm}ULL;'
                 lines.append(
                     f'void veripy_set_{p.name}(void* p, uint64_t v) '
                     f'{{ State* s = (State*)p; '
                     f's->{word} = (s->{word} & ~(1ULL << {bit}ULL)) '
-                    f'| ((v & 1ULL) << {bit}ULL); }}')
+                    f'| ((v & 1ULL) << {bit}ULL);{dirty_stmt} }}')
             lines.append(
                 f'uint64_t veripy_get_{p.name}(void* p) '
                 f'{{ return (((State*)p)->{word} >> {bit}ULL) & 1ULL; }}')
         else:
             if p.direction == 'input':
+                dirty_stmt = ''
+                if p.name in dirty_idx:
+                    dw, dm = dirty_idx[p.name]
+                    dirty_stmt = f' s->_dirty[{dw}] |= {dm}ULL;'
                 lines.append(f'void veripy_set_{p.name}(void* p, uint64_t v) '
-                             f'{{ ((State*)p)->{p.name} = ({_ctype(w)})(v & {_mask(w)}); }}')
+                             f'{{ State* s = (State*)p; '
+                             f's->{p.name} = ({_ctype(w)})(v & {_mask(w)});{dirty_stmt} }}')
             lines.append(f'uint64_t veripy_get_{p.name}(void* p) '
                          f'{{ return ((State*)p)->{p.name}; }}')
         lines.append('')
