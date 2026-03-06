@@ -29,6 +29,18 @@ def flatten_ir(parent: IRModule, registry: dict[str, IRModule],
     out.instances = []
     params = params or out.params
 
+    def _resolve_dim(val, params):
+        if isinstance(val, int):
+            return val
+        if isinstance(val, str):
+            if val in params:
+                return params[val]
+            try:
+                return int(eval(val, {"__builtins__": {}}, params))
+            except Exception:
+                return val
+        return val
+
     for inst in parent.instances:
         child = registry.get(inst.mod_type)
         if child is None:
@@ -57,26 +69,23 @@ def flatten_ir(parent: IRModule, registry: dict[str, IRModule],
             rename[w.name] = prefix + w.name
         for m in child.mems:
             rename[m.name] = prefix + m.name
+        for blk in child.comb_blocks:
+            for name in blk.locals:
+                if name not in rename:
+                    rename[name] = prefix + name
+        for blk in child.seq_blocks:
+            for name in blk.locals:
+                if name not in rename:
+                    rename[name] = prefix + name
 
         # Add child internal signals (non-port) to parent
         child_port_names = {p.name for p in child.ports}
         for r in child.regs:
             if r.name not in child_port_names:
-                out.regs.append(RegDecl(prefix + r.name, r.width))
+                out.regs.append(RegDecl(prefix + r.name, _resolve_dim(r.width, child_params)))
         for w in child.wires:
             if w.name not in child_port_names:
-                out.wires.append(WireDecl(prefix + w.name, w.width))
-        def _resolve_dim(val, params):
-            if isinstance(val, int):
-                return val
-            if isinstance(val, str):
-                if val in params:
-                    return params[val]
-                try:
-                    return int(eval(val, {"__builtins__": {}}, params))
-                except Exception:
-                    return val
-            return val
+                out.wires.append(WireDecl(prefix + w.name, _resolve_dim(w.width, child_params)))
 
         for m in child.mems:
             depth = _resolve_dim(m.depth, child_params)
@@ -151,6 +160,12 @@ def flatten_ir(parent: IRModule, registry: dict[str, IRModule],
             edges=blk.edges,
             stmts=[_rename_stmt(s, identity, params) for s in blk.stmts],
             locals=blk.locals)
+
+    # Resolve parametric widths on parent's own signals and ports
+    _resolve_dim_p = lambda v: _resolve_dim(v, params) if isinstance(v, str) else v
+    out.ports = [Port(p.name, p.direction, _resolve_dim_p(p.width)) for p in out.ports]
+    out.regs = [RegDecl(r.name, _resolve_dim_p(r.width)) for r in out.regs]
+    out.wires = [WireDecl(w.name, _resolve_dim_p(w.width)) for w in out.wires]
 
     # Post-pass: reclassify registers that are only driven by comb blocks.
     # Pipeline stage wiring can create submodule port signals as regs when
