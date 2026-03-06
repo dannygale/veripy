@@ -487,7 +487,8 @@ class _Lowerer:
                     w = self._infer_rhs_width(node.value)
                     if w is not None:
                         if isinstance(w, int):
-                            regs[name] = max(regs.get(name, 0), w)
+                            existing = regs.get(name, 0)
+                            regs[name] = max(existing, w) if isinstance(existing, int) else w
                         else:
                             regs.setdefault(name, w)  # param name string
         return regs

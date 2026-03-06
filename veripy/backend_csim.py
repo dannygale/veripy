@@ -504,11 +504,13 @@ def _inline_cont_assigns(ir: IRModule) -> IRModule:
 
     candidates = {n: e for n, e in candidates.items() if write_count.get(n, 0) == 1}
 
-    # Drop candidates read by seq blocks
+    # Drop candidates read by seq blocks (stmts or edges)
     seq_reads: set = set()
     for blk in ir.seq_blocks:
         for stmt in blk.stmts:
             _stmt_writes_reads(stmt, set(), seq_reads)
+        for _, sig in blk.edges:
+            seq_reads.add(sig)  # clock signals must stay in State struct
     candidates = {n: e for n, e in candidates.items() if n not in seq_reads}
 
     if not candidates:
