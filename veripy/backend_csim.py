@@ -476,6 +476,104 @@ def _resolve_clock_aliases(ir: IRModule) -> dict:
     return alias_map
 
 
+# ── Cont-assign inlining ─────────────────────────────────────────────
+
+
+def _inline_cont_assigns(ir: IRModule) -> IRModule:
+    """Inline trivial cont-assign wires into dependent comb blocks.
+
+    After topo_sort_comb, cont assigns become single-statement CombBlocks
+    writing to wires.  If a wire is written by exactly one such block and
+    is not read by any seq block, substitute its expression at every read
+    site and remove the intermediate wire + writing block.
+    """
+    from copy import deepcopy
+    from .flatten import _stmt_writes_reads
+
+    wire_names = {w.name for w in ir.wires}
+
+    # Collect candidates: wire written by exactly one single-stmt CombBlock
+    write_count: dict = {}
+    candidates: dict = {}
+    for blk in ir.comb_blocks:
+        if len(blk.stmts) == 1 and isinstance(blk.stmts[0], Assign):
+            name = blk.stmts[0].target
+            write_count[name] = write_count.get(name, 0) + 1
+            if name in wire_names:
+                candidates[name] = blk.stmts[0].value
+
+    candidates = {n: e for n, e in candidates.items() if write_count.get(n, 0) == 1}
+
+    # Drop candidates read by seq blocks
+    seq_reads: set = set()
+    for blk in ir.seq_blocks:
+        for stmt in blk.stmts:
+            _stmt_writes_reads(stmt, set(), seq_reads)
+    candidates = {n: e for n, e in candidates.items() if n not in seq_reads}
+
+    if not candidates:
+        return ir
+
+    def _se(expr):
+        """Recursively substitute inlineable signals in an expression."""
+        if isinstance(expr, Sig):
+            if expr.name in candidates:
+                return _se(candidates[expr.name])
+            return expr
+        if isinstance(expr, BinOp):
+            return BinOp(expr.op, _se(expr.left), _se(expr.right))
+        if isinstance(expr, UnaryOp):
+            return UnaryOp(expr.op, _se(expr.operand))
+        if isinstance(expr, Compare):
+            return Compare(expr.op, _se(expr.left), _se(expr.right))
+        if isinstance(expr, BoolOp):
+            return BoolOp(expr.op, [_se(v) for v in expr.values])
+        if isinstance(expr, Mux):
+            return Mux(_se(expr.sel), _se(expr.true_val), _se(expr.false_val))
+        if isinstance(expr, Slice):
+            return Slice(_se(expr.signal),
+                         _se(expr.hi) if expr.hi is not None else None,
+                         _se(expr.lo))
+        if isinstance(expr, Index):
+            return Index(_se(expr.signal), _se(expr.idx))
+        if isinstance(expr, Concat):
+            return Concat([_se(p) for p in expr.parts])
+        return expr
+
+    def _ss(stmts):
+        """Substitute inlineable signals in a list of statements."""
+        out = []
+        for stmt in stmts:
+            if isinstance(stmt, Assign):
+                out.append(Assign(stmt.target, _se(stmt.value), stmt.blocking))
+            elif isinstance(stmt, SliceAssign):
+                out.append(SliceAssign(stmt.target,
+                    _se(stmt.hi) if stmt.hi is not None else None,
+                    _se(stmt.lo), _se(stmt.value), stmt.blocking))
+            elif isinstance(stmt, If):
+                out.append(If(_se(stmt.cond), _ss(stmt.then_body), _ss(stmt.else_body)))
+            elif isinstance(stmt, Case):
+                out.append(Case(_se(stmt.sel),
+                    [(v, _ss(b)) for v, b in stmt.cases],
+                    _ss(stmt.default) if stmt.default else []))
+            elif isinstance(stmt, MemWrite):
+                out.append(MemWrite(stmt.mem, _se(stmt.addr), _se(stmt.data), stmt.blocking))
+            else:
+                out.append(stmt)
+        return out
+
+    ir = deepcopy(ir)
+    ir.wires = [w for w in ir.wires if w.name not in candidates]
+    new_comb = []
+    for blk in ir.comb_blocks:
+        if (len(blk.stmts) == 1 and isinstance(blk.stmts[0], Assign)
+                and blk.stmts[0].target in candidates):
+            continue
+        new_comb.append(CombBlock(_ss(blk.stmts), blk.locals))
+    ir.comb_blocks = new_comb
+    return ir
+
+
 # ── Top-level C emitter ──────────────────────────────────────────────
 
 
@@ -774,6 +872,7 @@ class CSimModel:
             raise ValueError('IR must be flattened before CSimModel '
                              '(call flatten_ir first)')
         ir = topo_sort_comb(ir)
+        ir = _inline_cont_assigns(ir)
 
         self._signals = {}
         for p in ir.ports:
@@ -1102,6 +1201,7 @@ def compile_bench(module, tb_ir, module_name=None):
     top_ir = lower_module(module, module_name)
     flat_ir = flatten_ir(top_ir, registry) if top_ir.instances else top_ir
     flat_ir = topo_sort_comb(flat_ir)
+    flat_ir = _inline_cont_assigns(flat_ir)
 
     model_c = emit_c(flat_ir)
 
