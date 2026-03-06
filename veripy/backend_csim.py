@@ -60,29 +60,50 @@ def _collect_submodule_registry(module):
         _key_cache[ck] = key
         return key
 
-    def _collect(mod):
-        key = _make_key(mod)
+    def _collect(mod, parent_params=None):
+        # Resolve string param references against parent
+        params = getattr(mod, '_params', {})
+        resolved = {}
+        for k, v in params.items():
+            if isinstance(v, (int, float)):
+                resolved[k] = v
+            elif isinstance(v, str) and parent_params and v in parent_params:
+                resolved[k] = parent_params[v]
+        key = _to_snake(type(mod).__name__)
+        ck = _cache_key(key, resolved)
+        if ck in _key_cache:
+            return
+        if ck[1]:
+            key = key + '__' + '_'.join(f'{k}{v}' for k, v in ck[1])
+        _key_cache[ck] = key
         if key in registry:
             return
         factory = getattr(type(mod), '_veripy_factory', None)
-        params = getattr(mod, '_params', {})
-        int_params = {k: v for k, v in params.items()
-                      if isinstance(v, (int, float))}
-        fresh = (factory(**int_params) if factory and int_params
+        fresh = (factory(**resolved) if factory and resolved
                  else factory() if factory else type(mod)())
+        fresh_params = getattr(fresh, '_params', {})
         for _sn, sub in fresh._submodules().items():
-            _collect(sub)
+            _collect(sub, parent_params=fresh_params)
         registry[key] = lower_module(fresh, key)
 
+    top_params = getattr(module, '_params', {})
     for attr in dir(module):
         v = getattr(module, attr)
         if isinstance(v, _Module) and v is not module:
-            _collect(v)
+            _collect(v, parent_params=top_params)
 
     def _patch_inst_types(ir):
         """Update inst.mod_type in *ir* to match registry keys."""
+        parent_params = ir.params
         for inst in ir.instances:
-            ck = _cache_key(inst.mod_type, inst.params)
+            # Resolve string param refs so the cache key matches
+            resolved = {}
+            for k, v in inst.params.items():
+                if isinstance(v, (int, float)):
+                    resolved[k] = v
+                elif isinstance(v, str) and v in parent_params:
+                    resolved[k] = parent_params[v]
+            ck = _cache_key(inst.mod_type, resolved)
             new_key = _key_cache.get(ck)
             if new_key and new_key != inst.mod_type:
                 inst.mod_type = new_key
@@ -1091,28 +1112,317 @@ def emit_c(ir: IRModule) -> str:
 
     return '\n'.join(lines) + '\n'
 
+# ── Hierarchical (per-module) C emission ─────────────────────────────
+
+def _c_ident(mod_type: str) -> str:
+    """Sanitise a registry key into a valid C identifier."""
+    return mod_type.replace('-', '_')
+
+
+def _resolve_params_ir(ir: IRModule):
+    """Resolve remaining Param nodes in an IR using ir.params.
+
+    Mutates *ir* in place — replaces Param → Const where possible.
+    """
+    from .flatten import _rename_expr, _rename_stmt
+    identity = {}
+    params = ir.params
+    if not params:
+        return
+    for i, a in enumerate(ir.assigns):
+        ir.assigns[i] = ContAssign(a.target, _rename_expr(a.value, identity, params))
+    for i, blk in enumerate(ir.comb_blocks):
+        ir.comb_blocks[i] = CombBlock(
+            stmts=[_rename_stmt(s, identity, params) for s in blk.stmts],
+            locals=blk.locals)
+    for i, blk in enumerate(ir.seq_blocks):
+        ir.seq_blocks[i] = SeqBlock(
+            edges=blk.edges,
+            stmts=[_rename_stmt(s, identity, params) for s in blk.stmts],
+            locals=blk.locals)
+
+
+def emit_c_hier(top_ir: IRModule, registry: dict) -> str:
+    """Emit C source for hierarchical (per-module) compilation.
+
+    Each module type gets its own ``State_<type>`` struct and
+    ``_comb_<type>`` / ``_seq_<type>`` functions.  Comb blocks are
+    emitted in source order within each module — no global topo sort,
+    no block explosion.  Port wiring is explicit copy between parent
+    and child structs.
+
+    The top-level ``veripy_eval()`` runs a settle loop (comb twice),
+    then seq, then re-settle (comb twice).
+    """
+    from copy import deepcopy
+    from .flatten import _stmt_writes_reads
+
+    # Deep-copy so we can mutate (resolve params) without affecting caller
+    top_ir = deepcopy(top_ir)
+    registry = {k: deepcopy(v) for k, v in registry.items()}
+
+    # Resolve any remaining Param nodes
+    _resolve_params_ir(top_ir)
+    for ir in registry.values():
+        _resolve_params_ir(ir)
+
+    # Determine emission order: leaves first, top last
+    order = []
+    visited = set()
+
+    def _visit(mod_type):
+        if mod_type in visited:
+            return
+        visited.add(mod_type)
+        ir = top_ir if mod_type == top_ir.name else registry[mod_type]
+        for inst in ir.instances:
+            _visit(inst.mod_type)
+        order.append(mod_type)
+
+    _visit(top_ir.name)
+
+    lines = ['#include <stdint.h>', '#include <stdlib.h>',
+             '#include <string.h>', '']
+
+    # Forward-declare all State types
+    for mod_type in order:
+        cid = _c_ident(mod_type)
+        lines.append(f'typedef struct State_{cid} State_{cid};')
+    lines.append('')
+
+    # Emit each module type (struct + comb + seq)
+    emitted = set()
+    for mod_type in order:
+        if mod_type in emitted:
+            continue
+        emitted.add(mod_type)
+        ir = top_ir if mod_type == top_ir.name else registry[mod_type]
+        _emit_hier_module(ir, mod_type, registry, lines)
+
+    # Top-level eval
+    _emit_hier_eval(top_ir, lines)
+
+    # create / destroy
+    top_cid = _c_ident(top_ir.name)
+    lines += [
+        f'void* veripy_create(void) {{',
+        f'    State_{top_cid}* s = calloc(1, sizeof(State_{top_cid}));',
+        f'    return s;',
+        f'}}', '',
+        f'void veripy_destroy(void* p) {{ free(p); }}', '',
+    ]
+
+    # Per-port set/get API (top-level ports only)
+    for p in top_ir.ports:
+        w = _resolve_width(p.width, top_ir.params)
+        if p.direction == 'input':
+            lines.append(
+                f'void veripy_set_{p.name}(void* p, uint64_t v) '
+                f'{{ (({_state_type(top_ir)}*)p)->{p.name} = '
+                f'({_ctype(w)})(v & {_mask(w)}); }}')
+        lines.append(
+            f'uint64_t veripy_get_{p.name}(void* p) '
+            f'{{ return (({_state_type(top_ir)}*)p)->{p.name}; }}')
+        lines.append('')
+
+    return '\n'.join(lines) + '\n'
+
+
+def _state_type(ir):
+    return f'State_{_c_ident(ir.name)}'
+
+
+def _emit_hier_module(ir, mod_type, registry, lines):
+    """Emit State struct + _comb + _seq for one module type."""
+    cid = _c_ident(mod_type)
+    sig_w = _build_sig_widths(ir)
+    nba_sigs, nba_per_seq = _collect_nba_signals(ir)
+
+    # ── State struct ─────────────────────────────────────────────
+    lines.append(f'struct State_{cid} {{')
+
+    # Ports, wires, regs, locals
+    all_sigs = {}
+    for p in ir.ports:
+        all_sigs[p.name] = _resolve_width(p.width, ir.params)
+    for d in ir.wires:
+        all_sigs[d.name] = _resolve_width(d.width, ir.params)
+    for d in ir.regs:
+        all_sigs[d.name] = _resolve_width(d.width, ir.params)
+    for blk in ir.comb_blocks:
+        for name, width in blk.locals.items():
+            all_sigs.setdefault(name, _resolve_width(width, ir.params))
+    for blk in ir.seq_blocks:
+        for name, width in blk.locals.items():
+            all_sigs.setdefault(name, _resolve_width(width, ir.params))
+
+    for name, w in all_sigs.items():
+        lines.append(f'    {_ctype(w)} {name};')
+
+    # Memory arrays
+    for m in ir.mems:
+        if isinstance(m, MemDecl):
+            w = _resolve_width(m.width, ir.params)
+            d = _resolve_width(m.depth, ir.params) if isinstance(m.depth, str) else m.depth
+            lines.append(f'    {_ctype(w)} {m.name}[{d}];')
+
+    # Sub-module instances
+    for inst in ir.instances:
+        child_cid = _c_ident(inst.mod_type)
+        lines.append(f'    State_{child_cid} {inst.inst_name};')
+
+    # Edge detection prev values
+    clocks = set()
+    for blk in ir.seq_blocks:
+        for edge_kind, sig_name in blk.edges:
+            clocks.add(sig_name)
+    for clk in sorted(clocks):
+        lines.append(f'    uint8_t _prev_{clk};')
+
+    # NBA temporaries
+    for name in sorted(nba_sigs):
+        w = all_sigs.get(name, 32)
+        lines.append(f'    {_ctype(w)} _nba_{name};')
+
+    lines.append(f'}};')
+    lines.append('')
+
+    # ── _comb function ───────────────────────────────────────────
+    lines.append(f'static void _comb_{cid}(State_{cid}* s) {{')
+
+    has_instances = bool(ir.instances)
+
+    # Helper: emit continuous assigns + own comb blocks
+    def _emit_local_comb():
+        for a in ir.assigns:
+            w = sig_w.get(a.target, 0)
+            val = _expr(a.value, sig_w)
+            if w and w < 64:
+                lines.append(f'    s->{a.target} = ({_ctype(w)})({val} & {_mask(w)});')
+            else:
+                lines.append(f'    s->{a.target} = {val};')
+        for blk in ir.comb_blocks:
+            body = []
+            _emit_stmts_batched(blk.stmts, body, sig_w)
+            lines.extend(body)
+
+    # Helper: emit instance wiring + child comb eval
+    def _emit_instance_eval():
+        for inst in ir.instances:
+            child_ir = registry.get(inst.mod_type)
+            if not child_ir:
+                continue
+            child_dirs = {p.name: p.direction for p in child_ir.ports}
+            child_cid = _c_ident(inst.mod_type)
+            for pname, wname in inst.ports:
+                if child_dirs.get(pname) == 'input':
+                    lines.append(f'    s->{inst.inst_name}.{pname} = s->{wname};')
+            lines.append(f'    _comb_{child_cid}(&s->{inst.inst_name});')
+            for pname, wname in inst.ports:
+                if child_dirs.get(pname) == 'output':
+                    lines.append(f'    s->{wname} = s->{inst.inst_name}.{pname};')
+
+    if has_instances:
+        # Settle loop: assigns → instances → assigns → instances
+        # Two iterations handle one level of feedback through wires.
+        lines.append('    for (int _settle = 0; _settle < 2; _settle++) {')
+        _emit_local_comb()
+        _emit_instance_eval()
+        lines.append('    }')
+    else:
+        _emit_local_comb()
+
+    lines.append('}')
+    lines.append('')
+
+    # ── _seq function ────────────────────────────────────────────
+    lines.append(f'static void _seq_{cid}(State_{cid}* s) {{')
+
+    # Group seq blocks by edge
+    edge_blocks = {}
+    for i, blk in enumerate(ir.seq_blocks):
+        for edge_kind, sig_name in blk.edges:
+            edge_blocks.setdefault((edge_kind, sig_name), []).append(i)
+
+    for (edge_kind, clk), block_ids in sorted(edge_blocks.items()):
+        if edge_kind == 'posedge':
+            cond = f's->{clk} && !s->_prev_{clk}'
+        else:
+            cond = f'!s->{clk} && s->_prev_{clk}'
+        lines.append(f'    if ({cond}) {{')
+
+        # NBA snapshot
+        group_nba = set()
+        for idx in block_ids:
+            group_nba |= nba_per_seq[idx]
+        for name in sorted(group_nba):
+            lines.append(f'        s->_nba_{name} = s->{name};')
+
+        # Seq blocks
+        for idx in block_ids:
+            body = []
+            _emit_stmts_batched(ir.seq_blocks[idx].stmts, body, sig_w,
+                                nba_sigs=nba_sigs)
+            lines.extend('    ' + ln for ln in body)
+
+        # NBA commit
+        for name in sorted(group_nba):
+            lines.append(f'        s->{name} = s->_nba_{name};')
+
+        lines.append('    }')
+
+    # Sub-module seq (clock already wired by _comb)
+    for inst in ir.instances:
+        child_ir = registry.get(inst.mod_type)
+        if not child_ir:
+            continue
+        if child_ir.seq_blocks:
+            child_cid = _c_ident(inst.mod_type)
+            lines.append(f'    _seq_{child_cid}(&s->{inst.inst_name});')
+
+    # Update prev values
+    for clk in sorted(clocks):
+        lines.append(f'    s->_prev_{clk} = s->{clk};')
+
+    lines.append('}')
+    lines.append('')
+
+
+def _emit_hier_eval(top_ir, lines):
+    """Emit veripy_eval() for the top-level module."""
+    cid = _c_ident(top_ir.name)
+    lines += [
+        'void veripy_eval(void* p) {',
+        f'    State_{cid}* s = (State_{cid}*)p;',
+        f'    _comb_{cid}(s);',
+        f'    _comb_{cid}(s);',
+        f'    _seq_{cid}(s);',
+        f'    _comb_{cid}(s);',
+        f'    _comb_{cid}(s);',
+        '}', '',
+    ]
+
+
 # ── Compile + load ───────────────────────────────────────────────────
 
 def compile_module(module, module_name=None):
     """Compile a VeriPy Module to a CSimModel.
 
-    Handles lowering, sub-module collection, flattening, and compilation.
+    Uses hierarchical per-module compilation when the design has
+    sub-module instances, flat compilation otherwise.
     """
-    from .signal import Signal, Interface
     from .lower import lower_module
-    from .flatten import flatten_ir
-    from .emit_verilog import _to_snake
 
     if module_name is None:
         module_name = type(module).__name__.lower()
 
     registry, patch_fn = _collect_submodule_registry(module)
-
     top_ir = lower_module(module, module_name)
     patch_fn(top_ir)
-    flat_ir = flatten_ir(top_ir, registry) if top_ir.instances else top_ir
 
-    return CSimModel(flat_ir)
+    if top_ir.instances:
+        return CSimModel(top_ir, registry=registry)
+    return CSimModel(top_ir)
 
 
 class CSimModel:
@@ -1121,25 +1431,28 @@ class CSimModel:
     Same API as VerilatorModel: set/get/eval/step/close.
     """
 
-    def __init__(self, ir: IRModule, build_dir=None):
-        from .flatten import topo_sort_comb
-
+    def __init__(self, ir: IRModule, build_dir=None, registry=None):
         self._ptr = None
         self._tmpdir = None
         self._lib = None
 
-        if ir.instances:
-            raise ValueError('IR must be flattened before CSimModel '
-                             '(call flatten_ir first)')
-        ir = topo_sort_comb(ir)
-        ir = _inline_cont_assigns(ir)
+        if registry is not None:
+            # Hierarchical path — per-module compilation
+            c_src = emit_c_hier(ir, registry)
+        else:
+            # Flat path — legacy single-module compilation
+            from .flatten import topo_sort_comb
+            if ir.instances:
+                raise ValueError('IR must be flattened before CSimModel '
+                                 '(call flatten_ir first)')
+            ir = topo_sort_comb(ir)
+            ir = _inline_cont_assigns(ir)
+            c_src = emit_c(ir)
 
         self._signals = {}
         for p in ir.ports:
             w = _resolve_width(p.width, ir.params)
             self._signals[p.name] = (p.direction, w)
-
-        c_src = emit_c(ir)
 
         own_tmpdir = build_dir is None
         if own_tmpdir:
