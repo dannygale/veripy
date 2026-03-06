@@ -4,7 +4,7 @@ import unittest
 from veripy.ir import (
     Const, Sig, BinOp, UnaryOp, Compare, Mux, Slice, Index, Concat,
     Assign, SliceAssign, If, Case, MemWrite,
-    ContAssign, CombBlock, SeqBlock,
+    ContAssign, CombBlock, SeqBlock, Instance,
     Port, WireDecl, RegDecl, MemDecl, IRModule,
 )
 from veripy.backend_csim import emit_c, CSimModel, _count_stmts, _INLINE_THRESHOLD, _build_pack_map, _find_merge_groups
@@ -553,6 +553,113 @@ class TestSignalPacking(unittest.TestCase):
             self.assertEqual(m.get('out'), 0)
 
 
+class TestCombResettle(unittest.TestCase):
+    """Tests for comb re-settle after seq blocks commit NBA values.
+
+    When a seq block commits a new value via NBA, all comb blocks that
+    transitively depend on that signal must re-evaluate — including blocks
+    that read the *output* of another comb block (not the NBA signal directly).
+    Dirty flags must propagate through the comb chain during re-settle.
+
+    Intermediate signals are declared as output ports to prevent merge-group
+    folding, which would hide the bug by combining blocks into one function.
+    """
+
+    def test_comb_chain_two_deep(self):
+        """seq → comb A (mid) → comb B (out): output must update same cycle."""
+        ir = IRModule(name='chain2',
+            ports=[Port('clock', 'input', 1), Port('mid', 'output', 8),
+                   Port('out', 'output', 8)],
+            regs=[RegDecl('r', 8)],
+            comb_blocks=[
+                CombBlock(stmts=[Assign('mid', BinOp('+', Sig('r'), Const(1)), False)]),
+                CombBlock(stmts=[Assign('out', BinOp('+', Sig('mid'), Const(1)), False)]),
+            ],
+            seq_blocks=[SeqBlock(
+                edges=[('posedge', 'clock')],
+                stmts=[Assign('r', BinOp('+', Sig('r'), Const(10)), False)],
+                locals={})])
+        with CSimModel(ir) as m:
+            m.eval()
+            self.assertEqual(m.get('out'), 2)   # r=0 → mid=1 → out=2
+            m.step('clock')
+            m.eval()
+            self.assertEqual(m.get('out'), 12)  # r=10 → mid=11 → out=12
+
+    def test_comb_chain_three_deep(self):
+        """seq → comb A → comb B → comb C: three-level transitive propagation."""
+        ir = IRModule(name='chain3',
+            ports=[Port('clock', 'input', 1), Port('a', 'output', 8),
+                   Port('b', 'output', 8), Port('out', 'output', 8)],
+            regs=[RegDecl('r', 8)],
+            comb_blocks=[
+                CombBlock(stmts=[Assign('a', BinOp('+', Sig('r'), Const(1)), False)]),
+                CombBlock(stmts=[Assign('b', BinOp('+', Sig('a'), Const(1)), False)]),
+                CombBlock(stmts=[Assign('out', BinOp('+', Sig('b'), Const(1)), False)]),
+            ],
+            seq_blocks=[SeqBlock(
+                edges=[('posedge', 'clock')],
+                stmts=[Assign('r', BinOp('+', Sig('r'), Const(5)), False)],
+                locals={})])
+        with CSimModel(ir) as m:
+            m.eval()
+            self.assertEqual(m.get('out'), 3)  # r=0 → a=1 → b=2 → out=3
+            m.step('clock')
+            m.eval()
+            self.assertEqual(m.get('out'), 8)  # r=5 → a=6 → b=7 → out=8
+
+    def test_comb_chain_1bit_packed(self):
+        """1-bit packed signals: seq → fwd → gated → out.
+
+        This is the pattern that broke the CPU: seq writes a 1-bit flag,
+        comb A forwards it, comb B gates it — all packed signals whose
+        intermediate values are output ports (preventing merge).
+        """
+        ir = IRModule(name='chain_packed',
+            ports=[Port('clock', 'input', 1), Port('enable', 'input', 1),
+                   Port('fwd', 'output', 1), Port('gated', 'output', 1),
+                   Port('out', 'output', 1)],
+            regs=[RegDecl('req', 1)],
+            comb_blocks=[
+                CombBlock(stmts=[Assign('fwd', Sig('req'), False)]),
+                CombBlock(stmts=[Assign('gated', BinOp('&', Sig('fwd'), Sig('enable')), False)]),
+                CombBlock(stmts=[Assign('out', Sig('gated'), False)]),
+            ],
+            seq_blocks=[SeqBlock(
+                edges=[('posedge', 'clock')],
+                stmts=[Assign('req', Const(1), False)],
+                locals={})])
+        with CSimModel(ir) as m:
+            m.set('enable', 1)
+            m.eval()
+            self.assertEqual(m.get('out'), 0)  # req=0
+            m.step('clock')
+            m.eval()
+            self.assertEqual(m.get('out'), 1)  # req=1 → fwd=1 → gated=1 → out=1
+
+    def test_comb_chain_mixed_widths(self):
+        """Chain with mixed 1-bit (packed) and wide signals."""
+        ir = IRModule(name='chain_mixed',
+            ports=[Port('clock', 'input', 1), Port('fwd', 'output', 1),
+                   Port('val', 'output', 8), Port('out', 'output', 8)],
+            regs=[RegDecl('flag', 1)],
+            comb_blocks=[
+                CombBlock(stmts=[Assign('fwd', Sig('flag'), False)]),
+                CombBlock(stmts=[Assign('val', Mux(Sig('fwd'), Const(42), Const(0)), False)]),
+                CombBlock(stmts=[Assign('out', Sig('val'), False)]),
+            ],
+            seq_blocks=[SeqBlock(
+                edges=[('posedge', 'clock')],
+                stmts=[Assign('flag', Const(1), False)],
+                locals={})])
+        with CSimModel(ir) as m:
+            m.eval()
+            self.assertEqual(m.get('out'), 0)
+            m.step('clock')
+            m.eval()
+            self.assertEqual(m.get('out'), 42)
+
+
 class TestNBA(unittest.TestCase):
     """Tests for non-blocking assignment (NBA) batching in seq blocks."""
 
@@ -622,3 +729,749 @@ class TestNBA(unittest.TestCase):
             m.step('clock')
             m.eval()
             self.assertEqual(m.get('out'), 2)
+
+
+# ── Flatten + CSimModel integration helpers ──────────────────────────
+
+def _flatten_and_model(parent, registry):
+    """Flatten a hierarchical IR and return a CSimModel."""
+    from veripy.flatten import flatten_ir
+    flat = flatten_ir(parent, registry)
+    return CSimModel(flat)
+
+
+class TestMultiInstanceLocals(unittest.TestCase):
+    """Block-local variables must not alias across instances of the same module.
+
+    When the same submodule is instantiated multiple times, comb/seq block
+    locals (e.g. 'tmp') must be prefixed with the instance name so that
+    each instance gets its own storage.
+    """
+
+    def _adder_child(self):
+        """Submodule: out = x + y, using a comb local 'tmp'."""
+        return IRModule(name='adder',
+            ports=[Port('x', 'input', 8), Port('y', 'input', 8),
+                   Port('sum', 'output', 8)],
+            comb_blocks=[CombBlock(
+                stmts=[Assign('tmp', BinOp('+', Sig('x'), Sig('y'))),
+                       Assign('sum', Sig('tmp'))],
+                locals={'tmp': 8})])
+
+    def test_two_instances_independent(self):
+        """Two adder instances produce independent results."""
+        child = self._adder_child()
+        parent = IRModule(name='top',
+            ports=[Port('a', 'input', 8), Port('b', 'input', 8),
+                   Port('c', 'input', 8), Port('d', 'input', 8),
+                   Port('s1', 'output', 8), Port('s2', 'output', 8)],
+            instances=[
+                Instance('adder', 'add0', {}, [('x','a'),('y','b'),('sum','s1')]),
+                Instance('adder', 'add1', {}, [('x','c'),('y','d'),('sum','s2')]),
+            ])
+        with _flatten_and_model(parent, {'adder': child}) as m:
+            m.set('a', 3); m.set('b', 7)
+            m.set('c', 10); m.set('d', 20)
+            m.eval()
+            self.assertEqual(m.get('s1'), 10)
+            self.assertEqual(m.get('s2'), 30)
+
+    def test_four_instances_no_aliasing(self):
+        """Four instances — locals must not interfere."""
+        child = self._adder_child()
+        parent = IRModule(name='top',
+            ports=[Port(f'x{i}', 'input', 8) for i in range(4)]
+                + [Port(f'y{i}', 'input', 8) for i in range(4)]
+                + [Port(f's{i}', 'output', 8) for i in range(4)],
+            instances=[
+                Instance('adder', f'a{i}', {},
+                    [('x',f'x{i}'),('y',f'y{i}'),('sum',f's{i}')])
+                for i in range(4)
+            ])
+        with _flatten_and_model(parent, {'adder': child}) as m:
+            for i in range(4):
+                m.set(f'x{i}', (i+1)*10)
+                m.set(f'y{i}', (i+1))
+            m.eval()
+            for i in range(4):
+                self.assertEqual(m.get(f's{i}'), (i+1)*10 + (i+1),
+                    f'instance a{i} wrong')
+
+    def test_seq_locals_across_instances(self):
+        """Seq block locals in multiple instances don't alias."""
+        child = IRModule(name='acc',
+            ports=[Port('clk', 'input', 1), Port('inc', 'input', 8),
+                   Port('val', 'output', 8)],
+            regs=[RegDecl('r', 8)],
+            assigns=[ContAssign('val', Sig('r'))],
+            seq_blocks=[SeqBlock(
+                edges=[('posedge', 'clk')],
+                stmts=[Assign('nxt', BinOp('+', Sig('r'), Sig('inc'))),
+                       Assign('r', Sig('nxt'), False)],
+                locals={'nxt': 8})])
+        parent = IRModule(name='top',
+            ports=[Port('clk', 'input', 1),
+                   Port('a', 'input', 8), Port('b', 'input', 8),
+                   Port('va', 'output', 8), Port('vb', 'output', 8)],
+            instances=[
+                Instance('acc', 'u0', {}, [('clk','clk'),('inc','a'),('val','va')]),
+                Instance('acc', 'u1', {}, [('clk','clk'),('inc','b'),('val','vb')]),
+            ])
+        with _flatten_and_model(parent, {'acc': child}) as m:
+            m.set('a', 5); m.set('b', 3)
+            m.step('clk')
+            m.eval()
+            self.assertEqual(m.get('va'), 5)
+            self.assertEqual(m.get('vb'), 3)
+            m.step('clk')
+            m.eval()
+            self.assertEqual(m.get('va'), 10)
+            self.assertEqual(m.get('vb'), 6)
+
+
+class TestPipelineCSim(unittest.TestCase):
+    """Multi-stage pipeline with valid/stall/flush — the CPU's core pattern.
+
+    Pipeline: IF → ID → EX → WB
+    - Each stage has a valid bit (1-bit, packed)
+    - Stall freezes all stages
+    - Flush clears all valid bits
+    - Data propagates through pipeline registers
+    """
+
+    def _pipeline_ir(self):
+        """4-stage pipeline: data flows IF→ID→EX→WB with stall/flush."""
+        return IRModule(name='pipe',
+            ports=[
+                Port('clk', 'input', 1), Port('rst', 'input', 1),
+                Port('stall', 'input', 1), Port('flush', 'input', 1),
+                Port('din', 'input', 8),
+                Port('if_id_v', 'output', 1), Port('if_id_d', 'output', 8),
+                Port('id_ex_v', 'output', 1), Port('id_ex_d', 'output', 8),
+                Port('ex_wb_v', 'output', 1), Port('ex_wb_d', 'output', 8),
+            ],
+            regs=[
+                RegDecl('r_ifid_v', 1), RegDecl('r_ifid_d', 8),
+                RegDecl('r_idex_v', 1), RegDecl('r_idex_d', 8),
+                RegDecl('r_exwb_v', 1), RegDecl('r_exwb_d', 8),
+            ],
+            assigns=[
+                ContAssign('if_id_v', Sig('r_ifid_v')),
+                ContAssign('if_id_d', Sig('r_ifid_d')),
+                ContAssign('id_ex_v', Sig('r_idex_v')),
+                ContAssign('id_ex_d', Sig('r_idex_d')),
+                ContAssign('ex_wb_v', Sig('r_exwb_v')),
+                ContAssign('ex_wb_d', Sig('r_exwb_d')),
+            ],
+            seq_blocks=[
+                # IF→ID
+                SeqBlock(edges=[('posedge', 'clk')], locals={}, stmts=[
+                    If(Sig('rst'), [
+                        Assign('r_ifid_v', Const(0), False),
+                        Assign('r_ifid_d', Const(0), False),
+                    ], [If(Sig('flush'), [
+                        Assign('r_ifid_v', Const(0), False),
+                    ], [If(Sig('stall'), [], [
+                        Assign('r_ifid_v', Const(1), False),
+                        Assign('r_ifid_d', Sig('din'), False),
+                    ])])])]),
+                # ID→EX
+                SeqBlock(edges=[('posedge', 'clk')], locals={}, stmts=[
+                    If(Sig('rst'), [
+                        Assign('r_idex_v', Const(0), False),
+                        Assign('r_idex_d', Const(0), False),
+                    ], [If(Sig('flush'), [
+                        Assign('r_idex_v', Const(0), False),
+                    ], [If(Sig('stall'), [], [
+                        Assign('r_idex_v', Sig('r_ifid_v'), False),
+                        Assign('r_idex_d', Sig('r_ifid_d'), False),
+                    ])])])]),
+                # EX→WB
+                SeqBlock(edges=[('posedge', 'clk')], locals={}, stmts=[
+                    If(Sig('rst'), [
+                        Assign('r_exwb_v', Const(0), False),
+                        Assign('r_exwb_d', Const(0), False),
+                    ], [If(Sig('flush'), [
+                        Assign('r_exwb_v', Const(0), False),
+                    ], [If(Sig('stall'), [], [
+                        Assign('r_exwb_v', Sig('r_idex_v'), False),
+                        Assign('r_exwb_d', Sig('r_idex_d'), False),
+                    ])])])]),
+            ])
+
+    def test_data_propagates_through_stages(self):
+        """Data enters IF and appears at WB three cycles later."""
+        with CSimModel(self._pipeline_ir()) as m:
+            m.set('rst', 1); m.set('stall', 0); m.set('flush', 0); m.set('din', 0)
+            m.step('clk')
+            m.set('rst', 0); m.set('din', 42)
+            m.step('clk')  # cycle 1: din=42 enters IF/ID
+            m.eval()
+            self.assertEqual(m.get('if_id_v'), 1)
+            self.assertEqual(m.get('if_id_d'), 42)
+            self.assertEqual(m.get('id_ex_v'), 0)
+
+            m.set('din', 99)
+            m.step('clk')  # cycle 2: 42 moves to ID/EX, 99 enters IF/ID
+            m.eval()
+            self.assertEqual(m.get('if_id_d'), 99)
+            self.assertEqual(m.get('id_ex_v'), 1)
+            self.assertEqual(m.get('id_ex_d'), 42)
+            self.assertEqual(m.get('ex_wb_v'), 0)
+
+            m.step('clk')  # cycle 3: 42 reaches WB
+            m.eval()
+            self.assertEqual(m.get('ex_wb_v'), 1)
+            self.assertEqual(m.get('ex_wb_d'), 42)
+
+    def test_stall_freezes_pipeline(self):
+        """Stall prevents all stages from advancing."""
+        with CSimModel(self._pipeline_ir()) as m:
+            m.set('rst', 1); m.set('stall', 0); m.set('flush', 0); m.set('din', 0)
+            m.step('clk')
+            m.set('rst', 0); m.set('din', 42)
+            m.step('clk')  # 42 enters IF/ID
+            m.eval()
+            self.assertEqual(m.get('if_id_v'), 1)
+
+            m.set('stall', 1); m.set('din', 99)
+            m.step('clk')  # stalled — nothing moves
+            m.eval()
+            self.assertEqual(m.get('if_id_d'), 42)  # still 42, not 99
+            self.assertEqual(m.get('id_ex_v'), 0)    # didn't advance
+
+            m.set('stall', 0)
+            m.step('clk')  # unstall — 42 moves to ID/EX
+            m.eval()
+            self.assertEqual(m.get('id_ex_v'), 1)
+            self.assertEqual(m.get('id_ex_d'), 42)
+
+    def test_flush_clears_valid_bits(self):
+        """Flush clears all valid bits but doesn't affect data."""
+        with CSimModel(self._pipeline_ir()) as m:
+            m.set('rst', 1); m.set('stall', 0); m.set('flush', 0); m.set('din', 0)
+            m.step('clk')
+            m.set('rst', 0); m.set('din', 42)
+            m.step('clk')
+            m.step('clk')
+            m.step('clk')  # 42 is now in all stages
+            m.eval()
+            self.assertEqual(m.get('ex_wb_v'), 1)
+
+            m.set('flush', 1)
+            m.step('clk')
+            m.eval()
+            self.assertEqual(m.get('if_id_v'), 0)
+            self.assertEqual(m.get('id_ex_v'), 0)
+            self.assertEqual(m.get('ex_wb_v'), 0)
+
+    def test_nba_ordering_across_stages(self):
+        """NBA ensures each stage reads the pre-clock value of the previous stage.
+
+        If stage N and stage N+1 both trigger on the same posedge, stage N+1
+        must read the OLD value of stage N's output (before NBA commit).
+        """
+        with CSimModel(self._pipeline_ir()) as m:
+            m.set('rst', 1); m.set('stall', 0); m.set('flush', 0); m.set('din', 0)
+            m.step('clk')
+            m.set('rst', 0)
+
+            # Feed values 10, 20, 30 on consecutive cycles
+            for val in [10, 20, 30]:
+                m.set('din', val)
+                m.step('clk')
+
+            m.eval()
+            # After 3 cycles: WB=10, EX=20, ID=30
+            self.assertEqual(m.get('ex_wb_d'), 10)
+            self.assertEqual(m.get('id_ex_d'), 20)
+            self.assertEqual(m.get('if_id_d'), 30)
+
+
+class TestCacheLikePattern(unittest.TestCase):
+    """Cache-like module: mem arrays, tag/valid/data, hit detection with locals.
+
+    This replicates the L1 cache pattern: a comb block computes in_set/in_tag
+    from the address, checks valid[] and tags[] arrays, and outputs hit/miss.
+    A seq block fills the cache on miss.
+    """
+
+    def _cache_child(self, lines=4):
+        """Simple direct-mapped cache: 4 lines, 8-bit data."""
+        return IRModule(name='cache',
+            ports=[
+                Port('clk', 'input', 1), Port('addr', 'input', 8),
+                Port('fill', 'input', 1), Port('fdata', 'input', 8),
+                Port('hit', 'output', 1), Port('rdata', 'output', 8),
+            ],
+            mems=[
+                MemDecl('valid', lines, 1),
+                MemDecl('tags', lines, 4),
+                MemDecl('data', lines, 8),
+            ],
+            comb_blocks=[CombBlock(
+                stmts=[
+                    # in_set = addr[1:0], in_tag = addr[7:2]
+                    Assign('in_set', BinOp('&', Sig('addr'), Const(lines - 1))),
+                    Assign('in_tag', BinOp('>>', Sig('addr'), Const(2))),
+                    If(BinOp('&', Index(Sig('valid'), Sig('in_set')),
+                             Compare('==', Index(Sig('tags'), Sig('in_set')),
+                                     Sig('in_tag'))),
+                       [Assign('hit', Const(1)),
+                        Assign('rdata', Index(Sig('data'), Sig('in_set')))],
+                       [Assign('hit', Const(0)),
+                        Assign('rdata', Const(0))]),
+                ],
+                locals={'in_set': 8, 'in_tag': 8})],
+            seq_blocks=[SeqBlock(
+                edges=[('posedge', 'clk')], locals={'fs': 8, 'ft': 8},
+                stmts=[
+                    If(Sig('fill'), [
+                        Assign('fs', BinOp('&', Sig('addr'), Const(lines - 1))),
+                        Assign('ft', BinOp('>>', Sig('addr'), Const(2))),
+                        MemWrite('valid', Sig('fs'), Const(1), False),
+                        MemWrite('tags', Sig('fs'), Sig('ft'), False),
+                        MemWrite('data', Sig('fs'), Sig('fdata'), False),
+                    ], [])
+                ])])
+
+    def test_single_cache_miss_then_hit(self):
+        """Fill a cache line, then read it back — should hit."""
+        with CSimModel(self._cache_child()) as m:
+            m.set('addr', 5); m.set('fill', 0); m.set('fdata', 0)
+            m.eval()
+            self.assertEqual(m.get('hit'), 0)
+
+            # Fill addr=5 with data=0xAB
+            m.set('fill', 1); m.set('fdata', 0xAB)
+            m.step('clk')
+            m.set('fill', 0)
+            m.eval()
+            self.assertEqual(m.get('hit'), 1)
+            self.assertEqual(m.get('rdata'), 0xAB)
+
+    def test_two_cache_instances_independent(self):
+        """Two cache instances don't share locals (in_set, in_tag)."""
+        child = self._cache_child()
+        parent = IRModule(name='top',
+            ports=[
+                Port('clk', 'input', 1),
+                Port('a0', 'input', 8), Port('f0', 'input', 1),
+                Port('fd0', 'input', 8),
+                Port('a1', 'input', 8), Port('f1', 'input', 1),
+                Port('fd1', 'input', 8),
+                Port('h0', 'output', 1), Port('d0', 'output', 8),
+                Port('h1', 'output', 1), Port('d1', 'output', 8),
+            ],
+            instances=[
+                Instance('cache', 'c0', {},
+                    [('clk','clk'),('addr','a0'),('fill','f0'),('fdata','fd0'),
+                     ('hit','h0'),('rdata','d0')]),
+                Instance('cache', 'c1', {},
+                    [('clk','clk'),('addr','a1'),('fill','f1'),('fdata','fd1'),
+                     ('hit','h1'),('rdata','d1')]),
+            ])
+        with _flatten_and_model(parent, {'cache': child}) as m:
+            # Fill c0 at addr=2 with 0x11, c1 at addr=6 with 0x22
+            m.set('a0', 2); m.set('f0', 1); m.set('fd0', 0x11)
+            m.set('a1', 6); m.set('f1', 1); m.set('fd1', 0x22)
+            m.step('clk')
+            m.set('f0', 0); m.set('f1', 0)
+            m.eval()
+            self.assertEqual(m.get('h0'), 1, 'c0 should hit at addr=2')
+            self.assertEqual(m.get('d0'), 0x11)
+            self.assertEqual(m.get('h1'), 1, 'c1 should hit at addr=6')
+            self.assertEqual(m.get('d1'), 0x22)
+
+            # Now read different addresses — c0 should miss, c1 should still hit
+            m.set('a0', 7)  # different set than 2
+            m.eval()
+            self.assertEqual(m.get('h0'), 0, 'c0 should miss at addr=7')
+            self.assertEqual(m.get('h1'), 1, 'c1 should still hit at addr=6')
+
+    def test_cache_tag_conflict(self):
+        """Two addresses mapping to the same set but different tags."""
+        with CSimModel(self._cache_child(lines=4)) as m:
+            # addr=1 → set=1, tag=0; addr=5 → set=1, tag=1
+            m.set('addr', 1); m.set('fill', 1); m.set('fdata', 0xAA)
+            m.step('clk')
+            m.set('fill', 0)
+            m.eval()
+            self.assertEqual(m.get('hit'), 1)
+
+            # Now access addr=5 (same set, different tag) — should miss
+            m.set('addr', 5)
+            m.eval()
+            self.assertEqual(m.get('hit'), 0)
+
+
+class TestHierarchicalPipeline(unittest.TestCase):
+    """Pipeline with submodule instances — the full CPU pattern.
+
+    Tests flatten + csim integration: a pipeline that uses submodule
+    instances (ALU, decoder) where the submodules have comb locals.
+    """
+
+    def test_pipeline_with_alu_submodule(self):
+        """Pipeline where EX stage uses an ALU submodule with locals."""
+        alu = IRModule(name='alu',
+            ports=[Port('a', 'input', 8), Port('b', 'input', 8),
+                   Port('op', 'input', 1), Port('result', 'output', 8)],
+            comb_blocks=[CombBlock(
+                stmts=[
+                    Assign('sum', BinOp('+', Sig('a'), Sig('b'))),
+                    Assign('diff', BinOp('-', Sig('a'), Sig('b'))),
+                    If(Sig('op'),
+                       [Assign('result', Sig('diff'))],
+                       [Assign('result', Sig('sum'))]),
+                ],
+                locals={'sum': 8, 'diff': 8})])
+
+        parent = IRModule(name='pipe_alu',
+            ports=[
+                Port('clk', 'input', 1), Port('rst', 'input', 1),
+                Port('a_in', 'input', 8), Port('b_in', 'input', 8),
+                Port('op_in', 'input', 1),
+                Port('wb_v', 'output', 1), Port('wb_d', 'output', 8),
+            ],
+            regs=[
+                RegDecl('id_a', 8), RegDecl('id_b', 8), RegDecl('id_op', 1),
+                RegDecl('id_v', 1),
+                RegDecl('wb_valid', 1), RegDecl('wb_data', 8),
+            ],
+            wires=[WireDecl('alu_result', 8)],
+            assigns=[
+                ContAssign('wb_v', Sig('wb_valid')),
+                ContAssign('wb_d', Sig('wb_data')),
+            ],
+            instances=[
+                Instance('alu', 'ex_alu', {},
+                    [('a','id_a'),('b','id_b'),('op','id_op'),
+                     ('result','alu_result')]),
+            ],
+            seq_blocks=[
+                # IF/ID: latch inputs
+                SeqBlock(edges=[('posedge', 'clk')], locals={}, stmts=[
+                    If(Sig('rst'), [
+                        Assign('id_v', Const(0), False),
+                    ], [
+                        Assign('id_v', Const(1), False),
+                        Assign('id_a', Sig('a_in'), False),
+                        Assign('id_b', Sig('b_in'), False),
+                        Assign('id_op', Sig('op_in'), False),
+                    ])]),
+                # EX/WB: latch ALU result
+                SeqBlock(edges=[('posedge', 'clk')], locals={}, stmts=[
+                    If(Sig('rst'), [
+                        Assign('wb_valid', Const(0), False),
+                    ], [
+                        Assign('wb_valid', Sig('id_v'), False),
+                        Assign('wb_data', Sig('alu_result'), False),
+                    ])]),
+            ])
+
+        with _flatten_and_model(parent, {'alu': alu}) as m:
+            m.set('rst', 1); m.set('a_in', 0); m.set('b_in', 0); m.set('op_in', 0)
+            m.step('clk')
+            m.set('rst', 0)
+
+            # Feed a=10, b=3, op=0 (add)
+            m.set('a_in', 10); m.set('b_in', 3); m.set('op_in', 0)
+            m.step('clk')  # latched into ID
+            m.step('clk')  # ALU computes, result latched into WB
+            m.eval()
+            self.assertEqual(m.get('wb_v'), 1)
+            self.assertEqual(m.get('wb_d'), 13)  # 10 + 3
+
+            # Feed a=10, b=3, op=1 (sub)
+            m.set('a_in', 10); m.set('b_in', 3); m.set('op_in', 1)
+            m.step('clk')
+            m.step('clk')
+            m.eval()
+            self.assertEqual(m.get('wb_d'), 7)  # 10 - 3
+
+    def test_pipeline_with_stall_from_submodule(self):
+        """Pipeline stalled by a 'busy' signal from a submodule.
+
+        This is the CPU pattern: IF stage has a cache submodule that
+        asserts 'busy' during a miss. The pipeline stalls until busy=0.
+        """
+        # "Slow unit" that takes N cycles to produce a result
+        slow = IRModule(name='slow_unit',
+            ports=[
+                Port('clk', 'input', 1), Port('rst', 'input', 1),
+                Port('start', 'input', 1), Port('din', 'input', 8),
+                Port('busy', 'output', 1), Port('dout', 'output', 8),
+                Port('done', 'output', 1),
+            ],
+            regs=[RegDecl('cnt', 4), RegDecl('latched', 8),
+                  RegDecl('r_busy', 1), RegDecl('r_done', 1)],
+            assigns=[
+                ContAssign('busy', Sig('r_busy')),
+                ContAssign('dout', Sig('latched')),
+                ContAssign('done', Sig('r_done')),
+            ],
+            seq_blocks=[SeqBlock(
+                edges=[('posedge', 'clk')], locals={}, stmts=[
+                    If(Sig('rst'), [
+                        Assign('cnt', Const(0), False),
+                        Assign('r_busy', Const(0), False),
+                        Assign('r_done', Const(0), False),
+                    ], [If(Sig('start'), [
+                        Assign('latched', Sig('din'), False),
+                        Assign('cnt', Const(3), False),
+                        Assign('r_busy', Const(1), False),
+                        Assign('r_done', Const(0), False),
+                    ], [If(Compare('>', Sig('cnt'), Const(0)), [
+                        Assign('cnt', BinOp('-', Sig('cnt'), Const(1)), False),
+                        If(Compare('==', Sig('cnt'), Const(1)), [
+                            Assign('r_busy', Const(0), False),
+                            Assign('r_done', Const(1), False),
+                        ], []),
+                    ], [
+                        Assign('r_done', Const(0), False),
+                    ])])])])])
+
+        parent = IRModule(name='stall_pipe',
+            ports=[
+                Port('clk', 'input', 1), Port('rst', 'input', 1),
+                Port('req', 'input', 1), Port('din', 'input', 8),
+                Port('out_v', 'output', 1), Port('out_d', 'output', 8),
+                Port('busy', 'output', 1),
+            ],
+            regs=[RegDecl('pipe_v', 1), RegDecl('pipe_d', 8)],
+            wires=[WireDecl('su_busy', 1), WireDecl('su_dout', 8),
+                   WireDecl('su_done', 1)],
+            assigns=[
+                ContAssign('out_v', Sig('pipe_v')),
+                ContAssign('out_d', Sig('pipe_d')),
+                ContAssign('busy', Sig('su_busy')),
+            ],
+            instances=[
+                Instance('slow_unit', 'su', {},
+                    [('clk','clk'),('rst','rst'),('start','req'),('din','din'),
+                     ('busy','su_busy'),('dout','su_dout'),('done','su_done')]),
+            ],
+            seq_blocks=[SeqBlock(
+                edges=[('posedge', 'clk')], locals={}, stmts=[
+                    If(Sig('rst'), [
+                        Assign('pipe_v', Const(0), False),
+                    ], [If(Sig('su_busy'), [
+                        # stall: keep current values
+                    ], [If(Sig('su_done'), [
+                        Assign('pipe_v', Const(1), False),
+                        Assign('pipe_d', Sig('su_dout'), False),
+                    ], [
+                        Assign('pipe_v', Const(0), False),
+                    ])])])])])
+
+        with _flatten_and_model(parent, {'slow_unit': slow}) as m:
+            m.set('rst', 1); m.set('req', 0); m.set('din', 0)
+            m.step('clk')
+            m.set('rst', 0)
+
+            # Start a request with din=42
+            m.set('req', 1); m.set('din', 42)
+            m.step('clk')
+            m.set('req', 0)
+
+            # Should be busy for a few cycles
+            m.eval()
+            self.assertEqual(m.get('busy'), 1)
+            self.assertEqual(m.get('out_v'), 0)
+
+            m.step('clk')
+            m.eval()
+            self.assertEqual(m.get('busy'), 1)
+
+            m.step('clk')
+            m.eval()
+            self.assertEqual(m.get('busy'), 1)
+
+            m.step('clk')  # cnt reaches 1 → busy clears
+            m.eval()
+            self.assertEqual(m.get('busy'), 0)
+
+            m.step('clk')  # done=1, pipeline latches result
+            m.eval()
+            self.assertEqual(m.get('out_v'), 1)
+            self.assertEqual(m.get('out_d'), 42)
+
+
+class TestCombResettleHierarchical(unittest.TestCase):
+    """Comb re-settle after NBA in hierarchical (flattened) designs.
+
+    When a seq block in one submodule commits an NBA value, comb blocks
+    in other submodules that transitively depend on it must re-evaluate.
+    """
+
+    def test_seq_in_child_triggers_comb_in_parent(self):
+        """Seq block in submodule writes reg; parent comb reads it via port."""
+        child = IRModule(name='producer',
+            ports=[Port('clk', 'input', 1), Port('val', 'output', 8)],
+            regs=[RegDecl('r', 8)],
+            assigns=[ContAssign('val', Sig('r'))],
+            seq_blocks=[SeqBlock(
+                edges=[('posedge', 'clk')], locals={},
+                stmts=[Assign('r', BinOp('+', Sig('r'), Const(1)), False)])])
+
+        parent = IRModule(name='top',
+            ports=[Port('clk', 'input', 1), Port('doubled', 'output', 8)],
+            wires=[WireDecl('child_val', 8)],
+            comb_blocks=[CombBlock(
+                stmts=[Assign('doubled', BinOp('+', Sig('child_val'),
+                                               Sig('child_val')))],
+                locals={})],
+            instances=[
+                Instance('producer', 'p', {},
+                    [('clk','clk'),('val','child_val')]),
+            ])
+
+        with _flatten_and_model(parent, {'producer': child}) as m:
+            m.eval()
+            self.assertEqual(m.get('doubled'), 0)
+            m.step('clk')
+            m.eval()
+            self.assertEqual(m.get('doubled'), 2)  # r=1, doubled=2
+            m.step('clk')
+            m.eval()
+            self.assertEqual(m.get('doubled'), 4)  # r=2, doubled=4
+
+    def test_cross_instance_comb_chain(self):
+        """Comb in instance A feeds comb in instance B via parent wiring."""
+        passthru = IRModule(name='passthru',
+            ports=[Port('inp', 'input', 8), Port('out', 'output', 8)],
+            comb_blocks=[CombBlock(
+                stmts=[Assign('tmp', BinOp('+', Sig('inp'), Const(1))),
+                       Assign('out', Sig('tmp'))],
+                locals={'tmp': 8})])
+
+        parent = IRModule(name='top',
+            ports=[Port('clk', 'input', 1), Port('result', 'output', 8)],
+            regs=[RegDecl('counter', 8)],
+            wires=[WireDecl('mid', 8)],
+            assigns=[ContAssign('result', Sig('mid'))],
+            instances=[
+                Instance('passthru', 'p0', {},
+                    [('inp','counter'),('out','mid')]),
+            ],
+            seq_blocks=[SeqBlock(
+                edges=[('posedge', 'clk')], locals={},
+                stmts=[Assign('counter', BinOp('+', Sig('counter'), Const(10)), False)])])
+
+        with _flatten_and_model(parent, {'passthru': passthru}) as m:
+            m.eval()
+            self.assertEqual(m.get('result'), 1)  # counter=0, +1
+            m.step('clk')
+            m.eval()
+            self.assertEqual(m.get('result'), 11)  # counter=10, +1
+
+
+class TestNBACrossBlock(unittest.TestCase):
+    """NBA correctness when multiple seq blocks write to signals read by
+    comb blocks that feed other seq blocks — the pipeline forwarding pattern.
+    """
+
+    def test_write_read_same_cycle(self):
+        """Two seq blocks: one writes 'x', the other reads 'x'.
+
+        Both fire on the same posedge. The reader must see the OLD value
+        of 'x' (before NBA commit), not the new value.
+        """
+        ir = IRModule(name='nba_order',
+            ports=[Port('clk', 'input', 1),
+                   Port('a_out', 'output', 8), Port('b_out', 'output', 8)],
+            regs=[RegDecl('a', 8), RegDecl('b', 8)],
+            assigns=[ContAssign('a_out', Sig('a')),
+                     ContAssign('b_out', Sig('b'))],
+            seq_blocks=[
+                SeqBlock(edges=[('posedge', 'clk')], locals={},
+                    stmts=[Assign('a', BinOp('+', Sig('a'), Const(1)), False)]),
+                SeqBlock(edges=[('posedge', 'clk')], locals={},
+                    stmts=[Assign('b', Sig('a'), False)]),
+            ])
+        with CSimModel(ir) as m:
+            m.eval()
+            self.assertEqual(m.get('a_out'), 0)
+            self.assertEqual(m.get('b_out'), 0)
+            m.step('clk')
+            m.eval()
+            # a was 0, now 1. b should get OLD a = 0
+            self.assertEqual(m.get('a_out'), 1)
+            self.assertEqual(m.get('b_out'), 0)
+            m.step('clk')
+            m.eval()
+            # a was 1, now 2. b should get OLD a = 1
+            self.assertEqual(m.get('a_out'), 2)
+            self.assertEqual(m.get('b_out'), 1)
+
+    def test_comb_between_seq_blocks(self):
+        """Seq A → comb → seq B: comb re-evaluates after A's NBA commit,
+        and seq B on the NEXT cycle sees the updated comb output.
+        """
+        ir = IRModule(name='comb_between',
+            ports=[Port('clk', 'input', 1),
+                   Port('r_out', 'output', 8), Port('doubled', 'output', 8),
+                   Port('latched', 'output', 8)],
+            regs=[RegDecl('r', 8), RegDecl('lat', 8)],
+            wires=[WireDecl('dbl', 8)],
+            assigns=[
+                ContAssign('r_out', Sig('r')),
+                ContAssign('doubled', Sig('dbl')),
+                ContAssign('latched', Sig('lat')),
+            ],
+            comb_blocks=[CombBlock(
+                stmts=[Assign('dbl', BinOp('*', Sig('r'), Const(2)))],
+                locals={})],
+            seq_blocks=[
+                SeqBlock(edges=[('posedge', 'clk')], locals={},
+                    stmts=[Assign('r', BinOp('+', Sig('r'), Const(1)), False)]),
+                SeqBlock(edges=[('posedge', 'clk')], locals={},
+                    stmts=[Assign('lat', Sig('dbl'), False)]),
+            ])
+        with CSimModel(ir) as m:
+            m.eval()
+            self.assertEqual(m.get('doubled'), 0)  # r=0, dbl=0
+            m.step('clk')
+            m.eval()
+            # r=1, dbl=2 (after re-settle), lat=OLD dbl=0
+            self.assertEqual(m.get('r_out'), 1)
+            self.assertEqual(m.get('doubled'), 2)
+            self.assertEqual(m.get('latched'), 0)
+            m.step('clk')
+            m.eval()
+            # r=2, dbl=4, lat=OLD dbl=2
+            self.assertEqual(m.get('r_out'), 2)
+            self.assertEqual(m.get('doubled'), 4)
+            self.assertEqual(m.get('latched'), 2)
+
+    def test_three_seq_blocks_circular_nba(self):
+        """Three registers in a shift chain: c←b←a←a+1.
+
+        All on the same posedge. Each must read the pre-commit value.
+        """
+        ir = IRModule(name='shift3',
+            ports=[Port('clk', 'input', 1),
+                   Port('ao', 'output', 8), Port('bo', 'output', 8),
+                   Port('co', 'output', 8)],
+            regs=[RegDecl('a', 8), RegDecl('b', 8), RegDecl('c', 8)],
+            assigns=[ContAssign('ao', Sig('a')),
+                     ContAssign('bo', Sig('b')),
+                     ContAssign('co', Sig('c'))],
+            seq_blocks=[
+                SeqBlock(edges=[('posedge', 'clk')], locals={},
+                    stmts=[Assign('a', BinOp('+', Sig('a'), Const(1)), False)]),
+                SeqBlock(edges=[('posedge', 'clk')], locals={},
+                    stmts=[Assign('b', Sig('a'), False)]),
+                SeqBlock(edges=[('posedge', 'clk')], locals={},
+                    stmts=[Assign('c', Sig('b'), False)]),
+            ])
+        with CSimModel(ir) as m:
+            # Cycle 0: a=0,b=0,c=0
+            for _ in range(4):
+                m.step('clk')
+            m.eval()
+            # After 4 clocks: a=4, b=3 (old a), c=2 (old b)
+            self.assertEqual(m.get('ao'), 4)
+            self.assertEqual(m.get('bo'), 3)
+            self.assertEqual(m.get('co'), 2)
