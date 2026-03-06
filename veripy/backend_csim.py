@@ -368,6 +368,45 @@ def _emit_stmt(stmt, lines, sig_w, indent=1, pack_map=None, nba_sigs=None):
         lines.append(f'{pad}}}')
 
 
+def _emit_stmts_batched(stmts, lines, sig_w, indent=1, pack_map=None, nba_sigs=None):
+    """Emit statements, merging consecutive top-level packed writes to the same word.
+
+    When multiple consecutive Assign statements write to 1-bit signals that
+    share the same pack word, they are collapsed into a single read-modify-write
+    instead of N separate RMW operations.
+    """
+    pad = '    ' * indent
+    pending: dict = {}   # word_name → [(bit, val_expr_str)]
+    pending_order: list = []  # word names in insertion order
+
+    def _flush():
+        for word in pending_order:
+            writes = pending[word]
+            if len(writes) == 1:
+                bit, val = writes[0]
+                lines.append(f'{pad}s->{word} = (s->{word} & ~(1ULL << {bit}ULL)) '
+                             f'| (({val} & 1ULL) << {bit}ULL);')
+            else:
+                mask = sum(1 << b for b, _ in writes)
+                val_parts = ' | '.join(f'(({v} & 1ULL) << {b}ULL)' for b, v in writes)
+                lines.append(f'{pad}s->{word} = (s->{word} & ~{mask}ULL) | {val_parts};')
+        pending.clear()
+        pending_order.clear()
+
+    for stmt in stmts:
+        if (pack_map and isinstance(stmt, Assign)
+                and stmt.target in pack_map
+                and not (nba_sigs and stmt.target in nba_sigs)):
+            word, bit = pack_map[stmt.target]
+            val = _expr(stmt.value, sig_w, pack_map)
+            if word not in pending:
+                pending_order.append(word)
+            pending.setdefault(word, []).append((bit, val))
+        else:
+            _flush()
+            _emit_stmt(stmt, lines, sig_w, indent, pack_map, nba_sigs)
+    _flush()
+
 
 # ── Inline hint helpers ──────────────────────────────────────────────
 
@@ -770,8 +809,7 @@ def emit_c(ir: IRModule) -> str:
         if len(group) == 1 and total == 1:
             continue  # will be inlined into veripy_eval()
         body = []
-        for stmt in all_stmts:
-            _emit_stmt(stmt, body, sig_w, pack_map=pack_map)
+        _emit_stmts_batched(all_stmts, body, sig_w, pack_map=pack_map)
         attr = _inline_attr(total)
         lines.append(f'static {attr}void _comb_{gi}(State* s) {{')
         lines.extend(body)
@@ -781,8 +819,7 @@ def emit_c(ir: IRModule) -> str:
     # Each seq_block → _seq_N()
     for i, blk in enumerate(ir.seq_blocks):
         body = []
-        for stmt in blk.stmts:
-            _emit_stmt(stmt, body, sig_w, pack_map=pack_map, nba_sigs=nba_sigs)
+        _emit_stmts_batched(blk.stmts, body, sig_w, pack_map=pack_map, nba_sigs=nba_sigs)
         attr = _inline_attr(_count_stmts(blk.stmts))
         lines.append(f'static {attr}void _seq_{i}(State* s) {{')
         lines.extend(body)
