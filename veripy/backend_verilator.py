@@ -21,6 +21,8 @@ def _generate_wrapper(module_name, signals):
         f'#include "V{module_name}.h"',
         '#include "verilated.h"',
         '',
+        'double sc_time_stamp() { return 0; }',
+        '',
         'extern "C" {',
         '',
         'static VerilatedContext* _ctx;',
@@ -91,7 +93,7 @@ def compile_verilator(verilog_src, module_name, signals, build_dir=None):
     # Run verilator to generate C++ model
     r = subprocess.run(
         ['verilator', '--cc', dut_path, '--Mdir', obj_dir,
-         '-CFLAGS', '-fPIC'],
+         '-CFLAGS', '-fPIC', '-Wno-fatal'],
         capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f'verilator failed:\n{r.stderr}')
@@ -121,9 +123,7 @@ def compile_verilator(verilog_src, module_name, signals, build_dir=None):
     r = subprocess.run(
         ['c++', '-fPIC', '-shared' if os.uname().sysname != 'Darwin' else '-dynamiclib',
          '-I', obj_dir, '-I', include_dir, '-I', os.path.join(include_dir, 'vltstd'),
-         wrapper_path] + obj_files + [
-         os.path.join(include_dir, 'verilated.cpp'),
-         '-o', lib_path],
+         wrapper_path] + obj_files + ['-o', lib_path],
         capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f'shared lib compilation failed:\n{r.stderr}')
@@ -241,3 +241,249 @@ class VerilatorModel:
 
     def __exit__(self, *exc):
         self.close()
+
+
+# ── Native Verilator testbench ───────────────────────────────────────
+
+def compile_verilator_bench(module, tb_ir, module_name=None):
+    """Compile Verilator model + native C++ testbench → single .so with run_bench().
+
+    Returns (run_fn, compile_time, cleanup_fn).
+    """
+    import time as _time
+    from .signal import Signal, Interface
+    from .emit_verilog import _to_snake
+    from .ir import (Const, Sig, BinOp, UnaryOp, Compare, BoolOp, Mux,
+                     Assign, If, Delay, ForLoop, Repeat, Disable, Display, Finish)
+
+    if not _has_verilator():
+        raise RuntimeError('verilator not found on PATH')
+
+    if module_name is None:
+        module_name = type(module).__name__.lower()
+
+    t0 = _time.perf_counter()
+
+    # Collect signals
+    signals = {}
+    for k in dir(module):
+        v = getattr(module, k)
+        if isinstance(v, Signal) and v._kind in ('input', 'output'):
+            signals[k] = (v._kind, v.width)
+        elif isinstance(v, Interface):
+            for sn in v._signals():
+                sig = getattr(v, sn)
+                if sig._kind in ('input', 'output'):
+                    signals[f'{k}_{sn}'] = (sig._kind, sig.width)
+
+    # Emit Verilog
+    parts = []
+    seen = set()
+    def _collect_v(m, mname):
+        if mname in seen:
+            return
+        seen.add(mname)
+        factory = getattr(type(m), '_veripy_factory', None)
+        fresh = factory() if factory else type(m)()
+        for sn, sub in fresh._submodules().items():
+            _collect_v(sub, _to_snake(type(sub).__name__))
+        parts.append(fresh.to_verilog(mname))
+    for sn, sub in module._submodules().items():
+        _collect_v(sub, _to_snake(type(sub).__name__))
+    parts.append(module.to_verilog(module_name))
+    verilog_src = '\n\n'.join(parts)
+
+    build_dir = tempfile.mkdtemp(prefix='veripy_vltr_bench_')
+    dut_path = os.path.join(build_dir, f'{module_name}.v')
+    obj_dir = os.path.join(build_dir, 'obj_dir')
+
+    with open(dut_path, 'w') as f:
+        f.write(verilog_src)
+
+    # Verilate
+    r = subprocess.run(
+        ['verilator', '--cc', dut_path, '--Mdir', obj_dir,
+         '-CFLAGS', '-fPIC', '-Wno-fatal'],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f'verilator failed:\n{r.stderr}')
+
+    r = subprocess.run(['make', '-C', obj_dir, '-f', f'V{module_name}.mk'],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f'make failed:\n{r.stderr}')
+
+    # Extract clock name and half-period from always block
+    clock_name = 'clock'
+    half_period = 10
+    if tb_ir.always_blocks:
+        for s in tb_ir.always_blocks[0].stmts:
+            if isinstance(s, Assign):
+                clock_name = s.target
+            if isinstance(s, Delay):
+                if isinstance(s.value, Const):
+                    half_period = s.value.value
+                elif isinstance(s.value, BinOp) and s.value.op == '*':
+                    l = s.value.left.value if isinstance(s.value.left, Const) else None
+                    r_ = s.value.right.value if isinstance(s.value.right, Const) else None
+                    if l is not None and r_ is not None:
+                        half_period = l * r_
+                break
+
+    # Collect model signal names
+    model_sigs = set(signals.keys())
+
+    # Generate C++ testbench
+    cls = f'V{module_name}'
+
+    def _tb_expr(node):
+        if isinstance(node, Const):
+            v = node.value
+            return f'((uint64_t)({v}))' if v < 0 else f'{v}ULL'
+        if isinstance(node, Sig):
+            if node.name in locals_set:
+                return node.name
+            return f'dut.{node.name}'
+        if isinstance(node, BinOp):
+            return f'({_tb_expr(node.left)} {node.op} {_tb_expr(node.right)})'
+        if isinstance(node, UnaryOp):
+            if node.op == '!':
+                return f'(!{_tb_expr(node.operand)})'
+            return f'({node.op}{_tb_expr(node.operand)})'
+        if isinstance(node, Compare):
+            return f'({_tb_expr(node.left)} {node.op} {_tb_expr(node.right)})'
+        if isinstance(node, BoolOp):
+            return f' {node.op} '.join(_tb_expr(v) for v in node.values)
+        if isinstance(node, Mux):
+            return f'({_tb_expr(node.sel)} ? {_tb_expr(node.true_val)} : {_tb_expr(node.false_val)})'
+        raise ValueError(f'Verilator TB: unsupported expr: {node}')
+
+    # Collect locals
+    locals_set = set()
+    def _collect_locals(stmts):
+        for s in stmts:
+            if isinstance(s, ForLoop):
+                locals_set.add(s.var)
+                _collect_locals(s.body)
+            elif isinstance(s, Repeat):
+                _collect_locals(s.body)
+            elif isinstance(s, If):
+                _collect_locals(s.then_body)
+                if s.else_body:
+                    _collect_locals(s.else_body)
+            elif isinstance(s, Assign) and s.target not in model_sigs:
+                locals_set.add(s.target)
+    for blk in tb_ir.initial_blocks:
+        _collect_locals(blk.stmts)
+
+    lines = [
+        f'#include "{cls}.h"',
+        '#include "verilated.h"',
+        '',
+        'double sc_time_stamp() { return 0; }',
+        '',
+        'extern "C" {',
+        '',
+        f'static void _step({cls}& dut, int time_units) {{',
+        f'    int n = time_units / {half_period};',
+        f'    for (int _i = 0; _i < n; _i++) {{',
+        f'        dut.{clock_name} ^= 1;',
+        f'        dut.eval();',
+        f'    }}',
+        f'}}',
+        '',
+        'uint64_t run_bench() {',
+        '    VerilatedContext ctx;',
+        f'    {cls} dut{{&ctx}};',
+    ]
+
+    for v in sorted(locals_set):
+        lines.append(f'    uint64_t {v} = 0;')
+
+    def _tb_stmt(stmt, indent=1):
+        pad = '    ' * indent
+        if isinstance(stmt, Assign):
+            val = _tb_expr(stmt.value)
+            if stmt.target in locals_set:
+                lines.append(f'{pad}{stmt.target} = {val};')
+            else:
+                lines.append(f'{pad}dut.{stmt.target} = {val};')
+        elif isinstance(stmt, Delay):
+            lines.append(f'{pad}_step(dut, {_tb_expr(stmt.value)});')
+        elif isinstance(stmt, If):
+            lines.append(f'{pad}if ({_tb_expr(stmt.cond)}) {{')
+            for s in stmt.then_body:
+                _tb_stmt(s, indent + 1)
+            if stmt.else_body:
+                lines.append(f'{pad}}} else {{')
+                for s in stmt.else_body:
+                    _tb_stmt(s, indent + 1)
+            lines.append(f'{pad}}}')
+        elif isinstance(stmt, ForLoop):
+            lines.append(f'{pad}for ({stmt.var} = {_tb_expr(stmt.start)}; '
+                         f'{stmt.var} < {_tb_expr(stmt.stop)}; {stmt.var}++) {{')
+            for s in stmt.body:
+                _tb_stmt(s, indent + 1)
+            lines.append(f'{pad}}}')
+            if stmt.label:
+                lines.append(f'{pad}{stmt.label}_end: ;')
+        elif isinstance(stmt, Repeat):
+            cvar = f'_rep{id(stmt) % 10000}'
+            lines.append(f'{pad}for (int {cvar} = 0; {cvar} < {_tb_expr(stmt.count)}; {cvar}++) {{')
+            for s in stmt.body:
+                _tb_stmt(s, indent + 1)
+            lines.append(f'{pad}}}')
+            if stmt.label:
+                lines.append(f'{pad}{stmt.label}_end: ;')
+        elif isinstance(stmt, Disable):
+            lines.append(f'{pad}goto {stmt.label}_end;')
+        elif isinstance(stmt, (Display, Finish)):
+            pass
+
+    for blk in tb_ir.initial_blocks:
+        for s in blk.stmts:
+            _tb_stmt(s)
+
+    lines.append('    return 0;')
+    lines.append('}')
+    lines.append('')
+    lines.append('}  // extern "C"')
+
+    tb_src = '\n'.join(lines) + '\n'
+    tb_path = os.path.join(build_dir, 'bench.cpp')
+    with open(tb_path, 'w') as f:
+        f.write(tb_src)
+
+    # Compile
+    verilator_root = subprocess.run(
+        ['verilator', '--getenv', 'VERILATOR_ROOT'],
+        capture_output=True, text=True).stdout.strip()
+    include_dir = os.path.join(verilator_root, 'include')
+
+    obj_files = [os.path.join(obj_dir, f) for f in os.listdir(obj_dir)
+                 if f.endswith('.o')]
+
+    ext = '.dylib' if os.uname().sysname == 'Darwin' else '.so'
+    lib_path = os.path.join(build_dir, f'libbench{ext}')
+    flag = '-dynamiclib' if ext == '.dylib' else '-shared'
+
+    r = subprocess.run(
+        ['c++', '-O2', '-fPIC', flag,
+         '-I', obj_dir, '-I', include_dir, '-I', os.path.join(include_dir, 'vltstd'),
+         tb_path] + obj_files + ['-o', lib_path],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f'Verilator bench compilation failed:\n{r.stderr}\n\nSource:\n{tb_src}')
+
+    compile_t = _time.perf_counter() - t0
+
+    lib = ctypes.CDLL(lib_path)
+    lib.run_bench.restype = ctypes.c_uint64
+
+    def run():
+        lib.run_bench()
+
+    def cleanup():
+        shutil.rmtree(build_dir, ignore_errors=True)
+
+    return run, compile_t, cleanup
