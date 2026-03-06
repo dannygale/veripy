@@ -76,6 +76,32 @@ An event-driven hybrid mode would keep the compiled eval kernels (`_comb_N`, `_s
 
 Low — cycle-accurate covers most verification needs. Build when mixed-clock or timing-aware simulation is required.
 
+## Model/testbench split compilation
+
+Currently `compile_bench()` concatenates model C and testbench C into one file and recompiles everything on every run. The model should be compiled once into a cached `.so`/`.a`, with testbenches compiled separately and linked against it.
+
+This is the same architecture Verilator uses: `verilator --cc` produces a model library, testbenches link against it. The model is the stable artifact; testbenches are what you iterate on.
+
+### Why this matters
+
+- Testbench iteration becomes near-instant (link only, no model recompile)
+- Enables PGO: profile the model once, reuse across all testbenches
+- Enables incremental compilation: cache the model `.so` by IR hash
+- Correct separation of concerns: model is design-dependent, testbench is test-dependent
+- Foundation for co-simulation: the model library is the reusable artifact external tools link against
+
+### Plan
+
+1. `compile_model(module, name)` → compiles `emit_c()` output to `.so` with exported `veripy_create/destroy/eval/set_*/get_*` API
+2. `compile_tb(tb_ir, model_so, model_ir, name)` → compiles `emit_tb_c()` output, links against model `.so`
+3. Cache model `.so` in `.veripy_cache/` keyed on IR hash + compiler flags
+4. `compile_bench()` becomes: check cache → compile model if needed → compile TB → link
+5. PGO becomes: compile model with `-fprofile-generate` → short warmup run → recompile with `-fprofile-use` → cache
+
+### Priority
+
+Critical — this is the foundation that PGO, incremental compilation, and co-simulation all depend on.
+
 ## Multi-threaded simulation
 
 Partition the compiled eval across multiple cores. The flat IR dependency graph already identifies independent subgraphs — clock domains, submodule trees, and unconnected comb chains can run in parallel. The scheduler would fork independent partitions, barrier-sync at clock edges, then commit.
