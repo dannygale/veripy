@@ -184,6 +184,7 @@ def module(func):
         from .module import _Pipeline
         for name, val in local_vars.items():
             if isinstance(val, _Pipeline):
+                val._module = instance
                 val._finalize()
 
         # Collect logic blocks with emitter source attached

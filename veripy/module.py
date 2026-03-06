@@ -834,14 +834,18 @@ class _NamedStage:
 
     def _resolve_name(self, sig):
         """Resolve a signal's Verilog name, searching the module if needed."""
-        name = getattr(sig, 'name', '') or ''
-        if name:
-            return name
         module = self._pipeline._module
+        # Check direct module attributes first (most specific)
         for attr in dir(module):
-            if getattr(module, attr, None) is sig:
+            if not attr.startswith('_') and getattr(module, attr, None) is sig:
                 return attr
-        return ''
+        # Check submodule ports — return prefixed name (e.g. dec_rd_addr)
+        if hasattr(module, '_submodules'):
+            for sub_name, sub in module._submodules().items():
+                for port_name, port_sig in sub._signals().items():
+                    if port_sig is sig:
+                        return f'{sub_name}_{port_name}'
+        return getattr(sig, 'name', '') or ''
 
     def _gen_emit_source(self):
         """Generate Verilog emit source — called at to_verilog() time."""
