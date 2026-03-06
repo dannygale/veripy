@@ -140,6 +140,22 @@ def _collect_nba_signals(ir: IRModule) -> set:
     return nba
 
 
+def _build_comb_deps(ir: IRModule) -> list[set]:
+    """Return list of read-signal sets, one per comb block (task #64).
+
+    Each set contains the names of signals read by that comb block.
+    Used to determine which blocks need re-evaluation after seq commits.
+    """
+    from .flatten import _stmt_writes_reads
+    deps = []
+    for blk in ir.comb_blocks:
+        reads: set = set()
+        for stmt in blk.stmts:
+            _stmt_writes_reads(stmt, set(), reads)
+        deps.append(reads)
+    return deps
+
+
 # ── Expression emitter ───────────────────────────────────────────────
 
 def _pack_read(name, pack_map):
@@ -395,6 +411,10 @@ def emit_c(ir: IRModule) -> str:
         Complete C source string.
     """
     sig_w = _build_sig_widths(ir)
+    nba_sigs = _collect_nba_signals(ir)
+    comb_deps = _build_comb_deps(ir)
+    # Indices of comb blocks that read at least one seq-written signal (task #71)
+    resettl_idxs = [i for i, deps in enumerate(comb_deps) if deps & nba_sigs]
     lines = [
         '#include <stdint.h>',
         '#include <stdlib.h>',
@@ -449,7 +469,6 @@ def emit_c(ir: IRModule) -> str:
         lines.append(f'    uint8_t _prev_{clk};')
 
     # NBA temporaries for signals written in seq blocks
-    nba_sigs = _collect_nba_signals(ir)
     for name in sorted(nba_sigs):
         w = all_sigs.get(name, 32)
         lines.append(f'    {_ctype(w)} _nba_{name};')
@@ -543,10 +562,10 @@ def emit_c(ir: IRModule) -> str:
             lines.append(f'        s->{name} = s->_nba_{name};')
         lines.append('    }')
 
-    # 3. Re-settle combinational logic
+    # 3. Re-settle combinational logic (only blocks that read seq-written signals)
     if has_cont:
         lines.append('    _cont_assigns(s);')
-    for i in range(len(ir.comb_blocks)):
+    for i in resettl_idxs:
         lines.append(f'    _comb_{i}(s);')
 
     # 4. Update previous values
@@ -744,8 +763,9 @@ def emit_tb_c(tb_ir, model_c_src, half_period=10, model_ir=None):
     """Emit a self-contained C file: model + testbench run_bench() entry point.
 
     The always block is folded into a step() helper. The initial block
-    becomes straight-line C inside run_bench().  Uses veripy_set_*/get_*
-    API so it works with signal packing.
+    becomes straight-line C inside run_bench().  Since the TB is compiled
+    into the same .so as the model, it uses direct State struct access
+    (task #66, #72) instead of veripy_set/get API calls.
     """
     # Build set of model signal names from IR ports
     model_sigs = set()
@@ -766,22 +786,44 @@ def emit_tb_c(tb_ir, model_c_src, half_period=10, model_ir=None):
                 name = line.split('veripy_get_')[1].split('(')[0]
                 model_sigs.add(name)
 
+    # Build pack_map for direct struct access (task #66, #72)
+    tb_pack_map = {}
+    if model_ir:
+        _all_sigs = {}
+        for p in model_ir.ports:
+            _all_sigs.setdefault(p.name, _resolve_width(p.width, model_ir.params))
+        for d in model_ir.wires:
+            _all_sigs.setdefault(d.name, _resolve_width(d.width, model_ir.params))
+        for d in model_ir.regs:
+            _all_sigs.setdefault(d.name, _resolve_width(d.width, model_ir.params))
+        _eval_order = _eval_order_sigs(model_ir)
+        _eval_rank = {n: i for i, n in enumerate(_eval_order)}
+        _ordered = sorted(_all_sigs, key=lambda n: _eval_rank.get(n, len(_eval_order)))
+        tb_pack_map, _ = _build_pack_map(_all_sigs, _ordered)
+
     clock_name = _extract_clock_name(tb_ir.always_blocks[0].stmts) if tb_ir.always_blocks else 'clock'
 
     lines = [model_c_src.rstrip()]
     lines.append('')
     lines.append('/* ── Testbench ─────────────────────────────────── */')
     lines.append('')
+    # task #66: direct struct clock toggle instead of veripy_set/get
     lines.append(f'static void _step(void* p, int time_units) {{')
+    lines.append(f'    State* s = (State*)p;')
     lines.append(f'    int n = time_units / {half_period};')
     lines.append(f'    for (int _i = 0; _i < n; _i++) {{')
-    lines.append(f'        veripy_set_{clock_name}(p, veripy_get_{clock_name}(p) ^ 1);')
+    if clock_name in tb_pack_map:
+        word, bit = tb_pack_map[clock_name]
+        lines.append(f'        s->{word} ^= (1ULL << {bit}ULL);')
+    else:
+        lines.append(f'        s->{clock_name} ^= 1;')
     lines.append(f'        veripy_eval(p);')
     lines.append(f'    }}')
     lines.append(f'}}')
     lines.append('')
     lines.append('uint64_t run_bench(void) {')
     lines.append('    void* p = veripy_create();')
+    lines.append('    State* s = (State*)p;')
 
     # Collect local variables from initial blocks (ForLoop vars, non-model assigns)
     locals_declared = set()
@@ -812,8 +854,11 @@ def emit_tb_c(tb_ir, model_c_src, half_period=10, model_ir=None):
         if isinstance(node, Sig):
             if node.name in locals_declared:
                 return node.name
+            # task #72: direct struct read instead of veripy_get_*
             if node.name in model_sigs:
-                return f'veripy_get_{node.name}(p)'
+                if node.name in tb_pack_map:
+                    return _pack_read(node.name, tb_pack_map).replace('s->', 's->')
+                return f's->{node.name}'
             return node.name
         if isinstance(node, BinOp):
             return f'({_tb_expr(node.left)} {node.op} {_tb_expr(node.right)})'
@@ -837,10 +882,27 @@ def emit_tb_c(tb_ir, model_c_src, half_period=10, model_ir=None):
             if stmt.target in locals_declared:
                 lines.append(f'{pad}{stmt.target} = {val};')
             elif stmt.target in input_sigs:
-                lines.append(f'{pad}veripy_set_{stmt.target}(p, {val});')
+                # task #66/#72: direct struct write instead of veripy_set_*
+                if stmt.target in tb_pack_map:
+                    lines.append(f'{pad}{_pack_write(stmt.target, val, tb_pack_map).replace("s->", "s->")}'
+                                 .replace('s->', 's->'))
+                else:
+                    sig_width = None
+                    if model_ir:
+                        for p in model_ir.ports:
+                            if p.name == stmt.target:
+                                sig_width = _resolve_width(p.width, model_ir.params)
+                                break
+                    if sig_width and sig_width < 64:
+                        lines.append(f'{pad}s->{stmt.target} = ({_ctype(sig_width)})({val} & {_mask(sig_width)});')
+                    else:
+                        lines.append(f'{pad}s->{stmt.target} = {val};')
             else:
                 # output signal — shouldn't be assigned in TB, but handle gracefully
-                lines.append(f'{pad}veripy_set_{stmt.target}(p, {val});')
+                if stmt.target in tb_pack_map:
+                    lines.append(f'{pad}{_pack_write(stmt.target, val, tb_pack_map)}')
+                else:
+                    lines.append(f'{pad}s->{stmt.target} = {val};')
         elif isinstance(stmt, Delay):
             lines.append(f'{pad}_step(p, {_tb_expr(stmt.value)});')
         elif isinstance(stmt, If):
