@@ -7,7 +7,7 @@ from veripy.ir import (
     ContAssign, CombBlock, SeqBlock,
     Port, WireDecl, RegDecl, MemDecl, IRModule,
 )
-from veripy.backend_csim import emit_c, CSimModel, _count_stmts, _INLINE_THRESHOLD, _build_pack_map
+from veripy.backend_csim import emit_c, CSimModel, _count_stmts, _INLINE_THRESHOLD, _build_pack_map, _find_merge_groups
 
 
 class TestEmitC(unittest.TestCase):
@@ -118,11 +118,26 @@ class TestEmitC(unittest.TestCase):
         self.assertIn('_cont_assigns(s);', c)
 
     def test_per_block_comb(self):
-        """Each comb_block gets _comb_N()."""
+        """Trivial single-statement comb blocks are inlined into veripy_eval()."""
         ir = IRModule(name='t',
             ports=[Port('a', 'input', 8), Port('out', 'output', 8)],
             comb_blocks=[CombBlock(
                 stmts=[Assign('out', Sig('a'))], locals={})])
+        c = emit_c(ir)
+        # Trivial block is inlined — no separate _comb_0 function
+        self.assertNotIn('_comb_0(State* s)', c)
+        self.assertNotIn('_comb_0(s);', c)
+        # Statement appears directly in veripy_eval body
+        self.assertIn('s->out', c)
+
+    def test_per_block_comb_multi_stmt(self):
+        """Multi-statement comb blocks still get their own _comb_N() function."""
+        ir = IRModule(name='t',
+            ports=[Port('a', 'input', 8), Port('b', 'input', 8),
+                   Port('out', 'output', 8), Port('out2', 'output', 8)],
+            comb_blocks=[CombBlock(
+                stmts=[Assign('out', Sig('a')), Assign('out2', Sig('b'))],
+                locals={})])
         c = emit_c(ir)
         self.assertIn('_comb_0(State* s)', c)
         self.assertIn('_comb_0(s);', c)
@@ -219,6 +234,74 @@ class TestCountStmts(unittest.TestCase):
 
     def test_empty(self):
         self.assertEqual(_count_stmts([]), 0)
+
+
+class TestFindMergeGroups(unittest.TestCase):
+    """Test _find_merge_groups comb block analysis."""
+
+    def test_no_blocks(self):
+        ir = IRModule(name='t', ports=[])
+        self.assertEqual(_find_merge_groups(ir), [])
+
+    def test_single_block(self):
+        ir = IRModule(name='t',
+            ports=[Port('a', 'input', 8), Port('out', 'output', 8)],
+            comb_blocks=[CombBlock(stmts=[Assign('out', Sig('a'))], locals={})])
+        self.assertEqual(_find_merge_groups(ir), [[0]])
+
+    def test_mergeable_chain(self):
+        """Block 0 writes 'mid' only read by block 1 → merged."""
+        ir = IRModule(name='t',
+            ports=[Port('inp', 'input', 8), Port('out', 'output', 8)],
+            wires=[WireDecl('mid', 8)],
+            comb_blocks=[
+                CombBlock(stmts=[Assign('mid', Sig('inp'))], locals={}),
+                CombBlock(stmts=[Assign('out', Sig('mid'))], locals={}),
+            ])
+        self.assertEqual(_find_merge_groups(ir), [[0, 1]])
+
+    def test_not_mergeable_output_port(self):
+        """Block 0 writes an output port → cannot merge."""
+        ir = IRModule(name='t',
+            ports=[Port('inp', 'input', 8), Port('mid', 'output', 8),
+                   Port('out', 'output', 8)],
+            comb_blocks=[
+                CombBlock(stmts=[Assign('mid', Sig('inp'))], locals={}),
+                CombBlock(stmts=[Assign('out', Sig('mid'))], locals={}),
+            ])
+        self.assertEqual(_find_merge_groups(ir), [[0], [1]])
+
+    def test_not_mergeable_seq_reads(self):
+        """Block 0 writes a signal read by a seq block → cannot merge."""
+        ir = IRModule(name='t',
+            ports=[Port('clk', 'input', 1), Port('inp', 'input', 8),
+                   Port('out', 'output', 8)],
+            wires=[WireDecl('mid', 8)],
+            comb_blocks=[
+                CombBlock(stmts=[Assign('mid', Sig('inp'))], locals={}),
+                CombBlock(stmts=[Assign('out', Sig('mid'))], locals={}),
+            ],
+            seq_blocks=[SeqBlock(
+                edges=[('posedge', 'clk')],
+                stmts=[Assign('out', Sig('mid'))],
+                locals={})])
+        self.assertEqual(_find_merge_groups(ir), [[0], [1]])
+
+    def test_merge_emits_single_function(self):
+        """Merged group emits one _comb_0 function, not two."""
+        ir = IRModule(name='t',
+            ports=[Port('inp', 'input', 8), Port('out', 'output', 8)],
+            wires=[WireDecl('mid', 8)],
+            comb_blocks=[
+                CombBlock(stmts=[Assign('mid', Sig('inp'))], locals={}),
+                CombBlock(stmts=[Assign('out', Sig('mid'))], locals={}),
+            ])
+        c = emit_c(ir)
+        self.assertIn('_comb_0(State* s)', c)
+        self.assertNotIn('_comb_1(State* s)', c)
+        # Both assignments appear in the merged function
+        self.assertIn('s->mid', c)
+        self.assertIn('s->out', c)
 
 
 class TestCSimModel(unittest.TestCase):
