@@ -531,17 +531,23 @@ def _inline_cont_assigns(ir: IRModule) -> IRModule:
 
     wire_names = {w.name for w in ir.wires}
 
-    # Collect candidates: wire written by exactly one single-stmt CombBlock
-    write_count: dict = {}
+    # Collect candidates: wire written by exactly one block (a single-stmt Assign)
+    # Count ALL writers (including Case/If blocks) to avoid inlining signals
+    # that are also written inside compound statements.
+    all_writers: dict = {}
     candidates: dict = {}
     for blk in ir.comb_blocks:
+        ws: set = set()
+        for stmt in blk.stmts:
+            _stmt_writes_reads(stmt, ws, set())
+        for name in ws:
+            all_writers[name] = all_writers.get(name, 0) + 1
         if len(blk.stmts) == 1 and isinstance(blk.stmts[0], Assign):
             name = blk.stmts[0].target
-            write_count[name] = write_count.get(name, 0) + 1
             if name in wire_names:
                 candidates[name] = blk.stmts[0].value
 
-    candidates = {n: e for n, e in candidates.items() if write_count.get(n, 0) == 1}
+    candidates = {n: e for n, e in candidates.items() if all_writers.get(n, 0) == 1}
 
     # Drop candidates read by seq blocks (stmts or edges)
     seq_reads: set = set()
