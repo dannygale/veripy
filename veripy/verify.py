@@ -275,14 +275,15 @@ class VeripyTestCase(unittest.TestCase):
         model.eval()
         outputs = {}
         for t, sets in self._trace_sets:
+            # Capture outputs BEFORE applying this timestep's sets,
+            # matching Python sim where out() reads before set() at same time.
+            if t in self._py_outputs and t not in outputs:
+                outputs[t] = {}
+                for name in self._py_outputs[t]:
+                    outputs[t][name] = model.get(name)
             for name, val in sets.items():
                 model.set(name, val)
             model.eval()
-            if t in self._py_outputs:
-                if t not in outputs:
-                    outputs[t] = {}
-                for name in self._py_outputs[t]:
-                    outputs[t][name] = model.get(name)
         # Capture outputs at times after the last trace_set
         for t in self._py_outputs:
             if t not in outputs:

@@ -79,8 +79,10 @@ def _collect_submodule_registry(module):
         if key in registry:
             return
         factory = getattr(type(mod), '_veripy_factory', None)
-        fresh = (factory(**resolved) if factory and resolved
-                 else factory() if factory else type(mod)())
+        if factory:
+            fresh = factory(**resolved) if resolved else factory()
+        else:
+            fresh = type(mod)(**resolved) if resolved else type(mod)()
         fresh_params = getattr(fresh, '_params', {})
         for _sn, sub in fresh._submodules().items():
             _collect(sub, parent_params=fresh_params)

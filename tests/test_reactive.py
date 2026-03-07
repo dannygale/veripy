@@ -194,6 +194,7 @@ class TestFork(unittest.TestCase):
 
 class TestUntilVeripyTestCase(VeripyTestCase):
     """Test until() inside dual-path framework (iverilog path skipped)."""
+    SKIP_CSIM = True  # reactive yields can't be replayed through csim
 
     def create_module(self):
         return Handshake()
