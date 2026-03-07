@@ -76,6 +76,19 @@ def _build_cpu_ir():
     return m, flat
 
 
+def _build_cpu_hier():
+    """Build hierarchical IR + registry for the CPU."""
+    from cpu import cpu
+    from veripy.lower import lower_module
+    from veripy.backend_csim import _collect_submodule_registry
+
+    m = cpu()
+    registry, patch_fn = _collect_submodule_registry(m)
+    top_ir = lower_module(m, 'cpu')
+    patch_fn(top_ir)
+    return m, top_ir, registry
+
+
 def _gen_c_bench(model_c, program, max_cycles=500000):
     """Generate combined C source: model + testbench that loads program."""
     prog_init = '\n'.join(
@@ -200,6 +213,73 @@ def compile_csim(ir, program, max_cycles=500000):
         capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f'csim compile failed:\n{r.stderr}')
+
+    ct = time.perf_counter() - t0
+    lib = ctypes.CDLL(lib_path)
+    lib.run_bench.restype = ctypes.c_uint64
+
+    def run():
+        return lib.run_bench()
+
+    def cleanup():
+        shutil.rmtree(build_dir, ignore_errors=True)
+
+    return run, ct, cleanup
+
+
+def compile_csim_hier(top_ir, registry, program, max_cycles=500000):
+    """Compile hierarchical csim benchmark, return (run_fn, compile_time, cleanup_fn)."""
+    from veripy.backend_csim import emit_c_hier
+
+    t0 = time.perf_counter()
+    model_c = emit_c_hier(top_ir, registry)
+
+    # Hierarchical struct: s->mem.mem[i] instead of s->mem_mem[i]
+    prog_init = '\n'.join(
+        f'    ((State_cpu*)p)->mem.mem[{i}] = 0x{w:08X}U;'
+        for i, w in enumerate(program))
+    nop_fill = f"""
+    for (int _i = {len(program)}; _i < 1024; _i++)
+        ((State_cpu*)p)->mem.mem[_i] = 0x00000013U;"""
+
+    bench = f"""
+uint64_t run_bench(void) {{
+    void* p = veripy_create();
+    veripy_set_clk(p, 0); veripy_set_rst(p, 1); veripy_set_ext_mip(p, 0);
+    veripy_eval(p);
+{prog_init}
+{nop_fill}
+    veripy_set_clk(p, 1); veripy_eval(p);
+    veripy_set_clk(p, 0); veripy_eval(p);
+    veripy_set_clk(p, 1); veripy_eval(p);
+    veripy_set_rst(p, 0);
+    uint64_t cycles = 0;
+    for (cycles = 0; cycles < {max_cycles}ULL; cycles++) {{
+        veripy_set_clk(p, 0); veripy_eval(p);
+        veripy_set_clk(p, 1); veripy_eval(p);
+        if (veripy_get_debug_halted(p)) break;
+    }}
+    veripy_destroy(p);
+    return cycles;
+}}
+"""
+    combined = model_c + bench
+
+    build_dir = tempfile.mkdtemp(prefix='veripy_cpu_hier_')
+    c_path = os.path.join(build_dir, 'bench.c')
+    with open(c_path, 'w') as f:
+        f.write(combined)
+
+    ext = '.dylib' if os.uname().sysname == 'Darwin' else '.so'
+    lib_path = os.path.join(build_dir, f'libbench{ext}')
+    flag = '-dynamiclib' if ext == '.dylib' else '-shared'
+    cc = os.environ.get('CC', 'cc')
+
+    r = subprocess.run(
+        [cc, '-O2', '-w', '-fPIC', flag, '-o', lib_path, c_path],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f'csim_hier compile failed:\n{r.stderr}')
 
     ct = time.perf_counter() - t0
     lib = ctypes.CDLL(lib_path)
@@ -361,8 +441,12 @@ endmodule
 def main():
     print('Building CPU IR...')
     module, ir = _build_cpu_ir()
-    print(f'  {len(ir.comb_blocks)} comb, {len(ir.seq_blocks)} seq, '
-          f'{sum(1 for m in ir.mems)} mems\n')
+    print(f'  flat: {len(ir.comb_blocks)} comb, {len(ir.seq_blocks)} seq, '
+          f'{sum(1 for m in ir.mems)} mems')
+
+    print('Building hierarchical IR...')
+    _, hier_ir, hier_reg = _build_cpu_hier()
+    print(f'  hier: {len(hier_reg)} module types\n')
 
     programs = {
         'fibonacci':  compile_program('fibonacci'),
@@ -377,14 +461,18 @@ def main():
     cyc_vvp = run_v(); cl_v()
     run_c, _, cl_c = compile_csim(ir, tiny, max_cycles=50000)
     cyc_csim = run_c(); cl_c()
+    run_h, _, cl_h = compile_csim_hier(hier_ir, hier_reg, tiny, max_cycles=50000)
+    cyc_hier = run_h(); cl_h()
     run_vl, _, cl_vl = compile_verilator(module, tiny, max_cycles=50000)
     cyc_vltr = run_vl(); cl_vl()
-    print(f'  vvp={cyc_vvp} cycles, csim={cyc_csim} cycles, vltr={cyc_vltr} cycles')
-    if cyc_vvp >= 50000 or cyc_csim >= 50000 or cyc_vltr >= 50000:
-        print('  ERROR: one or more backends did not halt!')
+    print(f'  vvp={cyc_vvp}, csim={cyc_csim}, csim_hier={cyc_hier}, vltr={cyc_vltr}')
+    backends = {'vvp': cyc_vvp, 'csim': cyc_csim, 'csim_hier': cyc_hier, 'vltr': cyc_vltr}
+    failed = [k for k, v in backends.items() if v >= 50000]
+    if failed:
+        print(f'  ERROR: did not halt: {", ".join(failed)}')
         return
-    if not (cyc_vvp == cyc_vltr):
-        print(f'  WARNING: cycle count mismatch vvp={cyc_vvp} vltr={cyc_vltr}')
+    if len(set(backends.values())) > 1:
+        print(f'  WARNING: cycle count mismatch!')
     print()
 
     results = []
