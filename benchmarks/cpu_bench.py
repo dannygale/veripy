@@ -481,58 +481,49 @@ def main():
 
         # vvp
         run_vvp, ct_vvp, cl_vvp = compile_vvp(prog)
-        t0 = time.perf_counter()
-        cyc_vvp = run_vvp()
-        exec_vvp = time.perf_counter() - t0
+        t0 = time.perf_counter(); cyc_vvp = run_vvp(); exec_vvp = time.perf_counter() - t0
         cl_vvp()
 
-        # csim
+        # csim (flat)
         run_c, ct_c, cl_c = compile_csim(ir, prog)
-        t0 = time.perf_counter()
-        cyc_c = run_c()
-        exec_c = time.perf_counter() - t0
+        t0 = time.perf_counter(); cyc_c = run_c(); exec_c = time.perf_counter() - t0
         cl_c()
+
+        # csim (hier)
+        run_h, ct_h, cl_h = compile_csim_hier(hier_ir, hier_reg, prog)
+        t0 = time.perf_counter(); cyc_h = run_h(); exec_h = time.perf_counter() - t0
+        cl_h()
 
         # Verilator
         run_vl, ct_vl, cl_vl = compile_verilator(module, prog)
-        t0 = time.perf_counter()
-        cyc_vl = run_vl()
-        exec_vl = time.perf_counter() - t0
+        t0 = time.perf_counter(); cyc_vl = run_vl(); exec_vl = time.perf_counter() - t0
         cl_vl()
 
-        print(f'  Cycles: vvp={cyc_vvp}, csim={cyc_c}, vltr={cyc_vl}')
-        print(f'  Compile: vvp={ct_vvp:.2f}s, csim={ct_c:.2f}s, vltr={ct_vl:.2f}s')
-        print(f'  Execute: vvp={exec_vvp:.4f}s, csim={exec_c:.4f}s, vltr={exec_vl:.4f}s')
-        total_vvp = ct_vvp + exec_vvp
-        total_c = ct_c + exec_c
-        total_vl = ct_vl + exec_vl
-        print(f'  Total:   vvp={total_vvp:.2f}s, csim={total_c:.2f}s, vltr={total_vl:.2f}s')
-        fastest = min(total_vvp, total_c, total_vl)
-        print(f'  Speedup: vvp={total_vvp/fastest:.1f}x, '
-              f'csim={total_c/fastest:.1f}x, vltr={total_vl/fastest:.1f}x')
+        print(f'  Cycles:  vvp={cyc_vvp}, csim={cyc_c}, csim_hier={cyc_h}, vltr={cyc_vl}')
+        print(f'  Compile: vvp={ct_vvp:.2f}s, csim={ct_c:.2f}s, csim_hier={ct_h:.2f}s, vltr={ct_vl:.2f}s')
+        print(f'  Execute: vvp={exec_vvp:.4f}s, csim={exec_c:.4f}s, csim_hier={exec_h:.4f}s, vltr={exec_vl:.4f}s')
         print()
-        results.append((name, cyc_vvp, ct_vvp, exec_vvp, ct_c, exec_c, ct_vl, exec_vl))
+        results.append((name, cyc_vvp, cyc_c, cyc_h, cyc_vl,
+                         ct_vvp, exec_vvp, ct_c, exec_c, ct_h, exec_h, ct_vl, exec_vl))
 
     # Summary table
-    print('=' * 90)
-    print(f'{"Program":<20} {"Cycles":>7} '
-          f'{"vvp":>12} {"csim":>12} {"vltr":>12} {"csim speedup":>12}')
-    print('-' * 90)
-    for name, cyc, ct_vvp, e_vvp, ct_c, e_c, ct_vl, e_vl in results:
-        t_vvp = ct_vvp + e_vvp
-        t_c = ct_c + e_c
-        t_vl = ct_vl + e_vl
-        print(f'{name:<20} {cyc:>7} '
-              f'{t_vvp:>10.2f}s {t_c:>10.2f}s {t_vl:>10.2f}s '
-              f'{t_vl/t_c:>10.1f}x')
+    W = 100
+    print('=' * W)
+    print(f'{"Program":<14} {"vvp":>8} {"csim":>8} {"hier":>8} {"vltr":>8}   '
+          f'{"vvp":>8} {"csim":>8} {"hier":>8} {"vltr":>8}')
+    print(f'{"":14} {"---cycles---":^35}   {"---exec time---":^35}')
+    print('-' * W)
+    for r in results:
+        name, c_vvp, c_c, c_h, c_vl = r[0], r[1], r[2], r[3], r[4]
+        e_vvp, e_c, e_h, e_vl = r[6], r[8], r[10], r[12]
+        print(f'{name:<14} {c_vvp:>8} {c_c:>8} {c_h:>8} {c_vl:>8}   '
+              f'{e_vvp:>7.4f}s {e_c:>7.4f}s {e_h:>7.4f}s {e_vl:>7.4f}s')
     print()
-    print('Exec-only (no compile):')
-    print(f'{"Program":<20} {"vvp exec":>10} {"csim exec":>10} {"vltr exec":>10} '
-          f'{"vvp/csim":>8} {"vltr/csim":>9}')
-    print('-' * 90)
-    for name, cyc, ct_vvp, e_vvp, ct_c, e_c, ct_vl, e_vl in results:
-        print(f'{name:<20} {e_vvp:>9.4f}s {e_c:>9.4f}s {e_vl:>9.4f}s '
-              f'{e_vvp/e_c:>7.1f}x {e_vl/e_c:>8.1f}x')
+    print('Compile time:')
+    print(f'{"Program":<14} {"vvp":>8} {"csim":>8} {"hier":>8} {"vltr":>8}')
+    print('-' * 50)
+    for r in results:
+        print(f'{r[0]:<14} {r[5]:>7.2f}s {r[7]:>7.2f}s {r[9]:>7.2f}s {r[11]:>7.2f}s')
 
 
 if __name__ == '__main__':
