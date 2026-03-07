@@ -973,6 +973,7 @@ def emit_c(ir: IRModule) -> str:
     lines.append('} State;')
     lines.append('')
     lines.append('static void _vcd_dump(State* s);')
+    lines.append('static int _assert_fail = 0;')
     lines.append('')
 
     # ── create / destroy ─────────────────────────────────────────
@@ -1111,7 +1112,22 @@ def emit_c(ir: IRModule) -> str:
             lines.extend('    ' + ol for ol in out_lines)
             lines.append('    }')
 
-    # ── Phase 4: Update previous values ──────────────────────────
+    # ── Phase 4: Runtime assertions (before prev update) ────────
+    for prop in ir.formal_props:
+        if prop.kind != 'assert':
+            continue
+        clk = clock_aliases.get(prop.clock, prop.clock)
+        clk_cur = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
+        if prop.edge == 'posedge':
+            edge_cond = f'({clk_cur} && !s->_prev_{clk})'
+        else:
+            edge_cond = f'(!{clk_cur} && s->_prev_{clk})'
+        cond = _expr(prop.expr, sig_w, pack_map)
+        lines.append(f'    if ({edge_cond} && !({cond})) {{')
+        lines.append(f'        _assert_fail = 1;')
+        lines.append(f'    }}')
+
+    # ── Phase 5: Update previous values ──────────────────────────
     for clk in sorted(clocks):
         clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
         lines.append(f'    s->_prev_{clk} = {clk_expr};')
@@ -1145,6 +1161,9 @@ def emit_c(ir: IRModule) -> str:
     lines.append(f'static FILE* _vcd_fp = 0;')
     lines.append(f'static uint64_t _vcd_prev[{n_trace}];')
     lines.append(f'static uint64_t _vcd_time = 0;')
+    lines.append('')
+    lines.append('int veripy_assert_failed(void) { return _assert_fail; }')
+    lines.append('void veripy_assert_clear(void) { _assert_fail = 0; }')
     lines.append('')
 
     # VCD header writer
@@ -2036,12 +2055,20 @@ class CSimModel:
         # VCD trace
         self._lib.veripy_trace_open.argtypes = [ctypes.c_char_p]
         self._lib.veripy_trace_close.argtypes = []
+        self._lib.veripy_assert_failed.restype = ctypes.c_int
+        self._lib.veripy_assert_clear.argtypes = []
 
     def trace_open(self, path):
         self._lib.veripy_trace_open(path.encode() if isinstance(path, str) else path)
 
     def trace_close(self):
         self._lib.veripy_trace_close()
+
+    def assert_failed(self):
+        return bool(self._lib.veripy_assert_failed())
+
+    def assert_clear(self):
+        self._lib.veripy_assert_clear()
 
     def set(self, name, val):
         self._setters[name](self._ptr, val)
