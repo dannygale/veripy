@@ -136,10 +136,16 @@ def _mask(width):
 
 
 def _resolve_width(w, params):
-    """Resolve a width that may be a param name to an int."""
+    """Resolve a width that may be a param name or expression to an int."""
     if isinstance(w, int):
         return w
-    return params.get(w, 1)
+    if w in params:
+        return params[w]
+    # Try evaluating as expression with params (e.g. 'NUM_LINES*LINE_SIZE')
+    try:
+        return int(eval(w, {"__builtins__": {}}, params))
+    except Exception:
+        return 1
 
 
 # ── Signal width map ─────────────────────────────────────────────────
@@ -306,6 +312,13 @@ def _expr(node, sig_w, pack_map=None) -> str:
         op = node.op
         if op == '!':
             return f'(!{_expr(node.operand, sig_w, pack_map)})'
+        if op == '~':
+            inner = _expr(node.operand, sig_w, pack_map)
+            # In C, ~(uint8_t)1 == 0xFE (truthy), but Verilog ~1'b1 == 1'b0.
+            # Mask result for 1-bit signals to preserve Verilog semantics.
+            if isinstance(node.operand, Sig) and sig_w.get(node.operand.name, 32) == 1:
+                return f'((~{inner}) & 0x1ULL)'
+            return f'(~{inner})'
         return f'({op}{_expr(node.operand, sig_w, pack_map)})'
     if isinstance(node, Compare):
         l, r = _expr(node.left, sig_w, pack_map), _expr(node.right, sig_w, pack_map)
@@ -1378,7 +1391,7 @@ def _emit_hier_module(ir, mod_type, registry, lines):
         child_ir = registry.get(inst.mod_type)
         if not child_ir:
             continue
-        if child_ir.seq_blocks:
+        if child_ir.seq_blocks or child_ir.instances:
             child_cid = _c_ident(inst.mod_type)
             lines.append(f'    _seq_{child_cid}(&s->{inst.inst_name});')
 
