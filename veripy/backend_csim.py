@@ -1149,6 +1149,27 @@ def emit_c(ir: IRModule) -> str:
                          f'{{ return ((State*)p)->{p.name}; }}')
         lines.append('')
 
+    # ── Internal signal getters (regs, mems) ─────────────────────
+    for r in ir.regs:
+        if any(p.name == r.name for p in ir.ports):
+            continue  # already emitted above
+        w = _resolve_width(r.width, ir.params)
+        if r.name in pack_map:
+            word, bit = pack_map[r.name]
+            lines.append(
+                f'uint64_t veripy_get_{r.name}(void* p) '
+                f'{{ return (((State*)p)->{word} >> {bit}ULL) & 1ULL; }}')
+        else:
+            lines.append(f'uint64_t veripy_get_{r.name}(void* p) '
+                         f'{{ return ((State*)p)->{r.name}; }}')
+        lines.append('')
+
+    for m in ir.mems:
+        w = _resolve_width(m.width, ir.params)
+        lines.append(f'uint64_t veripy_get_{m.name}(void* p, uint64_t idx) '
+                     f'{{ return ((State*)p)->{m.name}[idx]; }}')
+        lines.append('')
+
     return '\n'.join(lines) + '\n'
 
 # ── Hierarchical (per-module) C emission ─────────────────────────────
@@ -1922,10 +1943,28 @@ class CSimModel:
             fn.argtypes = [ctypes.c_void_p]
             self._getters[name] = fn
 
+        # Internal signal getters (regs, mems)
+        for r in ir.regs:
+            if r.name in self._getters:
+                continue
+            fn = getattr(self._lib, f'veripy_get_{r.name}')
+            fn.restype = ctypes.c_uint64
+            fn.argtypes = [ctypes.c_void_p]
+            self._getters[r.name] = fn
+
+        self._mem_getters = {}
+        for m in ir.mems:
+            fn = getattr(self._lib, f'veripy_get_{m.name}')
+            fn.restype = ctypes.c_uint64
+            fn.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+            self._mem_getters[m.name] = fn
+
     def set(self, name, val):
         self._setters[name](self._ptr, val)
 
-    def get(self, name):
+    def get(self, name, idx=None):
+        if idx is not None:
+            return self._mem_getters[name](self._ptr, idx)
         return self._getters[name](self._ptr)
 
     def eval(self):
