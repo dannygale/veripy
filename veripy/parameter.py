@@ -1,4 +1,5 @@
 """Parameter: deferred width placeholder for parameterized modules."""
+import math as _math
 
 
 def _vname(x):
@@ -57,6 +58,20 @@ class Parameter:
     def __int__(self):
         return self.default
 
+    def __index__(self):
+        return self.default
+
+    def __bool__(self):
+        return bool(self.default)
+
+    def __gt__(self, o): return self.default > (o.default if is_param(o) else o)
+    def __lt__(self, o): return self.default < (o.default if is_param(o) else o)
+    def __ge__(self, o): return self.default >= (o.default if is_param(o) else o)
+    def __le__(self, o): return self.default <= (o.default if is_param(o) else o)
+    def __eq__(self, o): return self.default == (o.default if is_param(o) else o)
+    def __ne__(self, o): return self.default != (o.default if is_param(o) else o)
+    def __hash__(self):  return hash(self.default)
+
     def _binop(self, other, op, op_str):
         n = f'{_vname(self)}{op_str}{_vname(other)}'
         if isinstance(other, Parameter):
@@ -80,3 +95,14 @@ class Parameter:
 def is_param(value):
     """Check if a value is a Parameter or ParamExpr."""
     return isinstance(value, (Parameter, ParamExpr))
+
+
+def clog2(p):
+    """Return a ParamExpr for $clog2(p), usable in Verilog parameter expressions."""
+    if isinstance(p, Parameter):
+        return ParamExpr(lambda v, s=p: _math.ceil(_math.log2(max(v[s.name], 2))),
+                         [p], f'$clog2({p.name})')
+    if isinstance(p, ParamExpr):
+        return ParamExpr(lambda v, s=p: _math.ceil(_math.log2(max(s.resolve(v), 2))),
+                         p._deps, f'$clog2({p.name})')
+    return int(_math.ceil(_math.log2(max(p, 2))))
