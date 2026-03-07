@@ -1261,6 +1261,8 @@ def emit_c(ir: IRModule) -> str:
         w = _resolve_width(m.width, ir.params)
         lines.append(f'uint64_t veripy_get_{m.name}(void* p, uint64_t idx) '
                      f'{{ return ((State*)p)->{m.name}[idx]; }}')
+        lines.append(f'void veripy_set_{m.name}(void* p, uint64_t idx, uint64_t v) '
+                     f'{{ ((State*)p)->{m.name}[idx] = ({_ctype(w)})(v & {_mask(w)}); }}')
         lines.append('')
 
     return '\n'.join(lines) + '\n'
@@ -2046,11 +2048,15 @@ class CSimModel:
             self._getters[r.name] = fn
 
         self._mem_getters = {}
+        self._mem_setters = {}
         for m in ir.mems:
             fn = getattr(self._lib, f'veripy_get_{m.name}')
             fn.restype = ctypes.c_uint64
             fn.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
             self._mem_getters[m.name] = fn
+            fn = getattr(self._lib, f'veripy_set_{m.name}')
+            fn.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint64]
+            self._mem_setters[m.name] = fn
 
         # VCD trace
         self._lib.veripy_trace_open.argtypes = [ctypes.c_char_p]
@@ -2070,8 +2076,17 @@ class CSimModel:
     def assert_clear(self):
         self._lib.veripy_assert_clear()
 
-    def set(self, name, val):
-        self._setters[name](self._ptr, val)
+    def set(self, name, val, idx=None):
+        if idx is not None:
+            self._mem_setters[name](self._ptr, idx, val)
+        else:
+            self._setters[name](self._ptr, val)
+
+    def load_mem(self, name, data, offset=0):
+        """Load data into a memory array. data is an iterable of int values."""
+        setter = self._mem_setters[name]
+        for i, val in enumerate(data):
+            setter(self._ptr, offset + i, val)
 
     def get(self, name, idx=None):
         if idx is not None:
