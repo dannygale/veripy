@@ -108,14 +108,14 @@ class TestEmitC(unittest.TestCase):
         self.assertIn('default', c)
 
     def test_per_block_cont_assigns(self):
-        """Continuous assigns get their own static function."""
+        """Continuous assigns are inlined into veripy_eval."""
         ir = IRModule(name='t',
             ports=[Port('a', 'input', 8), Port('out', 'output', 8)],
             assigns=[ContAssign('out', Sig('a'))])
         c = emit_c(ir)
-        self.assertIn('static', c)
-        self.assertIn('_cont_assigns(State* s)', c)
-        self.assertIn('_cont_assigns(s);', c)
+        # Monolithic eval: no separate _cont_assigns function
+        self.assertNotIn('_cont_assigns(State* s)', c)
+        self.assertIn('s->out', c)
 
     def test_per_block_comb(self):
         """Trivial single-statement comb blocks are inlined into veripy_eval()."""
@@ -124,14 +124,11 @@ class TestEmitC(unittest.TestCase):
             comb_blocks=[CombBlock(
                 stmts=[Assign('out', Sig('a'))], locals={})])
         c = emit_c(ir)
-        # Trivial block is inlined — no separate _comb_0 function
         self.assertNotIn('_comb_0(State* s)', c)
-        self.assertNotIn('_comb_0(s);', c)
-        # Statement appears directly in veripy_eval body
         self.assertIn('s->out', c)
 
     def test_per_block_comb_multi_stmt(self):
-        """Multi-statement comb blocks still get their own _comb_N() function."""
+        """Multi-statement comb blocks are inlined into veripy_eval (monolithic)."""
         ir = IRModule(name='t',
             ports=[Port('a', 'input', 8), Port('b', 'input', 8),
                    Port('out', 'output', 8), Port('out2', 'output', 8)],
@@ -139,69 +136,56 @@ class TestEmitC(unittest.TestCase):
                 stmts=[Assign('out', Sig('a')), Assign('out2', Sig('b'))],
                 locals={})])
         c = emit_c(ir)
-        self.assertIn('_comb_0(State* s)', c)
-        self.assertIn('_comb_0(s);', c)
+        # Monolithic: no separate function, everything in eval
+        self.assertNotIn('_comb_0(State* s)', c)
+        self.assertIn('s->out', c)
+        self.assertIn('s->out2', c)
 
     def test_per_block_seq(self):
-        """Each seq_block gets _seq_N()."""
+        """Seq blocks are inlined into veripy_eval (monolithic)."""
         c = emit_c(self._counter_ir())
-        self.assertIn('_seq_0(State* s)', c)
-        self.assertIn('_seq_0(s);', c)
+        # Monolithic: no separate _seq_0 function
+        self.assertNotIn('_seq_0(State* s)', c)
+        self.assertIn('_nba_cnt', c)
 
-    def test_eval_calls_not_inlines(self):
-        """veripy_eval should call block functions, not contain block logic."""
+    def test_eval_contains_all_logic(self):
+        """veripy_eval contains all comb+seq logic inline (monolithic)."""
         c = emit_c(self._counter_ir())
-        # Extract just the veripy_eval body
         start = c.index('void veripy_eval(')
-        # Find the matching closing brace
         depth = 0
         for i, ch in enumerate(c[start:], start):
-            if ch == '{':
-                depth += 1
+            if ch == '{': depth += 1
             elif ch == '}':
                 depth -= 1
                 if depth == 0:
                     eval_body = c[start:i + 1]
                     break
-        # eval body should NOT contain the seq block's internal logic (if/else)
-        # NBA init (s->_nba_x = s->x) and commit (s->x = s->_nba_x) are fine in eval
-        self.assertNotIn('if (((s->_pack_0 >> 1ULL)', eval_body)  # reset check is inside _seq_0
-        # but should contain function calls and NBA commit
-        self.assertIn('_seq_0(s)', eval_body)
-        self.assertIn('_cont_assigns(s)', eval_body)
+        # Seq logic is inline (NBA commit)
         self.assertIn('s->cnt = s->_nba_cnt', eval_body)
+        # No function calls to _seq or _cont_assigns
+        self.assertNotIn('_seq_0(s)', eval_body)
+        self.assertNotIn('_cont_assigns(s)', eval_body)
 
-    def test_inline_hint_small_block(self):
-        """Small blocks get always_inline."""
+    def test_monolithic_no_separate_functions(self):
+        """Monolithic eval emits no separate _comb/_seq/_cont functions."""
         ir = IRModule(name='t',
             ports=[Port('a', 'input', 8), Port('out', 'output', 8)],
             assigns=[ContAssign('out', Sig('a'))])
         c = emit_c(ir)
-        self.assertIn('__attribute__((always_inline))', c)
+        self.assertNotIn('always_inline', c)
 
-    def test_no_inline_hint_large_block(self):
-        """Blocks exceeding threshold do NOT get always_inline."""
-        # Create a comb block with > _INLINE_THRESHOLD statements
+    def test_large_block_inlined(self):
+        """Even large blocks are inlined in monolithic eval."""
         stmts = [Assign(f'out', Const(i)) for i in range(_INLINE_THRESHOLD + 1)]
         ir = IRModule(name='t',
             ports=[Port('out', 'output', 8)],
             comb_blocks=[CombBlock(stmts=stmts, locals={})])
         c = emit_c(ir)
-        # _comb_0 should NOT have always_inline
-        idx = c.index('_comb_0')
-        # Get the line containing _comb_0 definition
-        line_start = c.rfind('\n', 0, idx) + 1
-        line_end = c.index('\n', idx)
-        defn_line = c[line_start:line_end]
-        self.assertNotIn('always_inline', defn_line)
+        self.assertNotIn('_comb_0(State* s)', c)
+        self.assertIn('veripy_eval', c)
 
-    def test_struct_eval_order(self):
-        """State struct fields ordered by evaluation access pattern.
-
-        comb_0 writes 'mid' reading 'inp'; comb_1 writes 'out' reading 'mid'.
-        Struct should place inp, mid, out in that order (not alphabetical
-        or declaration order).
-        """
+    def test_struct_excludes_promoted_locals(self):
+        """Intermediate signals become C locals, not struct fields."""
         ir = IRModule(name='t',
             ports=[Port('inp', 'input', 8), Port('out', 'output', 8)],
             wires=[WireDecl('mid', 8)],
@@ -210,14 +194,13 @@ class TestEmitC(unittest.TestCase):
                 CombBlock(stmts=[Assign('out', Sig('mid'))], locals={}),
             ])
         c = emit_c(ir)
-        # Extract struct field order
+        # 'mid' should be a C local, not a struct field
         struct_start = c.index('typedef struct {')
         struct_end = c.index('} State;')
         struct_body = c[struct_start:struct_end]
-        import re
-        fields = re.findall(r'uint\d+_t (\w+);', struct_body)
-        self.assertEqual(fields.index('mid'), fields.index('inp') + 1)
-        self.assertLess(fields.index('mid'), fields.index('out'))
+        self.assertNotIn('mid', struct_body)
+        # But should appear as a local in veripy_eval
+        self.assertIn('uint8_t mid = 0;', c)
 
 
 class TestCountStmts(unittest.TestCase):
@@ -288,7 +271,7 @@ class TestFindMergeGroups(unittest.TestCase):
         self.assertEqual(_find_merge_groups(ir), [[0], [1]])
 
     def test_merge_emits_single_function(self):
-        """Merged group emits one _comb_0 function, not two."""
+        """Merged group emits both assignments inline in veripy_eval."""
         ir = IRModule(name='t',
             ports=[Port('inp', 'input', 8), Port('out', 'output', 8)],
             wires=[WireDecl('mid', 8)],
@@ -297,10 +280,11 @@ class TestFindMergeGroups(unittest.TestCase):
                 CombBlock(stmts=[Assign('out', Sig('mid'))], locals={}),
             ])
         c = emit_c(ir)
-        self.assertIn('_comb_0(State* s)', c)
+        # Monolithic: no separate functions
+        self.assertNotIn('_comb_0(State* s)', c)
         self.assertNotIn('_comb_1(State* s)', c)
-        # Both assignments appear in the merged function
-        self.assertIn('s->mid', c)
+        # mid is a C local, out is a struct field
+        self.assertIn('uint8_t mid = 0;', c)
         self.assertIn('s->out', c)
 
 
@@ -687,12 +671,13 @@ class TestNBA(unittest.TestCase):
     def test_nba_seq_writes_to_temp(self):
         """Seq block writes go to _nba_ temporaries, not directly to state."""
         c = emit_c(self._swap_ir())
-        # _seq_0 should write to _nba_a
-        seq0_start = c.index('void _seq_0(')
-        seq0_end = c.index('\n}', seq0_start) + 2
-        seq0_body = c[seq0_start:seq0_end]
-        self.assertIn('_nba_a', seq0_body)
-        self.assertNotIn('s->a =', seq0_body)
+        # In monolithic eval, seq logic is inline — check eval body
+        eval_start = c.index('void veripy_eval(')
+        eval_end = c.index('\n}', eval_start) + 2
+        eval_body = c[eval_start:eval_end]
+        self.assertIn('_nba_a', eval_body)
+        # No separate _seq_0 function
+        self.assertNotIn('void _seq_0(', c)
 
     def test_nba_eval_init_and_commit(self):
         """veripy_eval initializes NBA temps before seq blocks and commits after."""
