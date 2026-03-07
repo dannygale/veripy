@@ -887,6 +887,7 @@ def emit_c(ir: IRModule) -> str:
         '#include <stdint.h>',
         '#include <stdlib.h>',
         '#include <string.h>',
+        '#include <stdio.h>',
         '',
     ]
 
@@ -970,6 +971,8 @@ def emit_c(ir: IRModule) -> str:
     lines.append(f'    uint64_t _dirty[{n_dirty_words}];')
 
     lines.append('} State;')
+    lines.append('')
+    lines.append('static void _vcd_dump(State* s);')
     lines.append('')
 
     # ── create / destroy ─────────────────────────────────────────
@@ -1113,10 +1116,81 @@ def emit_c(ir: IRModule) -> str:
         clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
         lines.append(f'    s->_prev_{clk} = {clk_expr};')
 
+    lines.append('    _vcd_dump(s);')
     lines.append('}')
     lines.append('')
 
     _c_locals.clear()
+
+    # ── VCD trace support ────────────────────────────────────────
+    # Build list of traceable signals: ports + regs (not C locals, not mems)
+    trace_sigs = []  # (name, width, vcd_id)
+    vcd_id = 33  # start at '!' (ASCII 33)
+    for name in struct_ordered:
+        if name.startswith('_prev_') or name.startswith('_nba_') or name.startswith('_dirty'):
+            continue
+        w = all_sigs.get(name, sig_w.get(name, 1))
+        # VCD identifier: single or multi-char
+        tid = ''
+        v = vcd_id
+        while True:
+            tid = chr(33 + (v % 94)) + tid
+            v = v // 94
+            if v == 0:
+                break
+        trace_sigs.append((name, w, tid))
+        vcd_id += 1
+
+    n_trace = len(trace_sigs)
+    lines.append(f'static FILE* _vcd_fp = 0;')
+    lines.append(f'static uint64_t _vcd_prev[{n_trace}];')
+    lines.append(f'static uint64_t _vcd_time = 0;')
+    lines.append('')
+
+    # VCD header writer
+    lines.append('void veripy_trace_open(const char* path) {')
+    lines.append('    _vcd_fp = fopen(path, "w");')
+    lines.append('    if (!_vcd_fp) return;')
+    lines.append('    fprintf(_vcd_fp, "$timescale 1ns $end\\n");')
+    lines.append('    fprintf(_vcd_fp, "$scope module top $end\\n");')
+    for name, w, tid in trace_sigs:
+        lines.append(f'    fprintf(_vcd_fp, "$var wire {w} {tid} {name} $end\\n");')
+    lines.append('    fprintf(_vcd_fp, "$upscope $end\\n");')
+    lines.append('    fprintf(_vcd_fp, "$enddefinitions $end\\n");')
+    lines.append(f'    memset(_vcd_prev, 0xFF, sizeof(_vcd_prev));')
+    lines.append('    _vcd_time = 0;')
+    lines.append('}')
+    lines.append('')
+
+    lines.append('void veripy_trace_close(void) {')
+    lines.append('    if (_vcd_fp) { fclose(_vcd_fp); _vcd_fp = 0; }')
+    lines.append('}')
+    lines.append('')
+
+    # VCD dump function — called at end of each eval
+    lines.append('static void _vcd_dump(State* s) {')
+    lines.append('    if (!_vcd_fp) return;')
+    lines.append('    int any = 0;')
+    for i, (name, w, tid) in enumerate(trace_sigs):
+        if name in pack_map:
+            word, bit = pack_map[name]
+            val_expr = f'((s->{word} >> {bit}ULL) & 1ULL)'
+        else:
+            val_expr = f's->{name}'
+        lines.append(f'    {{ uint64_t v = {val_expr};')
+        lines.append(f'      if (v != _vcd_prev[{i}]) {{')
+        lines.append(f'        if (!any) {{ fprintf(_vcd_fp, "#%llu\\n", (unsigned long long)_vcd_time); any = 1; }}')
+        if w == 1:
+            lines.append(f'        fprintf(_vcd_fp, "%c{tid}\\n", (char)(\'0\' + (v & 1)));')
+        else:
+            lines.append(f'        fprintf(_vcd_fp, "b");')
+            lines.append(f'        for (int _b = {w - 1}; _b >= 0; _b--) fprintf(_vcd_fp, "%c", (char)(\'0\' + ((v >> _b) & 1)));')
+            lines.append(f'        fprintf(_vcd_fp, " {tid}\\n");')
+        lines.append(f'        _vcd_prev[{i}] = v;')
+        lines.append(f'    }} }}')
+    lines.append('    _vcd_time++;')
+    lines.append('}')
+    lines.append('')
 
     # ── Per-signal set/get ───────────────────────────────────────
     for p in ir.ports:
@@ -1959,6 +2033,16 @@ class CSimModel:
             fn.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
             self._mem_getters[m.name] = fn
 
+        # VCD trace
+        self._lib.veripy_trace_open.argtypes = [ctypes.c_char_p]
+        self._lib.veripy_trace_close.argtypes = []
+
+    def trace_open(self, path):
+        self._lib.veripy_trace_open(path.encode() if isinstance(path, str) else path)
+
+    def trace_close(self):
+        self._lib.veripy_trace_close()
+
     def set(self, name, val):
         self._setters[name](self._ptr, val)
 
@@ -1979,6 +2063,7 @@ class CSimModel:
 
     def close(self):
         if self._ptr:
+            self.trace_close()
             self._lib.veripy_destroy(self._ptr)
             self._ptr = None
         if self._tmpdir:
