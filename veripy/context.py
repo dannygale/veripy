@@ -28,6 +28,8 @@ class ModuleContext:
         self.assumes = []
         self.timing = []
         self.clock_domains = {}  # {domain_name: clock_signal_name}
+        self.behavioral_fn = None
+        self.behavioral_fn = None
 
 
 # --- Logic block decorators ---
@@ -39,6 +41,16 @@ def comb(fn):
         ctx.comb_blocks.append(fn)
     else:
         fn._veripy_comb = True
+    return fn
+
+
+def behavioral(fn):
+    """Register a behavioral model that replaces comb/seq during Python sim."""
+    ctx = _get_context()
+    if ctx is not None:
+        ctx.behavioral_fn = fn
+    else:
+        fn._veripy_behavioral = True
     return fn
 
 

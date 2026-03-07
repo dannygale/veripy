@@ -204,6 +204,8 @@ def module(func):
         instance._assertions = list(ctx.assertions)
         instance._covers = list(ctx.covers)
         instance._assumes = list(ctx.assumes)
+        if ctx.behavioral_fn is not None:
+            instance._behavioral = ctx.behavioral_fn
         for clock, fn in instance._assertions:
             src = emitter_sources.get(fn.__name__)
             if src:
