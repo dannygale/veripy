@@ -1460,3 +1460,100 @@ class TestNBACrossBlock(unittest.TestCase):
             self.assertEqual(m.get('ao'), 4)
             self.assertEqual(m.get('bo'), 3)
             self.assertEqual(m.get('co'), 2)
+
+
+class TestCSimVCDTrace(unittest.TestCase):
+    """Tests for VCD waveform dumping from CSimModel."""
+
+    def _counter_ir(self):
+        return IRModule(name='counter',
+            ports=[Port('clock', 'input', 1), Port('reset', 'input', 1),
+                   Port('enable', 'input', 1), Port('count', 'output', 4)],
+            regs=[RegDecl('cnt', 4)],
+            assigns=[ContAssign('count', Sig('cnt'))],
+            seq_blocks=[SeqBlock(
+                edges=[('posedge', 'clock')],
+                stmts=[If(Sig('reset'),
+                          [Assign('cnt', Const(0), False)],
+                          [If(Sig('enable'),
+                              [Assign('cnt', BinOp('+', Sig('cnt'), Const(1)), False)],
+                              [])])],
+                locals={})])
+
+    def test_trace_open_creates_vcd_file(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            vcd = os.path.join(d, 'out.vcd')
+            with CSimModel(self._counter_ir()) as m:
+                m.trace_open(vcd)
+                m.set('reset', 1)
+                m.step('clock')
+                m.trace_close()
+            self.assertTrue(os.path.exists(vcd))
+            content = open(vcd).read()
+            self.assertIn('$timescale', content)
+            self.assertIn('$var wire', content)
+            self.assertIn('count', content)
+
+    def test_trace_constructor_param(self):
+        """CSimModel(trace='path') opens trace automatically."""
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            vcd = os.path.join(d, 'out.vcd')
+            with CSimModel(self._counter_ir(), trace=vcd) as m:
+                m.set('reset', 1)
+                m.step('clock')
+            content = open(vcd).read()
+            self.assertIn('$timescale', content)
+
+    def test_trace_records_signal_changes(self):
+        """VCD contains timestamped value changes."""
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            vcd = os.path.join(d, 'out.vcd')
+            with CSimModel(self._counter_ir(), trace=vcd) as m:
+                m.set('reset', 1)
+                m.set('enable', 1)
+                m.step('clock')
+                m.set('reset', 0)
+                for _ in range(3):
+                    m.step('clock')
+            content = open(vcd).read()
+            # Should have timestamp markers
+            self.assertIn('#', content)
+            # Should have binary value changes
+            self.assertIn('b', content)
+
+    def test_trace_enable_disable(self):
+        """trace_enable(False) pauses recording; re-enable resumes."""
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            vcd = os.path.join(d, 'out.vcd')
+            with CSimModel(self._counter_ir(), trace=vcd) as m:
+                m.set('reset', 1)
+                m.set('enable', 1)
+                m.step('clock')
+                size_after_1 = os.path.getsize(vcd)
+                m.trace_enable(False)
+                m.set('reset', 0)
+                for _ in range(5):
+                    m.step('clock')
+                size_while_disabled = os.path.getsize(vcd)
+                # File should not grow while disabled
+                self.assertEqual(size_after_1, size_while_disabled)
+                m.trace_enable(True)
+                m.step('clock')
+            size_after_reenable = os.path.getsize(vcd)
+            self.assertGreater(size_after_reenable, size_while_disabled)
+
+    def test_vcd_has_enddefinitions(self):
+        """VCD header is well-formed."""
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            vcd = os.path.join(d, 'out.vcd')
+            with CSimModel(self._counter_ir(), trace=vcd) as m:
+                m.eval()
+            content = open(vcd).read()
+            self.assertIn('$enddefinitions $end', content)
+            self.assertIn('$scope module top $end', content)
+            self.assertIn('$upscope $end', content)

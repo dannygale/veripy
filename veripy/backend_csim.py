@@ -1159,6 +1159,7 @@ def emit_c(ir: IRModule) -> str:
 
     n_trace = len(trace_sigs)
     lines.append(f'static FILE* _vcd_fp = 0;')
+    lines.append(f'static int _vcd_enabled = 1;')
     lines.append(f'static uint64_t _vcd_prev[{n_trace}];')
     lines.append(f'static uint64_t _vcd_time = 0;')
     lines.append('')
@@ -1178,6 +1179,7 @@ def emit_c(ir: IRModule) -> str:
     lines.append('    fprintf(_vcd_fp, "$enddefinitions $end\\n");')
     lines.append(f'    memset(_vcd_prev, 0xFF, sizeof(_vcd_prev));')
     lines.append('    _vcd_time = 0;')
+    lines.append('    _vcd_enabled = 1;')
     lines.append('}')
     lines.append('')
 
@@ -1186,9 +1188,16 @@ def emit_c(ir: IRModule) -> str:
     lines.append('}')
     lines.append('')
 
+    lines.append('void veripy_trace_enable(int en) {')
+    lines.append('    if (en && !_vcd_enabled)')
+    lines.append(f'        memset(_vcd_prev, 0xFF, sizeof(_vcd_prev));  /* re-dump all on re-enable */')
+    lines.append('    _vcd_enabled = en;')
+    lines.append('}')
+    lines.append('')
+
     # VCD dump function — called at end of each eval
     lines.append('static void _vcd_dump(State* s) {')
-    lines.append('    if (!_vcd_fp) return;')
+    lines.append('    if (!_vcd_fp || !_vcd_enabled) return;')
     lines.append('    int any = 0;')
     for i, (name, w, tid) in enumerate(trace_sigs):
         if name in pack_map:
@@ -1977,7 +1986,7 @@ class CSimModel:
     Same API as VerilatorModel: set/get/eval/step/close.
     """
 
-    def __init__(self, ir: IRModule, build_dir=None, registry=None):
+    def __init__(self, ir: IRModule, build_dir=None, registry=None, trace=None):
         self._ptr = None
         self._tmpdir = None
         self._lib = None
@@ -2061,14 +2070,21 @@ class CSimModel:
         # VCD trace
         self._lib.veripy_trace_open.argtypes = [ctypes.c_char_p]
         self._lib.veripy_trace_close.argtypes = []
+        self._lib.veripy_trace_enable.argtypes = [ctypes.c_int]
         self._lib.veripy_assert_failed.restype = ctypes.c_int
         self._lib.veripy_assert_clear.argtypes = []
+
+        if trace:
+            self.trace_open(trace)
 
     def trace_open(self, path):
         self._lib.veripy_trace_open(path.encode() if isinstance(path, str) else path)
 
     def trace_close(self):
         self._lib.veripy_trace_close()
+
+    def trace_enable(self, enabled: bool):
+        self._lib.veripy_trace_enable(int(enabled))
 
     def assert_failed(self):
         return bool(self._lib.veripy_assert_failed())
