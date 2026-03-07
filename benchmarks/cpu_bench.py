@@ -276,7 +276,7 @@ uint64_t run_bench(void) {{
     cc = os.environ.get('CC', 'cc')
 
     r = subprocess.run(
-        [cc, '-O2', '-w', '-fPIC', flag, '-o', lib_path, c_path],
+        [cc, '-O3', '-march=native', '-flto', '-w', '-fPIC', flag, '-o', lib_path, c_path],
         capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f'csim_hier compile failed:\n{r.stderr}')
