@@ -284,6 +284,7 @@ def topo_sort_comb(mod: IRModule) -> IRModule:
             continue
         cur_writer = {}
         for i in idxs:
+            # Local variable read → writer edge
             for sig in node_reads_full[i]:
                 if sig not in all_locals:
                     continue
@@ -292,9 +293,16 @@ def topo_sort_comb(mod: IRModule) -> IRModule:
                     edge_set.add((src, i))
                     adj[src].append(i)
                     in_deg[i] += 1
+            # Same-signal write ordering: if an earlier statement wrote
+            # the same signal, the earlier one must execute first (it's
+            # a default that the later statement overrides).
             for sig in node_writes_full[i]:
-                if sig in all_locals:
-                    cur_writer[sig] = i
+                src = cur_writer.get(sig)
+                if src is not None and src != i and (src, i) not in edge_set:
+                    edge_set.add((src, i))
+                    adj[src].append(i)
+                    in_deg[i] += 1
+                cur_writer[sig] = i
 
     # Kahn's algorithm — level-aware with consumer grouping.
     # Within each topo level, sort nodes so that nodes feeding the same

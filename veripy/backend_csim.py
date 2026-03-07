@@ -324,6 +324,14 @@ def _expr(node, sig_w, pack_map=None) -> str:
         return f'({op}{_expr(node.operand, sig_w, pack_map)})'
     if isinstance(node, Compare):
         l, r = _expr(node.left, sig_w, pack_map), _expr(node.right, sig_w, pack_map)
+        # Mask operands to their widths so C integer promotion doesn't
+        # change overflow/wrap semantics (e.g. uint16 + uint16 < uint16).
+        lw = _expr_width(node.left, sig_w)
+        rw = _expr_width(node.right, sig_w)
+        if lw < 64:
+            l = f'({l} & {_mask(lw)})'
+        if rw < 64:
+            r = f'({r} & {_mask(rw)})'
         return f'({l} {node.op} {r})'
     if isinstance(node, BoolOp):
         parts = []
