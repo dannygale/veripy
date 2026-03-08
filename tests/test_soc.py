@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from veripy.soc import (
     AddressMap, AddrEntry, BusConfig, CpuConfig, MemoryRegion,
     Peripheral, PlatformConfig, SocConfig,
-    build_interconnect, build_top, gen_c_header, gen_linker_script,
+    build_interconnect, build_top, gen_c_header, gen_doc, gen_linker_script,
     parse_soc_config,
 )
 
@@ -324,6 +324,73 @@ class TestBuildTop(unittest.TestCase):
         self.assertIn('ram_inst', self.v)
 
 
+# ── gen_doc ───────────────────────────────────────────────────────────────────
+
+class TestGenDoc(unittest.TestCase):
+
+    def _make(self, with_cpu=False, with_periph=False):
+        d = _minimal_config_dict()
+        if with_cpu:
+            d['cpu'] = {'type': 'blackbox', 'clock': 'clk', 'reset': 'rst', 'bus_prefix': 'dbus'}
+        if with_periph:
+            d.setdefault('peripherals', []).append(
+                {'name': 'uart0', 'base': '0x40000000', 'size': '0x100'}
+            )
+        cfg = _parse_json_config(d)
+        am = AddressMap(cfg)
+        return gen_doc(cfg, am)
+
+    def test_title(self):
+        doc = self._make()
+        self.assertIn('# test_soc SoC', doc)
+
+    def test_memory_map_table_header(self):
+        doc = self._make()
+        self.assertIn('## Memory Map', doc)
+        self.assertIn('| Name |', doc)
+        self.assertIn('| Base |', doc)
+
+    def test_memory_map_entries(self):
+        doc = self._make()
+        self.assertIn('rom', doc)
+        self.assertIn('0x00000000', doc)
+        self.assertIn('ram', doc)
+        self.assertIn('0x20000000', doc)
+
+    def test_no_cpu_section_when_absent(self):
+        doc = self._make(with_cpu=False)
+        self.assertNotIn('## CPU', doc)
+
+    def test_cpu_section(self):
+        doc = self._make(with_cpu=True)
+        self.assertIn('## CPU', doc)
+        self.assertIn('dbus', doc)
+
+    def test_no_peripherals_section_when_absent(self):
+        doc = self._make(with_periph=False)
+        self.assertNotIn('## Peripherals', doc)
+
+    def test_peripherals_section(self):
+        doc = self._make(with_periph=True)
+        self.assertIn('## Peripherals', doc)
+        self.assertIn('uart0', doc)
+        self.assertIn('0x40000000', doc)
+
+    def test_block_diagram(self):
+        doc = self._make()
+        self.assertIn('## Block Diagram', doc)
+        self.assertIn('```', doc)
+        self.assertIn('test_soc', doc)
+
+    def test_peripheral_file_shown(self):
+        d = _minimal_config_dict()
+        d['peripherals'] = [{'name': 'uart0', 'base': '0x40000000', 'size': '0x100', 'file': 'uart.v'}]
+        cfg = _parse_json_config(d)
+        am = AddressMap(cfg)
+        doc = gen_doc(cfg, am)
+        self.assertIn('uart.v', doc)
+
+
 # ── build_soc (integration) ───────────────────────────────────────────────────
 
 class TestBuildSoc(unittest.TestCase):
@@ -342,6 +409,7 @@ class TestBuildSoc(unittest.TestCase):
             self.assertIn('test_soc_top.v', files)
             self.assertIn('test_soc.h', files)
             self.assertIn('test_soc.ld', files)
+            self.assertIn('test_soc.md', files)
 
 
 if __name__ == '__main__':

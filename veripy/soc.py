@@ -660,6 +660,69 @@ def gen_linker_script(config: SocConfig, addr_map: AddressMap) -> str:
 
 # ── Main build entry point ─────────────────────────────────────────────────────
 
+def gen_doc(config: 'SocConfig', addr_map: 'AddressMap') -> str:
+    """Generate markdown documentation for the SoC.
+
+    Includes a memory map table, peripheral summary, and ASCII block diagram.
+    """
+    lines: list[str] = [f'# {config.name} SoC', '']
+
+    # ── Memory map table ──────────────────────────────────────────────────────
+    lines += [
+        '## Memory Map', '',
+        '| Name | Base | End | Size | Kind | Type |',
+        '|------|------|-----|------|------|------|',
+    ]
+    for e in addr_map:
+        end = e.base + e.size - 1
+        lines.append(
+            f'| {e.name} | 0x{e.base:08X} | 0x{end:08X}'
+            f' | 0x{e.size:X} | {e.kind} | {e.subtype} |'
+        )
+    lines.append('')
+
+    # ── CPU summary ───────────────────────────────────────────────────────────
+    if config.cpu:
+        lines += [
+            '## CPU', '',
+            f'- Type: `{config.cpu.type}`',
+            f'- Clock: `{config.cpu.clock}`',
+            f'- Reset: `{config.cpu.reset}`',
+            f'- Bus prefix: `{config.cpu.bus_prefix}`',
+            '',
+        ]
+
+    # ── Peripheral summary ────────────────────────────────────────────────────
+    if config.peripherals:
+        lines += ['## Peripherals', '']
+        for p in config.peripherals:
+            lines.append(
+                f'- **{p.name}**: base `0x{p.base:08X}`, size `0x{p.size:X}`'
+                + (f', file `{p.file}`' if p.file else '')
+            )
+        lines.append('')
+
+    # ── ASCII block diagram ───────────────────────────────────────────────────
+    W = 34  # inner width
+    def _row(left, right=''):
+        inner = f'  {left:<{W - len(right) - 2}}{right}'
+        return f'  │{inner}│'
+
+    lines += ['## Block Diagram', '', '```']
+    lines.append(f'  ┌{"─" * W}┐')
+    lines.append(_row(config.name))
+    lines.append(f'  ├{"─" * W}┤')
+    if config.cpu:
+        lines.append(_row(f'CPU ({config.cpu.type})', f'[{config.cpu.bus_prefix}]'))
+        lines.append(f'  ├{"─" * W}┤')
+    for e in addr_map:
+        lines.append(_row(e.name, f'0x{e.base:08X}'))
+    lines.append(f'  └{"─" * W}┘')
+    lines += ['```', '']
+
+    return '\n'.join(lines)
+
+
 def build_soc(config_path: str, output_dir: str) -> None:
     """Parse config, generate all outputs into output_dir."""
     config = parse_soc_config(config_path)
@@ -671,12 +734,14 @@ def build_soc(config_path: str, output_dir: str) -> None:
     top_v = build_top(config, addr_map)
     c_hdr = gen_c_header(config, addr_map)
     ld_script = gen_linker_script(config, addr_map)
+    doc_md = gen_doc(config, addr_map)
 
     outputs = [
         (f'{config.name}_interconnect.v', interconnect_v),
         (f'{config.name}_top.v', top_v),
         (f'{config.name}.h', c_hdr),
         (f'{config.name}.ld', ld_script),
+        (f'{config.name}.md', doc_md),
     ]
 
     for fname, content in outputs:
