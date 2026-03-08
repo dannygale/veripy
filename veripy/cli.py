@@ -467,6 +467,16 @@ def cmd_profile(args):
     print()
 
 
+def cmd_soc(args):
+    """SoC builder subcommands."""
+    if args.soc_command == 'build':
+        from .soc import parse_soc_config, AddressMap, build_soc
+        try:
+            build_soc(args.config, args.output or '.')
+        except (ValueError, FileNotFoundError) as e:
+            sys.exit(f"error: {e}")
+
+
 def cmd_ip(args):
     """Manage installed VeriPy IP packages."""
     from .packaging import discover, scaffold
@@ -557,6 +567,13 @@ def main():
     p_equiv.add_argument("--gate-param", action="append", default=[], help="Gate module param (e.g. --gate-param n=4)")
     p_equiv.add_argument("--run", action="store_true", help="Run Yosys automatically (requires yosys on PATH)")
 
+    # soc
+    p_soc = sub.add_parser("soc", help="SoC builder commands")
+    soc_sub = p_soc.add_subparsers(dest="soc_command", required=True)
+    p_soc_build = soc_sub.add_parser("build", help="Build SoC from YAML/JSON config")
+    p_soc_build.add_argument("config", help="SoC config file (.yaml or .json)")
+    p_soc_build.add_argument("-o", "--output", help="Output directory (default: current dir)")
+
     # ip
     p_ip = sub.add_parser("ip", help="Manage VeriPy IP packages")
     ip_sub = p_ip.add_subparsers(dest="ip_command", required=True)
@@ -576,7 +593,7 @@ def main():
     {"build": cmd_build, "test": cmd_test, "import": cmd_import,
      "lint": cmd_lint, "formal": cmd_formal, "profile": cmd_profile,
      "equiv": cmd_equiv, "doc": cmd_doc, "ip": cmd_ip,
-     "init": cmd_init}[args.command](args)
+     "init": cmd_init, "soc": cmd_soc}[args.command](args)
 
 
 if __name__ == "__main__":
