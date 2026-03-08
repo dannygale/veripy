@@ -608,6 +608,32 @@ def cmd_soc(args):
         except (ValueError, FileNotFoundError) as e:
             sys.exit(f"error: {e}")
 
+    elif args.soc_command == 'sim':
+        from .soc import parse_soc_config, AddressMap
+        from .soc_sim import SocSim
+        try:
+            config = parse_soc_config(args.config)
+        except (ValueError, FileNotFoundError) as e:
+            sys.exit(f"error: {e}")
+
+        sim = SocSim(config)
+        addr_map = AddressMap(config)
+
+        print(f"SoC: {config.name}")
+        print("Memory map:")
+        for entry in addr_map:
+            print(f"  {entry.name:<20} 0x{entry.base:08x}  {entry.size // 1024}K")
+
+        if args.firmware:
+            try:
+                entry = sim.load_elf(args.firmware)
+            except (ValueError, FileNotFoundError, OSError) as e:
+                sys.exit(f"error loading ELF: {e}")
+            print(f"Firmware loaded: {args.firmware}")
+            print(f"Entry point:     0x{entry:08x}")
+        else:
+            print("(no firmware; pass --firmware <elf> to load)")
+
 
 def cmd_ip(args):
     """Manage installed VeriPy IP packages."""
@@ -735,6 +761,9 @@ def main():
     p_soc_build = soc_sub.add_parser("build", help="Build SoC from YAML/JSON config")
     p_soc_build.add_argument("config", help="SoC config file (.yaml or .json)")
     p_soc_build.add_argument("-o", "--output", help="Output directory (default: current dir)")
+    p_soc_sim = soc_sub.add_parser("sim", help="Simulate SoC with optional firmware ELF")
+    p_soc_sim.add_argument("config", help="SoC config file (.yaml or .json)")
+    p_soc_sim.add_argument("--firmware", metavar="ELF", help="Firmware ELF to load")
 
     # ip
     p_ip = sub.add_parser("ip", help="Manage VeriPy IP packages")
