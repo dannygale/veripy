@@ -25,7 +25,30 @@ from .ir import (
 
 # ── C type helpers ───────────────────────────────────────────────────
 
-def _collect_submodule_registry(module):
+_FSTAPI_SEARCH_DIRS = [
+    '/opt/homebrew/Cellar/verilator/*/share/verilator/include/gtkwave',
+    '/usr/local/share/verilator/include/gtkwave',
+    '/usr/share/verilator/include/gtkwave',
+    '/opt/homebrew/Cellar/yosys/*/share/yosys/include/libs/fst',
+    '/usr/local/share/yosys/include/libs/fst',
+]
+
+def _find_fstapi():
+    """Return (fstapi_h_dir, [c_files]) or (None, []) if not found."""
+    import glob as _glob
+    for pattern in _FSTAPI_SEARCH_DIRS:
+        for d in sorted(_glob.glob(pattern), reverse=True):
+            h = os.path.join(d, 'fstapi.h')
+            c = os.path.join(d, 'fstapi.c')
+            if os.path.exists(h) and os.path.exists(c):
+                srcs = [c]
+                for companion in ('fastlz.c', 'lz4.c'):
+                    p = os.path.join(d, companion)
+                    if os.path.exists(p):
+                        srcs.append(p)
+                return d, srcs
+    return None, []
+
     """Build a registry of sub-module IRs, keyed by unique type+params.
 
     Different parameterizations of the same module (e.g. cache with
@@ -1101,6 +1124,9 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
         '#include <stdlib.h>',
         '#include <string.h>',
         '#include <stdio.h>',
+        '#ifdef VERIPY_FST',
+        '#include "fstapi.h"',
+        '#endif',
         '',
     ]
 
@@ -1444,6 +1470,13 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
     lines.append(f'static int _vcd_enabled = 1;')
     lines.append(f'static uint64_t _vcd_prev[{n_trace}];')
     lines.append(f'static uint64_t _vcd_time = 0;')
+    lines.append('#ifdef VERIPY_FST')
+    lines.append(f'static void* _fst_ctx = NULL;')
+    lines.append(f'static fstHandle _fst_handles[{n_trace}];')
+    lines.append(f'static uint64_t _fst_prev[{n_trace}];')
+    lines.append(f'static uint64_t _fst_time = 0;')
+    lines.append(f'static int _fst_enabled = 1;')
+    lines.append('#endif')
     lines.append('')
     lines.append('int veripy_assert_failed(void) { return _assert_fail; }')
     lines.append('void veripy_assert_clear(void) { _assert_fail = 0; _assert_fail_prop = -1; _assert_fail_cycle = 0; }')
@@ -1455,6 +1488,23 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
 
     # VCD header writer
     lines.append('void veripy_trace_open(const char* path) {')
+    lines.append('    size_t _plen = strlen(path);')
+    lines.append('    int _use_fst = (_plen > 4 && strcmp(path + _plen - 4, ".fst") == 0);')
+    lines.append('    if (_use_fst) {')
+    lines.append('#ifdef VERIPY_FST')
+    lines.append('        _fst_ctx = fstWriterCreate(path, 1);')
+    lines.append('        if (!_fst_ctx) return;')
+    lines.append('        fstWriterSetTimescaleFromString(_fst_ctx, "1ns");')
+    lines.append('        fstWriterSetScope(_fst_ctx, FST_ST_VCD_MODULE, "top", "");')
+    for i, (name, w, _) in enumerate(trace_sigs):
+        lines.append(f'        _fst_handles[{i}] = fstWriterCreateVar(_fst_ctx, FST_VT_VCD_WIRE, FST_VD_IMPLICIT, {w}, "{name}", 0);')
+    lines.append('        fstWriterSetUpscope(_fst_ctx);')
+    lines.append(f'        memset(_fst_prev, 0xFF, sizeof(_fst_prev));')
+    lines.append('        _fst_time = 0;')
+    lines.append('        _fst_enabled = 1;')
+    lines.append('#endif')
+    lines.append('        return;')
+    lines.append('    }')
     lines.append('    _vcd_fp = fopen(path, "w");')
     lines.append('    if (!_vcd_fp) return;')
     lines.append('    fprintf(_vcd_fp, "$timescale 1ns $end\\n");')
@@ -1470,11 +1520,20 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
     lines.append('')
 
     lines.append('void veripy_trace_close(void) {')
+    lines.append('#ifdef VERIPY_FST')
+    lines.append('    if (_fst_ctx) { fstWriterClose(_fst_ctx); _fst_ctx = NULL; }')
+    lines.append('#endif')
     lines.append('    if (_vcd_fp) { fclose(_vcd_fp); _vcd_fp = 0; }')
     lines.append('}')
     lines.append('')
 
     lines.append('void veripy_trace_enable(int en) {')
+    lines.append('#ifdef VERIPY_FST')
+    lines.append('    if (_fst_ctx) {')
+    lines.append(f'        if (en && !_fst_enabled) memset(_fst_prev, 0xFF, sizeof(_fst_prev));')
+    lines.append('        _fst_enabled = en; return;')
+    lines.append('    }')
+    lines.append('#endif')
     lines.append('    if (en && !_vcd_enabled)')
     lines.append(f'        memset(_vcd_prev, 0xFF, sizeof(_vcd_prev));  /* re-dump all on re-enable */')
     lines.append('    _vcd_enabled = en;')
@@ -1483,6 +1542,28 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
 
     # VCD dump function — called at end of each eval
     lines.append('static void _vcd_dump(State* s) {')
+    lines.append('#ifdef VERIPY_FST')
+    lines.append('    if (_fst_ctx && _fst_enabled) {')
+    lines.append('        int _fany = 0;')
+    for i, (name, w, _) in enumerate(trace_sigs):
+        if name in pack_map:
+            word, bit = pack_map[name]
+            val_expr = f'((s->{word} >> {bit}ULL) & 1ULL)'
+        else:
+            val_expr = f's->{name}'
+        lines.append(f'    {{ uint64_t v = {val_expr};')
+        lines.append(f'      if (v != _fst_prev[{i}]) {{')
+        lines.append(f'        if (!_fany) {{ fstWriterEmitTimeChange(_fst_ctx, _fst_time); _fany = 1; }}')
+        if w == 1:
+            lines.append(f'        {{ char _b[2]; _b[0] = (char)(\'0\' + (v & 1)); _b[1] = 0; fstWriterEmitValueChange(_fst_ctx, _fst_handles[{i}], _b); }}')
+        else:
+            lines.append(f'        {{ char _b[{w + 1}]; for (int _bi = 0; _bi < {w}; _bi++) _b[_bi] = (char)(\'0\' + ((v >> ({w - 1} - _bi)) & 1)); _b[{w}] = 0; fstWriterEmitValueChange(_fst_ctx, _fst_handles[{i}], _b); }}')
+        lines.append(f'        _fst_prev[{i}] = v;')
+        lines.append(f'    }} }}')
+    lines.append('        _fst_time++;')
+    lines.append('        return;')
+    lines.append('    }')
+    lines.append('#endif')
     lines.append('    if (!_vcd_fp || !_vcd_enabled) return;')
     lines.append('    int any = 0;')
     for i, (name, w, tid) in enumerate(trace_sigs):
@@ -2342,8 +2423,15 @@ class CSimModel:
 
         cc = os.environ.get('CC', 'cc')
         flag = '-dynamiclib' if ext == '.dylib' else '-shared'
+        fstapi_dir, fstapi_srcs = _find_fstapi()
+        extra_flags = []
+        extra_srcs = []
+        if fstapi_dir:
+            extra_flags = [f'-I{fstapi_dir}', '-DVERIPY_FST', '-lz']
+            extra_srcs = fstapi_srcs
         r = subprocess.run(
-            [cc, '-O3', '-march=native', '-flto', '-fPIC', flag, '-o', lib_path, c_path],
+            [cc, '-O3', '-march=native', '-flto', '-fPIC', flag, '-o', lib_path,
+             c_path] + extra_srcs + extra_flags,
             capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(f'C compilation failed:\n{r.stderr}')
@@ -2779,6 +2867,12 @@ def compile_bench(module, tb_ir, module_name=None):
     cc = os.environ.get('CC', 'cc')
     flag = '-dynamiclib' if ext == '.dylib' else '-shared'
     pgo = os.environ.get('VERIPY_PGO', '0') == '1'
+    fstapi_dir, fstapi_srcs = _find_fstapi()
+    extra_flags = []
+    extra_srcs = []
+    if fstapi_dir:
+        extra_flags = [f'-I{fstapi_dir}', '-DVERIPY_FST', '-lz']
+        extra_srcs = fstapi_srcs
 
     if pgo:
         # Pass 1: instrument for profiling
@@ -2787,7 +2881,7 @@ def compile_bench(module, tb_ir, module_name=None):
         r1 = subprocess.run(
             [cc, '-O3', '-march=native', '-fPIC', flag,
              '-fprofile-generate=' + prof_dir,
-             '-o', lib_path, c_path],
+             '-o', lib_path, c_path] + extra_srcs + extra_flags,
             capture_output=True, text=True)
         if r1.returncode != 0:
             raise RuntimeError(f'PGO pass-1 failed:\n{r1.stderr}')
@@ -2800,10 +2894,10 @@ def compile_bench(module, tb_ir, module_name=None):
         r = subprocess.run(
             [cc, '-O3', '-march=native', '-flto', '-fPIC', flag,
              '-fprofile-use=' + prof_dir,
-             '-o', lib_path, c_path],
+             '-o', lib_path, c_path] + extra_srcs + extra_flags,
             capture_output=True, text=True)
     else:
-        r = subprocess.run([cc, '-O3', '-march=native', '-flto', '-fPIC', flag, '-o', lib_path, c_path],
+        r = subprocess.run([cc, '-O3', '-march=native', '-flto', '-fPIC', flag, '-o', lib_path, c_path] + extra_srcs + extra_flags,
                            capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f'Bench compilation failed:\n{r.stderr}\n\nSource:\n{combined_c}')
