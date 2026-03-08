@@ -4,7 +4,7 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
 from veripy import Module, Input, Output, Register
-from veripy.axi4 import Axi4Bus, Axi4Sub, RESP_OKAY, BURST_INCR
+from veripy.axi4 import Axi4Bus, Axi4Sub, Axi4Crossbar, RESP_OKAY, BURST_INCR
 from veripy.sim import SimEngine
 
 T = 10  # time units per half-period (posedge every T units)
@@ -216,6 +216,121 @@ class TestAxi4SubSim(unittest.TestCase):
 
         r = _run(_make_sub(), stim)
         self.assertEqual(r['rdata'], 0xCAFEBABE)
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+
+# ── Axi4Crossbar tests ───────────────────────────────────────────────
+
+class TestAxi4Crossbar(unittest.TestCase):
+
+    def _make_xbar(self):
+        return Axi4Crossbar(
+            addr_map=[(0x0000, 0x1000), (0x1000, 0x1000)],
+            data_width=32, addr_width=16, id_width=4,
+        )
+
+    def test_construction(self):
+        xbar = self._make_xbar()
+        self.assertIsInstance(xbar, Module)
+        self.assertIsInstance(xbar.m_bus, Axi4Bus)
+        self.assertIsInstance(xbar.s_bus_0, Axi4Bus)
+        self.assertIsInstance(xbar.s_bus_1, Axi4Bus)
+
+    def test_signals_flattened(self):
+        xbar = self._make_xbar()
+        sigs = xbar._signals()
+        self.assertIn('m_bus_awaddr', sigs)
+        self.assertIn('s_bus_0_awvalid', sigs)
+        self.assertIn('s_bus_1_arvalid', sigs)
+
+    def test_write_route_to_sub0(self):
+        """awvalid routed to s_bus_0 when address in [0x0000, 0x1000)."""
+        xbar = self._make_xbar()
+        sim = SimEngine(xbar)
+        results = {}
+
+        def stim():
+            xbar.m_bus.awaddr.set(0x0100)
+            xbar.m_bus.awvalid.set(1)
+            xbar.m_bus.awid.set(3)
+            xbar.m_bus.awlen.set(0)
+            xbar.m_bus.awsize.set(2)
+            xbar.m_bus.awburst.set(BURST_INCR)
+            yield 1
+            results['s0_awvalid'] = int(xbar.s_bus_0.awvalid)
+            results['s1_awvalid'] = int(xbar.s_bus_1.awvalid)
+            results['s0_awaddr']  = int(xbar.s_bus_0.awaddr)
+
+        sim.initial(stim)
+        sim.run()
+        self.assertEqual(results['s0_awvalid'], 1)
+        self.assertEqual(results['s1_awvalid'], 0)
+        self.assertEqual(results['s0_awaddr'],  0x0100)
+
+    def test_write_route_to_sub1(self):
+        """awvalid routed to s_bus_1 when address in [0x1000, 0x2000)."""
+        xbar = self._make_xbar()
+        sim = SimEngine(xbar)
+        results = {}
+
+        def stim():
+            xbar.m_bus.awaddr.set(0x1200)
+            xbar.m_bus.awvalid.set(1)
+            xbar.m_bus.awlen.set(0)
+            xbar.m_bus.awsize.set(2)
+            xbar.m_bus.awburst.set(BURST_INCR)
+            yield 1
+            results['s0_awvalid'] = int(xbar.s_bus_0.awvalid)
+            results['s1_awvalid'] = int(xbar.s_bus_1.awvalid)
+            results['s1_awaddr']  = int(xbar.s_bus_1.awaddr)
+
+        sim.initial(stim)
+        sim.run()
+        self.assertEqual(results['s0_awvalid'], 0)
+        self.assertEqual(results['s1_awvalid'], 1)
+        self.assertEqual(results['s1_awaddr'],  0x1200)
+
+    def test_read_route_to_sub0(self):
+        """arvalid routed to s_bus_0 for address in range."""
+        xbar = self._make_xbar()
+        sim = SimEngine(xbar)
+        results = {}
+
+        def stim():
+            xbar.m_bus.araddr.set(0x0500)
+            xbar.m_bus.arvalid.set(1)
+            xbar.m_bus.arlen.set(0)
+            xbar.m_bus.arsize.set(2)
+            xbar.m_bus.arburst.set(BURST_INCR)
+            yield 1
+            results['s0_arvalid'] = int(xbar.s_bus_0.arvalid)
+            results['s1_arvalid'] = int(xbar.s_bus_1.arvalid)
+
+        sim.initial(stim)
+        sim.run()
+        self.assertEqual(results['s0_arvalid'], 1)
+        self.assertEqual(results['s1_arvalid'], 0)
+
+    def test_out_of_range_decerr(self):
+        """Address outside all ranges: awready=0, bresp=DECERR (3)."""
+        xbar = self._make_xbar()
+        sim = SimEngine(xbar)
+        results = {}
+
+        def stim():
+            xbar.m_bus.awaddr.set(0x9000)
+            xbar.m_bus.awvalid.set(1)
+            yield 1
+            results['awready'] = int(xbar.m_bus.awready)
+            results['bresp']   = int(xbar.m_bus.bresp)
+
+        sim.initial(stim)
+        sim.run()
+        self.assertEqual(results['awready'], 0)
+        self.assertEqual(results['bresp'],   3)   # DECERR
 
 
 if __name__ == '__main__':

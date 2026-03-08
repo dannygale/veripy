@@ -190,3 +190,162 @@ class Axi4Sub(Module):
             self.bus.rresp   = 0
             self.bus.rlast   = 1 if self.rbeat == self.rlen_r else 0
             self.bus.rvalid  = 1 if self.rstate == R_RDATA else 0
+
+
+class Axi4Crossbar:
+    """AXI4 1-master to N-subordinate address-decode crossbar.
+
+    Routes a single master's transactions to one of N subordinates based on
+    address ranges.  Write and read channels are decoded independently.
+    Responses are muxed back to the master.
+
+    Parameters
+    ----------
+    addr_map   : list of (base, size) tuples — one entry per subordinate.
+                 Addresses in ``[base, base+size)`` route to that subordinate.
+    data_width : int — data bus width (default 32).
+    addr_width : int — address bus width (default 32).
+    id_width   : int — transaction ID width (default 4).
+
+    After construction the module exposes:
+
+    * ``self.m_bus``    — master-side :class:`Axi4Bus` (connect to CPU)
+    * ``self.s_bus_0``  — subordinate 0 :class:`Axi4Bus`
+    * ``self.s_bus_1``  — subordinate 1 :class:`Axi4Bus`
+    * … one per entry in *addr_map*
+
+    Usage::
+
+        xbar = Axi4Crossbar(
+            addr_map=[(0x0000_0000, 0x1000), (0x0001_0000, 0x1000)],
+        )
+    """
+
+    def __new__(cls, addr_map, data_width=32, addr_width=32, id_width=4):
+        return _build_crossbar(addr_map, data_width, addr_width, id_width)
+
+
+def _build_crossbar(addr_map, data_width, addr_width, id_width):
+    from .module import Module
+    import types
+
+    n = len(addr_map)
+
+    # ── combinational routing function ───────────────────────────────
+    # Write decode + route
+    wr_lines = ['def _wr_route(self):']
+    # Default: no subordinate selected
+    for i in range(n):
+        wr_lines.append(f'    self.s_bus_{i}.awid    = 0')
+        wr_lines.append(f'    self.s_bus_{i}.awaddr  = 0')
+        wr_lines.append(f'    self.s_bus_{i}.awlen   = 0')
+        wr_lines.append(f'    self.s_bus_{i}.awsize  = 0')
+        wr_lines.append(f'    self.s_bus_{i}.awburst = 0')
+        wr_lines.append(f'    self.s_bus_{i}.awlock  = 0')
+        wr_lines.append(f'    self.s_bus_{i}.awcache = 0')
+        wr_lines.append(f'    self.s_bus_{i}.awprot  = 0')
+        wr_lines.append(f'    self.s_bus_{i}.awqos   = 0')
+        wr_lines.append(f'    self.s_bus_{i}.awvalid = 0')
+        wr_lines.append(f'    self.s_bus_{i}.wdata   = 0')
+        wr_lines.append(f'    self.s_bus_{i}.wstrb   = 0')
+        wr_lines.append(f'    self.s_bus_{i}.wlast   = 0')
+        wr_lines.append(f'    self.s_bus_{i}.wvalid  = 0')
+        wr_lines.append(f'    self.s_bus_{i}.bready  = 0')
+    wr_lines.append('    self.m_bus.awready = 0')
+    wr_lines.append('    self.m_bus.wready  = 0')
+    wr_lines.append('    self.m_bus.bid     = 0')
+    wr_lines.append('    self.m_bus.bresp   = 3')
+    wr_lines.append('    self.m_bus.bvalid  = 0')
+    for i, (base, size) in enumerate(addr_map):
+        kw = 'if' if i == 0 else 'elif'
+        wr_lines.append(
+            f'    {kw} self.m_bus.awaddr >= {base} and self.m_bus.awaddr < {base + size}:'
+        )
+        wr_lines.append(f'        self.s_bus_{i}.awid    = self.m_bus.awid')
+        wr_lines.append(f'        self.s_bus_{i}.awaddr  = self.m_bus.awaddr')
+        wr_lines.append(f'        self.s_bus_{i}.awlen   = self.m_bus.awlen')
+        wr_lines.append(f'        self.s_bus_{i}.awsize  = self.m_bus.awsize')
+        wr_lines.append(f'        self.s_bus_{i}.awburst = self.m_bus.awburst')
+        wr_lines.append(f'        self.s_bus_{i}.awlock  = self.m_bus.awlock')
+        wr_lines.append(f'        self.s_bus_{i}.awcache = self.m_bus.awcache')
+        wr_lines.append(f'        self.s_bus_{i}.awprot  = self.m_bus.awprot')
+        wr_lines.append(f'        self.s_bus_{i}.awqos   = self.m_bus.awqos')
+        wr_lines.append(f'        self.s_bus_{i}.awvalid = self.m_bus.awvalid')
+        wr_lines.append(f'        self.s_bus_{i}.wdata   = self.m_bus.wdata')
+        wr_lines.append(f'        self.s_bus_{i}.wstrb   = self.m_bus.wstrb')
+        wr_lines.append(f'        self.s_bus_{i}.wlast   = self.m_bus.wlast')
+        wr_lines.append(f'        self.s_bus_{i}.wvalid  = self.m_bus.wvalid')
+        wr_lines.append(f'        self.s_bus_{i}.bready  = self.m_bus.bready')
+        wr_lines.append(f'        self.m_bus.awready = self.s_bus_{i}.awready')
+        wr_lines.append(f'        self.m_bus.wready  = self.s_bus_{i}.wready')
+        wr_lines.append(f'        self.m_bus.bid     = self.s_bus_{i}.bid')
+        wr_lines.append(f'        self.m_bus.bresp   = self.s_bus_{i}.bresp')
+        wr_lines.append(f'        self.m_bus.bvalid  = self.s_bus_{i}.bvalid')
+
+    # Read decode + route
+    rd_lines = ['def _rd_route(self):']
+    for i in range(n):
+        rd_lines.append(f'    self.s_bus_{i}.arid    = 0')
+        rd_lines.append(f'    self.s_bus_{i}.araddr  = 0')
+        rd_lines.append(f'    self.s_bus_{i}.arlen   = 0')
+        rd_lines.append(f'    self.s_bus_{i}.arsize  = 0')
+        rd_lines.append(f'    self.s_bus_{i}.arburst = 0')
+        rd_lines.append(f'    self.s_bus_{i}.arlock  = 0')
+        rd_lines.append(f'    self.s_bus_{i}.arcache = 0')
+        rd_lines.append(f'    self.s_bus_{i}.arprot  = 0')
+        rd_lines.append(f'    self.s_bus_{i}.arqos   = 0')
+        rd_lines.append(f'    self.s_bus_{i}.arvalid = 0')
+        rd_lines.append(f'    self.s_bus_{i}.rready  = 0')
+    rd_lines.append('    self.m_bus.arready = 0')
+    rd_lines.append('    self.m_bus.rid     = 0')
+    rd_lines.append('    self.m_bus.rdata   = 0')
+    rd_lines.append('    self.m_bus.rresp   = 3')
+    rd_lines.append('    self.m_bus.rlast   = 0')
+    rd_lines.append('    self.m_bus.rvalid  = 0')
+    for i, (base, size) in enumerate(addr_map):
+        kw = 'if' if i == 0 else 'elif'
+        rd_lines.append(
+            f'    {kw} self.m_bus.araddr >= {base} and self.m_bus.araddr < {base + size}:'
+        )
+        rd_lines.append(f'        self.s_bus_{i}.arid    = self.m_bus.arid')
+        rd_lines.append(f'        self.s_bus_{i}.araddr  = self.m_bus.araddr')
+        rd_lines.append(f'        self.s_bus_{i}.arlen   = self.m_bus.arlen')
+        rd_lines.append(f'        self.s_bus_{i}.arsize  = self.m_bus.arsize')
+        rd_lines.append(f'        self.s_bus_{i}.arburst = self.m_bus.arburst')
+        rd_lines.append(f'        self.s_bus_{i}.arlock  = self.m_bus.arlock')
+        rd_lines.append(f'        self.s_bus_{i}.arcache = self.m_bus.arcache')
+        rd_lines.append(f'        self.s_bus_{i}.arprot  = self.m_bus.arprot')
+        rd_lines.append(f'        self.s_bus_{i}.arqos   = self.m_bus.arqos')
+        rd_lines.append(f'        self.s_bus_{i}.arvalid = self.m_bus.arvalid')
+        rd_lines.append(f'        self.s_bus_{i}.rready  = self.m_bus.rready')
+        rd_lines.append(f'        self.m_bus.arready = self.s_bus_{i}.arready')
+        rd_lines.append(f'        self.m_bus.rid     = self.s_bus_{i}.rid')
+        rd_lines.append(f'        self.m_bus.rdata   = self.s_bus_{i}.rdata')
+        rd_lines.append(f'        self.m_bus.rresp   = self.s_bus_{i}.rresp')
+        rd_lines.append(f'        self.m_bus.rlast   = self.s_bus_{i}.rlast')
+        rd_lines.append(f'        self.m_bus.rvalid  = self.s_bus_{i}.rvalid')
+
+    def _compile(name, lines):
+        src = '\n'.join(lines)
+        ns = {}
+        exec(compile(src, f'<axi4crossbar:{name}>', 'exec'), ns)
+        fn = ns[name]
+        fn._veripy_emit_source = src
+        return fn
+
+    wr_fn = _compile('_wr_route', wr_lines)
+    rd_fn = _compile('_rd_route', rd_lines)
+
+    class _Axi4Crossbar(Module):
+        def __init__(self):
+            self.m_bus = Axi4Bus(data_width, addr_width, id_width)
+            for i in range(n):
+                object.__setattr__(self, f's_bus_{i}',
+                                   Axi4Bus(data_width, addr_width, id_width))
+            super().__init__()
+            self._comb_blocks.append(types.MethodType(wr_fn, self))
+            self._comb_blocks.append(types.MethodType(rd_fn, self))
+
+    _Axi4Crossbar.__name__ = 'Axi4Crossbar'
+    _Axi4Crossbar.__qualname__ = 'Axi4Crossbar'
+    return _Axi4Crossbar()
