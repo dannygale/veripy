@@ -20,6 +20,7 @@ from .project import Project
 from .verify import VeripyTestCase
 from .firmware import ElfSegment, ElfImage, load_elf
 from .soc_sim import FlatMemory, UartPeripheral, SocSim
+from .gdb_stub import GdbStub
 
 
 def VerilatorModel(*args, **kwargs):
