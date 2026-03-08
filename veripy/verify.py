@@ -64,24 +64,74 @@ def _collect_locals(stmts, declared, regs):
             _collect_locals(stmt.body, declared, regs)
 
 
-class VeripyTestCase(unittest.TestCase):
-    """Event-driven dual-path test case.
+_VALID_BACKENDS = {'behavioral', 'iverilog', 'csim', 'csim_hier', 'verilator'}
+_BACKEND_ALIASES = {
+    'check': ['behavioral', 'csim'],
+    'all':   ['behavioral', 'iverilog', 'csim', 'csim_hier'],
+}
 
-    Subclass and override create_module(). Define testbench blocks with
-    @self.always and @self.initial, drive signals with self.set(),
-    read outputs with self.out(), and call self.run() to execute.
 
-        class TestCounter(VeripyTestCase):
+def _resolve_backends(cls):
+    """Resolve the backend list for a TestBench subclass.
+
+    Priority: VERIPY_BACKENDS env var > class attribute > veripy.toml > 'check'.
+    """
+    raw = os.environ.get('VERIPY_BACKENDS')
+    if raw is None:
+        raw = getattr(cls, 'backend', None)
+    if raw is None:
+        try:
+            from .config import load_config
+            cfg = load_config()
+            if cfg:
+                raw = cfg.get('test', {}).get('backend')
+        except Exception:
+            pass
+    if raw is None:
+        raw = 'check'
+
+    if isinstance(raw, str):
+        if raw in _BACKEND_ALIASES:
+            backends = list(_BACKEND_ALIASES[raw])
+        else:
+            backends = [b.strip() for b in raw.split(',')]
+    else:
+        backends = list(raw)
+
+    # Silently drop verilator if not available
+    if 'verilator' in backends:
+        import shutil
+        if not shutil.which('verilator'):
+            backends.remove('verilator')
+
+    return backends
+
+
+class TestBench(unittest.TestCase):
+    """Configurable test bench for VeriPy modules.
+
+    Subclass and override create_module(). Set ``backend`` to control
+    which simulation backends are used:
+
+        'check'      — behavioral + csim, cross-check outputs (default)
+        'behavioral' — Python sim only, no compilation
+        'csim'       — csim only, no cross-check
+        'all'        — all backends (behavioral, iverilog, csim, csim_hier, verilator)
+        'csim,iverilog' — comma-separated list of specific backends
+
+    Override priority: VERIPY_BACKENDS env var > class attribute > veripy.toml [test] backend.
+
+        class TestCounter(TestBench):
+            backend = 'check'
+
             def create_module(self):
                 return Counter(4)
 
             def test_counting(self):
                 @self.always
                 def clock():
-                    self.set(clock=0)
-                    yield 5
-                    self.set(clock=1)
-                    yield 5
+                    self.set(clock=0); yield 5
+                    self.set(clock=1); yield 5
 
                 @self.initial
                 def stimulus():
@@ -92,9 +142,9 @@ class VeripyTestCase(unittest.TestCase):
                     for _ in range(5):
                         yield 10
                     self.assertEqual(self.out('count'), 5)
-
-                self.run()
     """
+
+    backend = 'check'
 
     def create_module(self):
         raise NotImplementedError
@@ -104,7 +154,7 @@ class VeripyTestCase(unittest.TestCase):
         for name in list(vars(cls)):
             if name.startswith('test_'):
                 fn = vars(cls)[name]
-                setattr(cls, name, _wrap_dual(fn))
+                setattr(cls, name, _wrap_testbench(fn))
 
     # --- test API ---
 
@@ -373,49 +423,61 @@ class VeripyTestCase(unittest.TestCase):
         return True
 
 
-def _wrap_dual(fn):
-    """Wrap a test method to run Python sim, iverilog, and csim, then compare all."""
+def _wrap_testbench(fn):
+    """Wrap a test method to run configured backends, then compare outputs."""
     def wrapper(self):
-        # Pass 1: Python sim (assertions run inside initial blocks)
+        backends = _resolve_backends(self.__class__)
+
+        # Pass 1: behavioral (Python sim) — always first if requested
         self._begin()
         self._all_outputs = {}
         self._ran_sim = False
-        with self.subTest(backend='python'):
+        if 'behavioral' in backends:
+            with self.subTest(backend='behavioral'):
+                fn(self)
+                if not self._ran_sim:
+                    self.run_sim()
+            self._all_outputs['behavioral'] = dict(self._py_outputs)
+            for name, hits in self._mod.coverage_report():
+                _coverage_db[name] = _coverage_db.get(name, 0) + hits
+        else:
+            # Still need to run the test to record stimuli for other backends
             fn(self)
             if not self._ran_sim:
                 self.run_sim()
-        self._all_outputs['python'] = dict(self._py_outputs)
-
-        # Accumulate cover point hits into global db
-        for name, hits in self._mod.coverage_report():
-            _coverage_db[name] = _coverage_db.get(name, 0) + hits
 
         # Pass 2: iverilog
-        # Reactive yields (until()) can't be lowered to Verilog — skip.
-        skip_iverilog = os.environ.get('VERIPY_SKIP_IVERILOG', '') == '1'
-        if not skip_iverilog:
+        if 'iverilog' in backends:
             try:
                 self._run_iverilog()
-                self._all_outputs['verilog'] = dict(self._rtl_outputs)
+                self._all_outputs['iverilog'] = dict(self._rtl_outputs)
             except SyntaxError:
                 pass
 
-        # Pass 3: csim flat (always-on)
-        skip_csim = getattr(self, 'SKIP_CSIM', False) or \
-                    os.environ.get('VERIPY_SKIP_CSIM', '') == '1'
-        if not skip_csim:
+        # Pass 3: csim
+        skip_csim = getattr(self, 'SKIP_CSIM', False)
+        if not skip_csim and 'csim' in backends:
             self._run_csim()
+        if not skip_csim and 'csim_hier' in backends:
             self._run_csim(force_hier=True)
 
-        # Pass 4 (opt-in): Verilator
-        use_verilator = getattr(self, 'USE_VERILATOR', False) or \
-                        os.environ.get('VERIPY_VERILATOR', '') == '1'
-        if use_verilator:
+        # Pass 4: Verilator
+        if 'verilator' in backends:
             self._run_verilator()
 
-        # Compare all backends
-        self._assert_all_match()
+        # Compare all backends that ran
+        if len(self._all_outputs) > 1:
+            self._assert_all_match()
 
     wrapper.__name__ = fn.__name__
     wrapper.__qualname__ = fn.__qualname__
     return wrapper
+
+
+# Legacy alias — runs all backends for maximum cross-checking
+class VeripyTestCase(TestBench):
+    """TestBench with backend='all' for full cross-backend verification.
+
+    Equivalent to TestBench with backend='all'. Prefer TestBench for new code.
+    """
+    backend = 'all'
