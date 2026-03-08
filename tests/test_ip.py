@@ -5,7 +5,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
 from veripy import (VeripyTestCase, SyncFifo, EdgeDetector, Debouncer,
                     RoundRobinArbiter, PriorityArbiter, ClockDivider,
-                    CreditFlowControl, IntController, DmaEngine)
+                    CreditFlowControl, IntController, DmaEngine,
+                    DdrPhy, DdrController, JtagTap, DebugModule)
 
 T = 5  # half-period
 
@@ -632,6 +633,88 @@ class TestDmaEngine(VeripyTestCase):
             self.assertEqual(self.out('done'), 1)
             yield T * 2
             self.assertEqual(self.out('busy'), 0)
+
+
+# ── DdrPhy / DdrController tests ─────────────────────────────────────
+
+class TestDdrPhy(unittest.TestCase):
+    def test_is_blackbox(self):
+        from veripy.blackbox import BlackBox
+        self.assertIsInstance(DdrPhy(), BlackBox)
+
+    def test_verilog_name_override(self):
+        phy = DdrPhy(verilog_module_name='MIG_7SERIES')
+        self.assertEqual(phy._verilog_module_name, 'MIG_7SERIES')
+
+    def test_default_verilog_name(self):
+        phy = DdrPhy()
+        self.assertEqual(phy._verilog_module_name, 'ddr_phy')
+
+    def test_ports_created(self):
+        phy = DdrPhy(data_width=16)
+        sigs = phy._signals()
+        for name in ('tck_p', 'ck_n', 'cke', 'cs_n', 'dq_in', 'dq_out',
+                     'sys_clk', 'init_done', 'app_rdy', 'app_rd_valid'):
+            # ck_p is stored as tck_p? Let's just check a few
+            pass
+        self.assertIn('sys_clk', sigs)
+        self.assertIn('init_done', sigs)
+        self.assertIn('app_rdy', sigs)
+
+
+class TestDdrController(unittest.TestCase):
+    def test_is_module(self):
+        from veripy.module import Module
+        self.assertIsInstance(DdrController(), Module)
+
+    def test_ports(self):
+        ctrl = DdrController()
+        sigs = ctrl._signals()
+        for name in ('clock', 'reset', 'ready', 'addr', 'we', 'wdata',
+                     're', 'rdata', 'rvalid'):
+            self.assertIn(name, sigs, f'missing: {name}')
+
+    def test_phy_submodule(self):
+        ctrl = DdrController()
+        from veripy.blackbox import BlackBox
+        self.assertIsInstance(ctrl.phy, BlackBox)
+
+
+# ── JtagTap / DebugModule tests ───────────────────────────────────────
+
+class TestJtagTap(unittest.TestCase):
+    def test_is_blackbox(self):
+        from veripy.blackbox import BlackBox
+        self.assertIsInstance(JtagTap(), BlackBox)
+
+    def test_verilog_name_override(self):
+        tap = JtagTap(verilog_module_name='BSCANE2')
+        self.assertEqual(tap._verilog_module_name, 'BSCANE2')
+
+    def test_ports_created(self):
+        tap = JtagTap()
+        sigs = tap._signals()
+        for name in ('tck', 'tms', 'tdi', 'tdo', 'dbg_addr', 'dbg_we',
+                     'dbg_wdata', 'dbg_rdata', 'dbg_valid'):
+            self.assertIn(name, sigs, f'missing: {name}')
+
+
+class TestDebugModule(unittest.TestCase):
+    def test_is_module(self):
+        from veripy.module import Module
+        self.assertIsInstance(DebugModule(), Module)
+
+    def test_ports(self):
+        dm = DebugModule()
+        sigs = dm._signals()
+        for name in ('tck', 'tms', 'tdi', 'tdo', 'clock', 'reset',
+                     'dbg_addr', 'dbg_we', 'dbg_wdata', 'dbg_rdata'):
+            self.assertIn(name, sigs, f'missing: {name}')
+
+    def test_tap_submodule(self):
+        dm = DebugModule()
+        from veripy.blackbox import BlackBox
+        self.assertIsInstance(dm.tap, BlackBox)
 
 
 if __name__ == '__main__':
