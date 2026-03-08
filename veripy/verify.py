@@ -247,112 +247,118 @@ class VeripyTestCase(unittest.TestCase):
                 name, val = part.split('=')
                 self._rtl_outputs[t][name] = None if val == 'x' else int(val)
 
-    def _assert_traces_match(self):
-        for t, py_vals in sorted(self._py_outputs.items()):
-            rtl_vals = self._rtl_outputs.get(t, {})
-            for name, pv in py_vals.items():
-                rv = rtl_vals.get(name)
-                self.assertEqual(pv, rv,
-                    f"Sim/RTL mismatch at t={t}, '{name}': "
-                    f"Python={pv}, Verilog={rv}")
+    def _assert_all_match(self):
+        """Compare all collected backend outputs against each other."""
+        backends = self._all_outputs  # {name: {t: {sig: val}}}
+        names = list(backends.keys())
+        if len(names) < 2:
+            return
+        # Collect all (time, signal) pairs observed by any backend
+        all_points = set()
+        for bdata in backends.values():
+            for t, sigs in bdata.items():
+                for sig in sigs:
+                    all_points.add((t, sig))
+        for t, sig in sorted(all_points):
+            vals = {}
+            for bn in names:
+                v = backends[bn].get(t, {}).get(sig)
+                if v is not None:
+                    vals[bn] = v
+            unique = set(vals.values())
+            if len(unique) > 1:
+                detail = ', '.join(f'{bn}={vals[bn]}' for bn in names if bn in vals)
+                self.fail(f"Mismatch at t={t}, '{sig}': {detail}")
+
+    def _replay_stimuli(self, model):
+        """Replay recorded stimuli through a compiled model, return outputs dict."""
+        model.eval()
+        outputs = {}
+        for t, sets in self._trace_sets:
+            # Capture outputs BEFORE applying this timestep's sets,
+            # matching Python sim where out() reads before set() at same time.
+            if t in self._py_outputs and t not in outputs:
+                outputs[t] = {}
+                for name in self._py_outputs[t]:
+                    outputs[t][name] = model.get(name)
+            for name, val in sets.items():
+                model.set(name, val)
+            model.eval()
+        # Capture outputs at times after the last trace_set
+        for t in self._py_outputs:
+            if t not in outputs:
+                outputs[t] = {}
+                for name in self._py_outputs[t]:
+                    outputs[t][name] = model.get(name)
+        return outputs
 
     def _run_verilator(self):
         """Replay recorded stimuli through Verilator model, collect outputs."""
         from .backend_verilator import compile_module, _has_verilator
         if not _has_verilator():
             return False
-
         mod = self._mod
         module_name = type(mod).__name__.lower()
-
         with compile_module(mod, module_name) as vm:
-            vm.eval()  # initial eval
-
-            self._rtl_outputs = {}
-            for t, sets in self._trace_sets:
-                for name, val in sets.items():
-                    vm.set(name, val)
-                vm.eval()
-                # Record outputs at this time
-                if t in self._py_outputs:
-                    if t not in self._rtl_outputs:
-                        self._rtl_outputs[t] = {}
-                    for name in self._py_outputs[t]:
-                        self._rtl_outputs[t][name] = vm.get(name)
+            out = self._replay_stimuli(vm)
+        if hasattr(self, '_all_outputs'):
+            self._all_outputs['verilator'] = out
+        self._rtl_outputs = out
         return True
 
-    def _run_csim(self):
+    def _run_csim(self, force_hier=False):
         """Replay recorded stimuli through native C sim, collect outputs."""
         from .backend_csim import compile_module as csim_compile
-
         mod = self._mod
         module_name = type(mod).__name__.lower()
-
         try:
-            with csim_compile(mod, module_name) as cm:
-                cm.eval()
-
-                self._rtl_outputs = {}
-                for t, sets in self._trace_sets:
-                    for name, val in sets.items():
-                        cm.set(name, val)
-                    cm.eval()
-                    if t in self._py_outputs:
-                        if t not in self._rtl_outputs:
-                            self._rtl_outputs[t] = {}
-                        for name in self._py_outputs[t]:
-                            self._rtl_outputs[t][name] = cm.get(name)
-
-                # Capture outputs at times after the last trace_set
-                for t in self._py_outputs:
-                    if t not in self._rtl_outputs:
-                        self._rtl_outputs[t] = {}
-                        for name in self._py_outputs[t]:
-                            self._rtl_outputs[t][name] = cm.get(name)
+            with csim_compile(mod, module_name, force_hier=force_hier) as cm:
+                out = self._replay_stimuli(cm)
         except Exception:
             return False
+        key = 'csim_hier' if force_hier else 'csim'
+        if hasattr(self, '_all_outputs'):
+            self._all_outputs[key] = out
+        self._rtl_outputs = out
         return True
 
 
 def _wrap_dual(fn):
-    """Wrap a test method to run Python sim then compare with iverilog."""
+    """Wrap a test method to run Python sim, iverilog, and csim, then compare all."""
     def wrapper(self):
         # Pass 1: Python sim (assertions run inside initial blocks)
         self._begin()
+        self._all_outputs = {}
         self._ran_sim = False
         with self.subTest(backend='python'):
             fn(self)
             if not self._ran_sim:
                 self.run_sim()
+        self._all_outputs['python'] = dict(self._py_outputs)
 
-        # Pass 2: generate Verilog testbench, run iverilog, compare
-        # Reactive yields (until()) can't be lowered to Verilog — skip iverilog path.
+        # Pass 2: iverilog
+        # Reactive yields (until()) can't be lowered to Verilog — skip.
         try:
             self._run_iverilog()
+            self._all_outputs['verilog'] = dict(self._rtl_outputs)
         except SyntaxError:
-            return
-        with self.subTest(backend='sim_vs_rtl'):
-            self._assert_traces_match()
+            pass
 
-        # Pass 3 (opt-in): Verilator co-simulation
+        # Pass 3: csim flat (always-on)
+        skip_csim = getattr(self, 'SKIP_CSIM', False) or \
+                    os.environ.get('VERIPY_SKIP_CSIM', '') == '1'
+        if not skip_csim:
+            self._run_csim()
+            self._run_csim(force_hier=True)
+
+        # Pass 4 (opt-in): Verilator
         use_verilator = getattr(self, 'USE_VERILATOR', False) or \
                         os.environ.get('VERIPY_VERILATOR', '') == '1'
         if use_verilator:
-            saved_rtl = self._rtl_outputs
-            if self._run_verilator():
-                with self.subTest(backend='verilator'):
-                    self._assert_traces_match()
-            self._rtl_outputs = saved_rtl
+            self._run_verilator()
 
-        # Pass 4 (opt-in): Native C simulation
-        use_csim = getattr(self, 'USE_CSIM', False) or \
-                   os.environ.get('VERIPY_CSIM', '') == '1'
-        if use_csim:
-            saved_rtl = self._rtl_outputs
-            if self._run_csim():
-                with self.subTest(backend='csim'):
-                    self._assert_traces_match()
-            self._rtl_outputs = saved_rtl
+        # Compare all backends
+        self._assert_all_match()
 
     wrapper.__name__ = fn.__name__
     wrapper.__qualname__ = fn.__qualname__

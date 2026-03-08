@@ -206,14 +206,20 @@ def topo_sort_comb(mod: IRModule) -> IRModule:
     # cycles caused by a single block both writing and reading across a
     # dependency boundary.
     nodes = []
+    node_block_id = []  # original block index for intra-block edges
+    bid = 0
     for a in mod.assigns:
         nodes.append(('assign', a))
+        node_block_id.append(bid); bid += 1
     for b in mod.comb_blocks:
         if len(b.stmts) <= 1:
             nodes.append(('comb', b))
+            node_block_id.append(bid)
         else:
             for stmt in b.stmts:
                 nodes.append(('comb', CombBlock(stmts=[stmt], locals=b.locals)))
+                node_block_id.append(bid)
+        bid += 1
 
     if not nodes:
         return deepcopy(mod)
@@ -225,19 +231,26 @@ def topo_sort_comb(mod: IRModule) -> IRModule:
     for b in mod.comb_blocks:
         all_locals |= set(b.locals)
 
-    # For each node, compute writes and reads (excluding locals).
-    node_writes = []  # list[set[str]]
+    # For each node, compute writes and reads (excluding locals for
+    # inter-block deps, full sets kept for intra-block local deps).
+    node_writes = []  # list[set[str]]  — inter-block (locals excluded)
     node_reads = []   # list[set[str]]
+    node_writes_full = []  # list[set[str]]  — includes locals
+    node_reads_full = []
     for kind, obj in nodes:
         if kind == 'assign':
-            node_writes.append({obj.target})
-            node_reads.append(_expr_reads(obj.value))
+            w = {obj.target}
+            r = _expr_reads(obj.value)
+            node_writes.append(w); node_reads.append(r)
+            node_writes_full.append(w); node_reads_full.append(r)
         else:
             w, r = set(), set()
             for s in obj.stmts:
                 _stmt_writes_reads(s, w, r)
             node_writes.append(w - all_locals)
             node_reads.append(r - all_locals)
+            node_writes_full.append(w)
+            node_reads_full.append(r)
 
     # Map signal → node index that writes it (comb only)
     writer = {}
@@ -245,16 +258,51 @@ def topo_sort_comb(mod: IRModule) -> IRModule:
         for sig in ws:
             writer[sig] = i
 
-    # Build adjacency list: edge from writer → reader
+    # Build adjacency list: edge from writer → reader (inter-block)
     n = len(nodes)
     adj = [[] for _ in range(n)]
     in_deg = [0] * n
+    edge_set = set()
     for j in range(n):
         for sig in node_reads[j]:
             i = writer.get(sig)
             if i is not None and i != j:
+                edge_set.add((i, j))
                 adj[i].append(j)
                 in_deg[j] += 1
+
+    # Add intra-block edges for local variable dependencies.
+    # Exploded statements from the same original comb block must
+    # preserve data-flow order through locals.  Process in original
+    # statement order so each read sees the most-recent writer.
+    from collections import defaultdict
+    block_nodes = defaultdict(list)
+    for i in range(n):
+        block_nodes[node_block_id[i]].append(i)
+    for idxs in block_nodes.values():
+        if len(idxs) <= 1:
+            continue
+        cur_writer = {}
+        for i in idxs:
+            # Local variable read → writer edge
+            for sig in node_reads_full[i]:
+                if sig not in all_locals:
+                    continue
+                src = cur_writer.get(sig)
+                if src is not None and src != i and (src, i) not in edge_set:
+                    edge_set.add((src, i))
+                    adj[src].append(i)
+                    in_deg[i] += 1
+            # Same-signal write ordering: if an earlier statement wrote
+            # the same signal, the earlier one must execute first (it's
+            # a default that the later statement overrides).
+            for sig in node_writes_full[i]:
+                src = cur_writer.get(sig)
+                if src is not None and src != i and (src, i) not in edge_set:
+                    edge_set.add((src, i))
+                    adj[src].append(i)
+                    in_deg[i] += 1
+                cur_writer[sig] = i
 
     # Kahn's algorithm — level-aware with consumer grouping.
     # Within each topo level, sort nodes so that nodes feeding the same

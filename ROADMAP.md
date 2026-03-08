@@ -283,3 +283,36 @@ The WGPU batch-parallel backend already exists for the Python sim ([docs/gpu.md]
 ### Priority
 
 Low — the Python GPU backend covers this use case today. Revisit when csim performance on single instances is fully optimized and batch throughput becomes the bottleneck.
+
+## Parameterized port arrays
+
+Allow modules to declare a variable number of ports based on a parameter. The primary motivating use case is N-port AXI interconnects, but it applies anywhere a module needs a variable number of identical interfaces (multi-bank memories, multi-hart designs, arbiters).
+
+### Python API
+
+```python
+@module
+def axi_interconnect(NUM_MASTERS=2, DATA_WIDTH=32, ADDR_WIDTH=32):
+    s_axi  = AXILiteSlave(DATA_WIDTH, ADDR_WIDTH)
+    m_axi  = [AXILiteMaster(DATA_WIDTH, ADDR_WIDTH) for _ in range(NUM_MASTERS)]
+    bases  = Param([int] * NUM_MASTERS)
+
+    @comb
+    def route():
+        for i, m in enumerate(m_axi):
+            sel = (s_axi.araddr >= bases[i]) & (s_axi.araddr < bases[i+1])
+            m.araddr  = s_axi.araddr
+            m.arvalid = s_axi.arvalid & sel
+```
+
+### What needs to change
+
+1. **Lowerer** — recognize port array declarations, assign indexed names (`m_axi_0_awaddr`, `m_axi_1_awaddr`, …)
+2. **IR** — represent port arrays as a sized group of port nodes, not individual ports
+3. **`@comb` iteration** — allow `for` loops over port arrays to unroll at elaboration time
+4. **Verilog emitter** — emit indexed flat port names; optionally emit packed arrays where synthesis tools support it
+5. **Sub-module instantiation** — when a port array is connected to a sub-module, wire each index correctly
+
+### Priority
+
+Medium — the current workaround (hardcoded `m0_axi`, `m1_axi`, manual address split) works but doesn't scale. Needed for clean N-peripheral SoC designs.

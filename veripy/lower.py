@@ -18,7 +18,7 @@ from .ir import (
     Instance, IRModule, FormalProperty,
 )
 from .signal import Signal, Mem, DualPortMem, TrueDualPortMem, Interface
-from .parameter import is_param
+from .parameter import is_param, ParamExpr, Parameter
 
 _BIN_OPS = {
     ast.Add: '+', ast.Sub: '-', ast.Mult: '*', ast.FloorDiv: '/',
@@ -71,6 +71,10 @@ class _Lowerer:
                 val = func.__closure__[idx].cell_contents
                 if name in self.params:
                     return ('param', name, val)
+                if isinstance(val, ParamExpr):
+                    return ('param', val.name, val)
+                if isinstance(val, Parameter) and val.name:
+                    return ('param', val.name, val)
                 if isinstance(val, (int, float)):
                     return ('const', val)
                 return ('obj', val)

@@ -24,6 +24,99 @@ from .ir import (
 
 # ── C type helpers ───────────────────────────────────────────────────
 
+def _collect_submodule_registry(module):
+    """Build a registry of sub-module IRs, keyed by unique type+params.
+
+    Different parameterizations of the same module (e.g. cache with
+    LINE_SIZE=1 vs LINE_SIZE=4) get separate registry entries and
+    distinct ``mod_type`` keys in the parent IR so that ``flatten_ir``
+    resolves each instance to the correct IR.
+
+    Returns (registry, patch_fn) where patch_fn(ir) updates inst.mod_type
+    in an IR to match the registry keys.
+    """
+    from .lower import lower_module
+    from .emit_verilog import _to_snake
+    from .module import Module as _Module
+
+    registry = {}
+    # Map (base_type, frozen_int_params) → registry key
+    _key_cache: dict[tuple, str] = {}
+
+    def _cache_key(base, params_dict):
+        int_params = tuple(sorted((k, v) for k, v in params_dict.items()
+                                  if isinstance(v, (int, float))))
+        return (base, int_params)
+
+    def _make_key(mod):
+        base = _to_snake(type(mod).__name__)
+        params = getattr(mod, '_params', {})
+        ck = _cache_key(base, params)
+        if ck in _key_cache:
+            return _key_cache[ck]
+        key = base
+        if ck[1]:
+            key = base + '__' + '_'.join(f'{k}{v}' for k, v in ck[1])
+        _key_cache[ck] = key
+        return key
+
+    def _collect(mod, parent_params=None):
+        # Resolve string param references against parent
+        params = getattr(mod, '_params', {})
+        resolved = {}
+        for k, v in params.items():
+            if isinstance(v, (int, float)):
+                resolved[k] = v
+            elif isinstance(v, str) and parent_params and v in parent_params:
+                resolved[k] = parent_params[v]
+        key = _to_snake(type(mod).__name__)
+        ck = _cache_key(key, resolved)
+        if ck in _key_cache:
+            return
+        if ck[1]:
+            key = key + '__' + '_'.join(f'{k}{v}' for k, v in ck[1])
+        _key_cache[ck] = key
+        if key in registry:
+            return
+        factory = getattr(type(mod), '_veripy_factory', None)
+        if factory:
+            fresh = factory(**resolved) if resolved else factory()
+        else:
+            fresh = type(mod)(**resolved) if resolved else type(mod)()
+        fresh_params = getattr(fresh, '_params', {})
+        for _sn, sub in fresh._submodules().items():
+            _collect(sub, parent_params=fresh_params)
+        registry[key] = lower_module(fresh, key)
+
+    top_params = getattr(module, '_params', {})
+    for attr in dir(module):
+        v = getattr(module, attr)
+        if isinstance(v, _Module) and v is not module:
+            _collect(v, parent_params=top_params)
+
+    def _patch_inst_types(ir):
+        """Update inst.mod_type in *ir* to match registry keys."""
+        parent_params = ir.params
+        for inst in ir.instances:
+            # Resolve string param refs so the cache key matches
+            resolved = {}
+            for k, v in inst.params.items():
+                if isinstance(v, (int, float)):
+                    resolved[k] = v
+                elif isinstance(v, str) and v in parent_params:
+                    resolved[k] = parent_params[v]
+            ck = _cache_key(inst.mod_type, resolved)
+            new_key = _key_cache.get(ck)
+            if new_key and new_key != inst.mod_type:
+                inst.mod_type = new_key
+
+    # Patch all registered IRs
+    for ir in registry.values():
+        _patch_inst_types(ir)
+
+    return registry, _patch_inst_types
+
+
 def _ctype(width):
     """Return narrowest C unsigned type for *width* bits."""
     if width <= 8:
@@ -43,10 +136,16 @@ def _mask(width):
 
 
 def _resolve_width(w, params):
-    """Resolve a width that may be a param name to an int."""
+    """Resolve a width that may be a param name or expression to an int."""
     if isinstance(w, int):
         return w
-    return params.get(w, 1)
+    if w in params:
+        return params[w]
+    # Try evaluating as expression with params (e.g. 'NUM_LINES*LINE_SIZE')
+    try:
+        return int(eval(w, {"__builtins__": {}}, params))
+    except Exception:
+        return 1
 
 
 # ── Signal width map ─────────────────────────────────────────────────
@@ -205,6 +304,8 @@ def _expr(node, sig_w, pack_map=None) -> str:
     if isinstance(node, Sig):
         if pack_map and node.name in pack_map:
             return _pack_read(node.name, pack_map)
+        if node.name in _c_locals:
+            return node.name
         return f's->{node.name}'
     if isinstance(node, BinOp):
         l, r = _expr(node.left, sig_w, pack_map), _expr(node.right, sig_w, pack_map)
@@ -213,9 +314,24 @@ def _expr(node, sig_w, pack_map=None) -> str:
         op = node.op
         if op == '!':
             return f'(!{_expr(node.operand, sig_w, pack_map)})'
+        if op == '~':
+            inner = _expr(node.operand, sig_w, pack_map)
+            # In C, ~(uint8_t)1 == 0xFE (truthy), but Verilog ~1'b1 == 1'b0.
+            # Mask result for 1-bit signals to preserve Verilog semantics.
+            if isinstance(node.operand, Sig) and sig_w.get(node.operand.name, 32) == 1:
+                return f'((~{inner}) & 0x1ULL)'
+            return f'(~{inner})'
         return f'({op}{_expr(node.operand, sig_w, pack_map)})'
     if isinstance(node, Compare):
         l, r = _expr(node.left, sig_w, pack_map), _expr(node.right, sig_w, pack_map)
+        # Mask operands to their widths so C integer promotion doesn't
+        # change overflow/wrap semantics (e.g. uint16 + uint16 < uint16).
+        lw = _expr_width(node.left, sig_w)
+        rw = _expr_width(node.right, sig_w)
+        if lw < 64:
+            l = f'({l} & {_mask(lw)})'
+        if rw < 64:
+            r = f'({r} & {_mask(rw)})'
         return f'({l} {node.op} {r})'
     if isinstance(node, BoolOp):
         parts = []
@@ -293,6 +409,11 @@ def _expr_width(node, sig_w) -> int:
 
 # ── Statement emitter ────────────────────────────────────────────────
 
+# Module-level set of signal names promoted to C locals.
+# When non-empty, _expr emits bare names and _emit_stmt omits 's->' prefix.
+_c_locals: set = set()
+
+
 def _emit_stmt(stmt, lines, sig_w, indent=1, pack_map=None, nba_sigs=None):
     """Emit C statements from an IR Stmt node.
 
@@ -313,10 +434,12 @@ def _emit_stmt(stmt, lines, sig_w, indent=1, pack_map=None, nba_sigs=None):
                 lines.append(f'{pad}s->_nba_{stmt.target} = {val};')
         elif pack_map and stmt.target in pack_map:
             lines.append(f'{pad}{_pack_write(stmt.target, val, pack_map)}')
-        elif w and w < 64:
-            lines.append(f'{pad}s->{stmt.target} = ({_ctype(w)})({val} & {_mask(w)});')
         else:
-            lines.append(f'{pad}s->{stmt.target} = {val};')
+            tgt = stmt.target if stmt.target in _c_locals else f's->{stmt.target}'
+            if w and w < 64:
+                lines.append(f'{pad}{tgt} = ({_ctype(w)})({val} & {_mask(w)});')
+            else:
+                lines.append(f'{pad}{tgt} = {val};')
 
     elif isinstance(stmt, SliceAssign):
         lo = _expr(stmt.lo, sig_w, pack_map)
@@ -764,6 +887,7 @@ def emit_c(ir: IRModule) -> str:
         '#include <stdint.h>',
         '#include <stdlib.h>',
         '#include <string.h>',
+        '#include <stdio.h>',
         '',
     ]
 
@@ -785,15 +909,40 @@ def emit_c(ir: IRModule) -> str:
         for name, width in blk.locals.items():
             all_sigs.setdefault(name, _resolve_width(width, ir.params))
 
+    # ── Identify signals promotable to C locals ──────────────────
+    # In monolithic eval, ALL signals that don't need to persist across
+    # eval() calls can be C locals. Only ports, regs, mems, and NBA
+    # targets must remain in the struct.
+    _seq_reads = set()
+    _seq_writes_all = set()
+    for blk in ir.seq_blocks:
+        for stmt in blk.stmts:
+            _swr(stmt, _seq_writes_all, _seq_reads)
+        for _, sig in blk.edges:
+            _seq_reads.add(sig)
+    _output_ports = {p.name for p in ir.ports if p.direction == 'output'}
+    _input_ports = {p.name for p in ir.ports if p.direction == 'input'}
+    _reg_names = {r.name for r in ir.regs}
+    _mem_names_set = {m.name for m in ir.mems}
+    must_persist = _input_ports | _output_ports | _reg_names | _mem_names_set
+    promoted_locals = set(all_sigs) - must_persist - nba_sigs
+
     # Order fields by evaluation access pattern for spatial locality
     eval_order = _eval_order_sigs(ir)
     eval_rank = {name: i for i, name in enumerate(eval_order)}
     ordered_names = sorted(all_sigs, key=lambda n: eval_rank.get(n, len(eval_order)))
 
     # Pack 1-bit signals into uint64_t bitfield words
-    pack_map, pack_words = _build_pack_map(all_sigs, ordered_names)
+    # Exclude promoted locals from packing (they'll be C locals)
+    struct_sigs = {n: w for n, w in all_sigs.items() if n not in promoted_locals}
+    struct_ordered = [n for n in ordered_names if n not in promoted_locals]
+    pack_map, pack_words = _build_pack_map(struct_sigs, struct_ordered)
 
-    for name in ordered_names:
+    # Rebuild dirty indices excluding promoted locals
+    dirty_idx, n_dirty_words = _build_dirty_indices(
+        {n: w for n, w in sig_w.items() if n not in promoted_locals}, ir.mems)
+
+    for name in struct_ordered:
         if name not in pack_map:
             lines.append(f'    {_ctype(all_sigs[name])} {name};')
     for pw in pack_words:
@@ -823,6 +972,9 @@ def emit_c(ir: IRModule) -> str:
 
     lines.append('} State;')
     lines.append('')
+    lines.append('static void _vcd_dump(State* s);')
+    lines.append('static int _assert_fail = 0;')
+    lines.append('')
 
     # ── create / destroy ─────────────────────────────────────────
     lines.append('void* veripy_create(void) {')
@@ -836,103 +988,53 @@ def emit_c(ir: IRModule) -> str:
     lines.append('}')
     lines.append('')
 
-    # ── Per-block static functions ───────────────────────────────
+    # ── Monolithic eval ─────────────────────────────────────────
+    # All comb+seq+re-settle logic is emitted inline in veripy_eval
+    # so that intermediate signals can be C locals (register-allocated).
 
-    # Continuous assigns → _cont_assigns()
-    has_cont = bool(ir.assigns)
-    if has_cont:
-        cont_stmts = []
-        for a in ir.assigns:
-            w = sig_w.get(a.target, 0)
-            val = _expr(a.value, sig_w, pack_map)
-            if pack_map and a.target in pack_map:
-                cont_stmts.append(f'    {_pack_write(a.target, val, pack_map)}')
-            elif w and w < 64:
-                cont_stmts.append(f'    s->{a.target} = ({_ctype(w)})({val} & {_mask(w)});')
-            else:
-                cont_stmts.append(f'    s->{a.target} = {val};')
-        attr = _inline_attr(len(ir.assigns))
-        lines.append(f'static {attr}void _cont_assigns(State* s) {{')
-        lines.extend(cont_stmts)
-        lines.append('}')
-        lines.append('')
+    # Recompute promoted_locals: everything that doesn't need to persist
+    promoted_locals = set(all_sigs) - must_persist - nba_sigs
+    # Exclude packed signals (they use bitfield ops on struct words)
+    promoted_locals -= set(pack_map.keys())
 
-    # Each comb group → _comb_N() (merged), or inlined if trivial (1 stmt, 1 block)
-    for gi, group in enumerate(merge_groups):
-        all_stmts = []
-        for idx in group:
-            all_stmts.extend(ir.comb_blocks[idx].stmts)
-        total = _count_stmts(all_stmts)
-        if len(group) == 1 and total == 1:
-            continue  # will be inlined into veripy_eval()
-        body = []
-        _emit_stmts_batched(all_stmts, body, sig_w, pack_map=pack_map)
-        attr = _inline_attr(total)
-        lines.append(f'static {attr}void _comb_{gi}(State* s) {{')
-        lines.extend(body)
-        lines.append('}')
-        lines.append('')
+    _c_locals.clear()
+    _c_locals.update(promoted_locals)
 
-    # Each seq_block → _seq_N()
-    for i, blk in enumerate(ir.seq_blocks):
-        body = []
-        _emit_stmts_batched(blk.stmts, body, sig_w, pack_map=pack_map, nba_sigs=nba_sigs)
-        attr = _inline_attr(_count_stmts(blk.stmts))
-        lines.append(f'static {attr}void _seq_{i}(State* s) {{')
-        lines.extend(body)
-        lines.append('}')
-        lines.append('')
-
-    # ── eval ─────────────────────────────────────────────────────
     lines.append('void veripy_eval(void* p) {')
     lines.append('    State* s = (State*)p;')
 
-    def _emit_comb_group(gi, group, mark_outputs, force=False):
-        """Emit comb group dispatch.  When *force* is True the dirty
-        guard is omitted (used for the initial settle so that every
-        comb block runs unconditionally)."""
+    # Declare promoted locals as C local variables
+    for name in sorted(promoted_locals):
+        w = all_sigs[name]
+        lines.append(f'    {_ctype(w)} {name} = 0;')
+
+    # ── Phase 1: Settle combinational logic (unconditional) ──────
+    # Continuous assigns
+    for a in ir.assigns:
+        w = sig_w.get(a.target, 0)
+        val = _expr(a.value, sig_w, pack_map)
+        if pack_map and a.target in pack_map:
+            lines.append(f'    {_pack_write(a.target, val, pack_map)}')
+        elif w and w < 64:
+            tgt = a.target if a.target in _c_locals else f's->{a.target}'
+            lines.append(f'    {tgt} = ({_ctype(w)})({val} & {_mask(w)});')
+        else:
+            tgt = a.target if a.target in _c_locals else f's->{a.target}'
+            lines.append(f'    {tgt} = {val};')
+
+    # Comb blocks in topo order (all inlined)
+    for gi, group in enumerate(merge_groups):
         all_stmts = []
         for idx in group:
             all_stmts.extend(ir.comb_blocks[idx].stmts)
-        group_reads: set = set()
-        group_writes: set = set()
-        for idx in group:
-            group_reads |= comb_deps[idx]
-            group_writes |= comb_writes[idx]
-        cond = '1' if force else _dirty_cond(group_reads, dirty_idx)
-        out_lines = _dirty_set_lines(group_writes, dirty_idx, indent=2) if mark_outputs else []
-        trivial = len(group) == 1 and _count_stmts(all_stmts) == 1
-        if cond == '1':
-            if trivial:
-                body = []
-                _emit_stmt(all_stmts[0], body, sig_w, pack_map=pack_map)
-                lines.extend('    ' + ln.lstrip() for ln in body)
-            else:
-                lines.append(f'    _comb_{gi}(s);')
-            lines.extend(out_lines)
-        else:
-            lines.append(f'    if ({cond}) {{')
-            if trivial:
-                body = []
-                _emit_stmt(all_stmts[0], body, sig_w, pack_map=pack_map)
-                lines.extend('        ' + ln.lstrip() for ln in body)
-            else:
-                lines.append(f'        _comb_{gi}(s);')
-            lines.extend(out_lines)
-            lines.append('    }')
-
-    # 1. Settle combinational logic (unconditional — every comb block
-    #    runs so that all signals reflect the current state, including
-    #    signals updated by NBA commits from the previous eval).
-    if has_cont:
-        lines.append('    _cont_assigns(s);')
-    for gi, group in enumerate(merge_groups):
-        _emit_comb_group(gi, group, mark_outputs=False, force=True)
+        body = []
+        _emit_stmts_batched(all_stmts, body, sig_w, pack_map=pack_map)
+        lines.extend(body)
 
     # Clear dirty bits after initial comb settle
     lines.append(f'    memset(s->_dirty, 0, {n_dirty_words * 8});')
 
-    # 2. Edge detection + sequential block calls (grouped by physical clock)
+    # ── Phase 2: Sequential logic (edge-triggered) ──────────────
     edge_blocks = {}
     for i, blk in enumerate(ir.seq_blocks):
         for edge_kind, sig_name in blk.edges:
@@ -946,45 +1048,175 @@ def emit_c(ir: IRModule) -> str:
         else:
             cond = f'!{clk_expr} && s->_prev_{clk}'
         lines.append(f'    if ({cond}) {{')
-        # Only snapshot/commit signals written by seq blocks in this edge group
+        # NBA snapshot
         group_nba = set()
         for idx in block_ids:
             group_nba |= nba_per_seq[idx]
         for name in sorted(group_nba):
             src = _pack_read(name, pack_map) if name in pack_map else f's->{name}'
             lines.append(f'        s->_nba_{name} = {src};')
+        # Seq block bodies (inlined)
         for idx in block_ids:
-            lines.append(f'        _seq_{idx}(s);')
+            body = []
+            _emit_stmts_batched(ir.seq_blocks[idx].stmts, body, sig_w,
+                                pack_map=pack_map, nba_sigs=nba_sigs)
+            lines.extend('    ' + ln for ln in body)
+        # NBA commit
         for name in sorted(group_nba):
             if name in pack_map:
                 lines.append(f'        {_pack_write(name, f"s->_nba_{name}", pack_map)}')
             else:
                 lines.append(f'        s->{name} = s->_nba_{name};')
-        # Mark seq outputs dirty so re-settle comb blocks run
+        # Mark seq outputs dirty
         group_seq_writes: set = set()
         for idx in block_ids:
             group_seq_writes |= seq_writes[idx]
         lines.extend(_dirty_set_lines(group_seq_writes, dirty_idx, indent=2))
         lines.append('    }')
 
-    # 3. Re-settle combinational logic (dirty-driven; mark outputs so
-    #    downstream comb blocks in the chain also fire)
-    if has_cont:
-        lines.append('    _cont_assigns(s);')
+    # ── Phase 3: Re-settle combinational logic (dirty-driven) ───
+    for a in ir.assigns:
+        w = sig_w.get(a.target, 0)
+        val = _expr(a.value, sig_w, pack_map)
+        if pack_map and a.target in pack_map:
+            lines.append(f'    {_pack_write(a.target, val, pack_map)}')
+        elif w and w < 64:
+            tgt = a.target if a.target in _c_locals else f's->{a.target}'
+            lines.append(f'    {tgt} = ({_ctype(w)})({val} & {_mask(w)});')
+        else:
+            tgt = a.target if a.target in _c_locals else f's->{a.target}'
+            lines.append(f'    {tgt} = {val};')
+
     for group in resettl_groups:
         gi = merge_groups.index(group)
-        _emit_comb_group(gi, group, mark_outputs=True)
+        all_stmts = []
+        for idx in group:
+            all_stmts.extend(ir.comb_blocks[idx].stmts)
+        group_reads: set = set()
+        group_writes: set = set()
+        for idx in group:
+            group_reads |= comb_deps[idx]
+            group_writes |= comb_writes[idx]
+        cond = _dirty_cond(group_reads, dirty_idx)
+        out_lines = _dirty_set_lines(group_writes, dirty_idx, indent=2)
+        if cond == '1':
+            body = []
+            _emit_stmts_batched(all_stmts, body, sig_w, pack_map=pack_map)
+            lines.extend(body)
+            lines.extend(out_lines)
+        else:
+            lines.append(f'    if ({cond}) {{')
+            body = []
+            _emit_stmts_batched(all_stmts, body, sig_w, pack_map=pack_map)
+            lines.extend('    ' + b for b in body)
+            lines.extend('    ' + ol for ol in out_lines)
+            lines.append('    }')
 
-    # 4. Update previous values
+    # ── Phase 4: Runtime assertions (before prev update) ────────
+    for prop in ir.formal_props:
+        if prop.kind != 'assert':
+            continue
+        clk = clock_aliases.get(prop.clock, prop.clock)
+        clk_cur = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
+        if prop.edge == 'posedge':
+            edge_cond = f'({clk_cur} && !s->_prev_{clk})'
+        else:
+            edge_cond = f'(!{clk_cur} && s->_prev_{clk})'
+        cond = _expr(prop.expr, sig_w, pack_map)
+        lines.append(f'    if ({edge_cond} && !({cond})) {{')
+        lines.append(f'        _assert_fail = 1;')
+        lines.append(f'    }}')
+
+    # ── Phase 5: Update previous values ──────────────────────────
     for clk in sorted(clocks):
         clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
         lines.append(f'    s->_prev_{clk} = {clk_expr};')
 
-    # NOTE: do NOT clear dirty bits here.  The re-settle (and seq dirty
-    # marks) must persist so the *next* eval's initial comb settle sees
-    # which NBA-committed signals changed and re-evaluates dependent
-    # comb blocks (e.g. the instruction decoder after IF/ID updates).
+    lines.append('    _vcd_dump(s);')
+    lines.append('}')
+    lines.append('')
 
+    _c_locals.clear()
+
+    # ── VCD trace support ────────────────────────────────────────
+    # Build list of traceable signals: ports + regs (not C locals, not mems)
+    trace_sigs = []  # (name, width, vcd_id)
+    vcd_id = 33  # start at '!' (ASCII 33)
+    for name in struct_ordered:
+        if name.startswith('_prev_') or name.startswith('_nba_') or name.startswith('_dirty'):
+            continue
+        w = all_sigs.get(name, sig_w.get(name, 1))
+        # VCD identifier: single or multi-char
+        tid = ''
+        v = vcd_id
+        while True:
+            tid = chr(33 + (v % 94)) + tid
+            v = v // 94
+            if v == 0:
+                break
+        trace_sigs.append((name, w, tid))
+        vcd_id += 1
+
+    n_trace = len(trace_sigs)
+    lines.append(f'static FILE* _vcd_fp = 0;')
+    lines.append(f'static int _vcd_enabled = 1;')
+    lines.append(f'static uint64_t _vcd_prev[{n_trace}];')
+    lines.append(f'static uint64_t _vcd_time = 0;')
+    lines.append('')
+    lines.append('int veripy_assert_failed(void) { return _assert_fail; }')
+    lines.append('void veripy_assert_clear(void) { _assert_fail = 0; }')
+    lines.append('')
+
+    # VCD header writer
+    lines.append('void veripy_trace_open(const char* path) {')
+    lines.append('    _vcd_fp = fopen(path, "w");')
+    lines.append('    if (!_vcd_fp) return;')
+    lines.append('    fprintf(_vcd_fp, "$timescale 1ns $end\\n");')
+    lines.append('    fprintf(_vcd_fp, "$scope module top $end\\n");')
+    for name, w, tid in trace_sigs:
+        lines.append(f'    fprintf(_vcd_fp, "$var wire {w} {tid} {name} $end\\n");')
+    lines.append('    fprintf(_vcd_fp, "$upscope $end\\n");')
+    lines.append('    fprintf(_vcd_fp, "$enddefinitions $end\\n");')
+    lines.append(f'    memset(_vcd_prev, 0xFF, sizeof(_vcd_prev));')
+    lines.append('    _vcd_time = 0;')
+    lines.append('    _vcd_enabled = 1;')
+    lines.append('}')
+    lines.append('')
+
+    lines.append('void veripy_trace_close(void) {')
+    lines.append('    if (_vcd_fp) { fclose(_vcd_fp); _vcd_fp = 0; }')
+    lines.append('}')
+    lines.append('')
+
+    lines.append('void veripy_trace_enable(int en) {')
+    lines.append('    if (en && !_vcd_enabled)')
+    lines.append(f'        memset(_vcd_prev, 0xFF, sizeof(_vcd_prev));  /* re-dump all on re-enable */')
+    lines.append('    _vcd_enabled = en;')
+    lines.append('}')
+    lines.append('')
+
+    # VCD dump function — called at end of each eval
+    lines.append('static void _vcd_dump(State* s) {')
+    lines.append('    if (!_vcd_fp || !_vcd_enabled) return;')
+    lines.append('    int any = 0;')
+    for i, (name, w, tid) in enumerate(trace_sigs):
+        if name in pack_map:
+            word, bit = pack_map[name]
+            val_expr = f'((s->{word} >> {bit}ULL) & 1ULL)'
+        else:
+            val_expr = f's->{name}'
+        lines.append(f'    {{ uint64_t v = {val_expr};')
+        lines.append(f'      if (v != _vcd_prev[{i}]) {{')
+        lines.append(f'        if (!any) {{ fprintf(_vcd_fp, "#%llu\\n", (unsigned long long)_vcd_time); any = 1; }}')
+        if w == 1:
+            lines.append(f'        fprintf(_vcd_fp, "%c{tid}\\n", (char)(\'0\' + (v & 1)));')
+        else:
+            lines.append(f'        fprintf(_vcd_fp, "b");')
+            lines.append(f'        for (int _b = {w - 1}; _b >= 0; _b--) fprintf(_vcd_fp, "%c", (char)(\'0\' + ((v >> _b) & 1)));')
+            lines.append(f'        fprintf(_vcd_fp, " {tid}\\n");')
+        lines.append(f'        _vcd_prev[{i}] = v;')
+        lines.append(f'    }} }}')
+    lines.append('    _vcd_time++;')
     lines.append('}')
     lines.append('')
 
@@ -1019,44 +1251,733 @@ def emit_c(ir: IRModule) -> str:
                          f'{{ return ((State*)p)->{p.name}; }}')
         lines.append('')
 
+    # ── Internal signal getters (regs, mems) ─────────────────────
+    for r in ir.regs:
+        if any(p.name == r.name for p in ir.ports):
+            continue  # already emitted above
+        w = _resolve_width(r.width, ir.params)
+        if r.name in pack_map:
+            word, bit = pack_map[r.name]
+            lines.append(
+                f'uint64_t veripy_get_{r.name}(void* p) '
+                f'{{ return (((State*)p)->{word} >> {bit}ULL) & 1ULL; }}')
+        else:
+            lines.append(f'uint64_t veripy_get_{r.name}(void* p) '
+                         f'{{ return ((State*)p)->{r.name}; }}')
+        lines.append('')
+
+    for m in ir.mems:
+        w = _resolve_width(m.width, ir.params)
+        lines.append(f'uint64_t veripy_get_{m.name}(void* p, uint64_t idx) '
+                     f'{{ return ((State*)p)->{m.name}[idx]; }}')
+        lines.append(f'void veripy_set_{m.name}(void* p, uint64_t idx, uint64_t v) '
+                     f'{{ ((State*)p)->{m.name}[idx] = ({_ctype(w)})(v & {_mask(w)}); }}')
+        lines.append('')
+
     return '\n'.join(lines) + '\n'
+
+# ── Hierarchical (per-module) C emission ─────────────────────────────
+
+def _c_ident(mod_type: str) -> str:
+    """Sanitise a registry key into a valid C identifier."""
+    return mod_type.replace('-', '_')
+
+
+def _resolve_params_ir(ir: IRModule):
+    """Resolve remaining Param nodes in an IR using ir.params.
+
+    Mutates *ir* in place — replaces Param → Const where possible.
+    """
+    from .flatten import _rename_expr, _rename_stmt
+    identity = {}
+    params = ir.params
+    if not params:
+        return
+    for i, a in enumerate(ir.assigns):
+        ir.assigns[i] = ContAssign(a.target, _rename_expr(a.value, identity, params))
+    for i, blk in enumerate(ir.comb_blocks):
+        ir.comb_blocks[i] = CombBlock(
+            stmts=[_rename_stmt(s, identity, params) for s in blk.stmts],
+            locals=blk.locals)
+    for i, blk in enumerate(ir.seq_blocks):
+        ir.seq_blocks[i] = SeqBlock(
+            edges=blk.edges,
+            stmts=[_rename_stmt(s, identity, params) for s in blk.stmts],
+            locals=blk.locals)
+
+
+def emit_c_hier(top_ir: IRModule, registry: dict) -> str:
+    """Emit C source for hierarchical (per-module) compilation.
+
+    Optimised path: instances are topologically sorted within each module
+    so that a single-pass comb evaluation suffices (no settle loop) when
+    there are no combinational cycles.  Cycles (SCCs) get a minimal
+    settle loop covering only the involved instances.
+
+    After seq, only comb units whose inputs were dirtied are re-evaluated
+    (dirty-bit selective re-settle).  1-bit signals are packed into
+    ``uint64_t`` bitfields and struct fields are ordered by eval access
+    for cache locality.
+    """
+    from copy import deepcopy
+
+    # Deep-copy so we can mutate (resolve params) without affecting caller
+    top_ir = deepcopy(top_ir)
+    registry = {k: deepcopy(v) for k, v in registry.items()}
+
+    # Resolve any remaining Param nodes
+    _resolve_params_ir(top_ir)
+    for ir in registry.values():
+        _resolve_params_ir(ir)
+
+    # Determine emission order: leaves first, top last
+    order = []
+    visited = set()
+
+    def _visit(mod_type):
+        if mod_type in visited:
+            return
+        visited.add(mod_type)
+        ir = top_ir if mod_type == top_ir.name else registry[mod_type]
+        for inst in ir.instances:
+            _visit(inst.mod_type)
+        order.append(mod_type)
+
+    _visit(top_ir.name)
+
+    # Identify leaf module types (no instances, no seq) for inlining
+    leaf_types = set()
+    for mod_type in order:
+        ir = top_ir if mod_type == top_ir.name else registry[mod_type]
+        if not ir.instances and not ir.seq_blocks:
+            leaf_types.add(mod_type)
+
+    lines = ['#include <stdint.h>', '#include <stdlib.h>',
+             '#include <string.h>', '']
+
+    # Forward-declare all State types
+    for mod_type in order:
+        cid = _c_ident(mod_type)
+        lines.append(f'typedef struct State_{cid} State_{cid};')
+    lines.append('')
+
+    # Emit each module type (struct + comb + seq)
+    emitted = set()
+    for mod_type in order:
+        if mod_type in emitted:
+            continue
+        emitted.add(mod_type)
+        ir = top_ir if mod_type == top_ir.name else registry[mod_type]
+        _emit_hier_module(ir, mod_type, registry, lines, leaf_types)
+
+    # Top-level eval
+    _emit_hier_eval(top_ir, lines)
+
+    # create / destroy
+    top_cid = _c_ident(top_ir.name)
+    lines += [
+        f'void* veripy_create(void) {{',
+        f'    State_{top_cid}* s = calloc(1, sizeof(State_{top_cid}));',
+        f'    memset(s->_dirty, 0xFF, sizeof(s->_dirty));',
+        f'    return s;',
+        f'}}', '',
+        f'void veripy_destroy(void* p) {{ free(p); }}', '',
+    ]
+
+    # Per-port set/get API (top-level ports only)
+    for p in top_ir.ports:
+        w = _resolve_width(p.width, top_ir.params)
+        if p.name in _hier_pack_maps.get(top_ir.name, {}):
+            word, bit = _hier_pack_maps[top_ir.name][p.name]
+            if p.direction == 'input':
+                lines.append(
+                    f'void veripy_set_{p.name}(void* p, uint64_t v) '
+                    f'{{ State_{top_cid}* s = (State_{top_cid}*)p; '
+                    f's->{word} = (s->{word} & ~(1ULL << {bit}ULL)) '
+                    f'| ((v & 1ULL) << {bit}ULL); }}')
+            lines.append(
+                f'uint64_t veripy_get_{p.name}(void* p) '
+                f'{{ return (((State_{top_cid}*)p)->{word} >> {bit}ULL) & 1ULL; }}')
+        else:
+            if p.direction == 'input':
+                lines.append(
+                    f'void veripy_set_{p.name}(void* p, uint64_t v) '
+                    f'{{ (({_state_type(top_ir)}*)p)->{p.name} = '
+                    f'({_ctype(w)})(v & {_mask(w)}); }}')
+            lines.append(
+                f'uint64_t veripy_get_{p.name}(void* p) '
+                f'{{ return (({_state_type(top_ir)}*)p)->{p.name}; }}')
+        lines.append('')
+
+    return '\n'.join(lines) + '\n'
+
+# Temporary storage for pack maps built during emission (keyed by mod name)
+_hier_pack_maps: dict = {}
+
+
+def _state_type(ir):
+    return f'State_{_c_ident(ir.name)}'
+
+
+# ── Hierarchical topo-sort + comb emission helpers ───────────────────
+
+def _hier_topo_sort_units(ir, registry, sig_w):
+    """Topologically sort evaluation units within a module.
+
+    Returns a list of evaluation units, each being one of:
+        ('assign', ContAssign)
+        ('comb', CombBlock)
+        ('instance', Instance)
+        ('settle', [Instance, ...])   — SCC requiring settle loop
+
+    Instances are ordered so that outputs of earlier instances are
+    available as inputs to later ones (through continuous assigns).
+    When combinational cycles exist (e.g. csrs ↔ traps), the involved
+    instances are grouped into a settle unit.
+    """
+    from .flatten import _expr_reads, _stmt_writes_reads
+
+    if not ir.instances:
+        # No instances — just assigns then comb blocks, no sorting needed
+        units = [('assign', a) for a in ir.assigns]
+        units += [('comb', blk) for blk in ir.comb_blocks]
+        return units
+
+    # Build per-instance input/output wire sets
+    inst_inputs = {}   # inst_name → set of parent wires read
+    inst_outputs = {}  # inst_name → set of parent wires written
+    inst_by_name = {}
+    for inst in ir.instances:
+        child_ir = registry.get(inst.mod_type)
+        if not child_ir:
+            continue
+        inst_by_name[inst.inst_name] = inst
+        dirs = {p.name: p.direction for p in child_ir.ports}
+        inst_inputs[inst.inst_name] = {w for p, w in inst.ports if dirs.get(p) == 'input'}
+        inst_outputs[inst.inst_name] = {w for p, w in inst.ports if dirs.get(p) == 'output'}
+
+    # Build assign write→read map: which signals does each assign produce/consume
+    assign_writes = {}  # target → ContAssign
+    assign_reads = {}   # target → set of signals read
+    for a in ir.assigns:
+        assign_writes[a.target] = a
+        assign_reads[a.target] = _expr_reads(a.value)
+
+    # Build instance dependency graph through assigns:
+    # inst A → inst B if A outputs a wire that (through assigns) feeds B's input
+    def _trace_producers(sig, visited=None):
+        """Find which instances produce a signal (transitively through assigns)."""
+        if visited is None:
+            visited = set()
+        if sig in visited:
+            return set()
+        visited.add(sig)
+        producers = set()
+        for iname, outs in inst_outputs.items():
+            if sig in outs:
+                producers.add(iname)
+        if sig in assign_reads:
+            for dep_sig in assign_reads[sig]:
+                producers |= _trace_producers(dep_sig, visited)
+        return producers
+
+    # Build adjacency: inst_name → set of inst_names it depends on
+    deps = {iname: set() for iname in inst_by_name}
+    for iname, inputs in inst_inputs.items():
+        for wire in inputs:
+            # Trace through assigns to find producing instances
+            producers = _trace_producers(wire)
+            for p in producers:
+                if p != iname:
+                    deps[iname].add(p)
+
+    # Tarjan's SCC algorithm for topo sort with cycle detection
+    index_counter = [0]
+    stack = []
+    on_stack = set()
+    indices = {}
+    lowlinks = {}
+    sccs = []
+
+    def _strongconnect(v):
+        indices[v] = lowlinks[v] = index_counter[0]
+        index_counter[0] += 1
+        stack.append(v)
+        on_stack.add(v)
+        for w in sorted(deps.get(v, [])):
+            if w not in indices:
+                _strongconnect(w)
+                lowlinks[v] = min(lowlinks[v], lowlinks[w])
+            elif w in on_stack:
+                lowlinks[v] = min(lowlinks[v], indices[w])
+        if lowlinks[v] == indices[v]:
+            scc = []
+            while True:
+                w = stack.pop()
+                on_stack.discard(w)
+                scc.append(w)
+                if w == v:
+                    break
+            sccs.append(scc)
+
+    for v in sorted(inst_by_name.keys()):
+        if v not in indices:
+            _strongconnect(v)
+
+    # sccs are in reverse topo order; reverse for forward order
+    sccs.reverse()
+
+    # Build the output wire set that's been "produced" so far
+    produced = set()
+    # All registers and ports are available at start
+    for p in ir.ports:
+        produced.add(p.name)
+    for r in ir.regs:
+        produced.add(r.name)
+
+    units = []
+
+    # For each SCC in topo order, emit the assigns needed, then the instance(s)
+    for scc in sccs:
+        # Collect all input wires needed by instances in this SCC
+        needed = set()
+        for iname in scc:
+            needed |= inst_inputs.get(iname, set())
+
+        # Emit assigns that produce needed wires (and their transitive deps)
+        def _emit_assign_chain(target, emitted):
+            if target in emitted or target in produced:
+                return
+            if target not in assign_writes:
+                return
+            emitted.add(target)
+            # First emit dependencies
+            for dep in assign_reads.get(target, set()):
+                _emit_assign_chain(dep, emitted)
+            units.append(('assign', assign_writes[target]))
+            produced.add(target)
+
+        emitted_assigns = set()
+        for wire in sorted(needed):
+            _emit_assign_chain(wire, emitted_assigns)
+
+        if len(scc) == 1:
+            units.append(('instance', inst_by_name[scc[0]]))
+        else:
+            # SCC: need settle loop — include assigns between SCC members
+            settle_insts = [inst_by_name[n] for n in scc]
+            units.append(('settle', settle_insts))
+
+        # Mark outputs as produced
+        for iname in scc:
+            produced |= inst_outputs.get(iname, set())
+
+    # Emit remaining assigns not yet emitted
+    emitted_targets = {a.target for kind, a in units if kind == 'assign'}
+    for a in ir.assigns:
+        if a.target not in emitted_targets:
+            units.append(('assign', a))
+
+    # Emit comb blocks last
+    for blk in ir.comb_blocks:
+        units.append(('comb', blk))
+
+    return units
+
+
+def _emit_hier_comb_body(ir, registry, eval_units, sig_w, pack_map,
+                         dirty_idx, leaf_types, lines, force=False):
+    """Emit the body of a _comb or _comb_resettle function.
+
+    When *force* is True, all units run unconditionally (initial settle).
+    When False, units are guarded by dirty-bit checks (re-settle).
+    """
+    from .flatten import _expr_reads, _stmt_writes_reads
+
+    for kind, data in eval_units:
+        if kind == 'assign':
+            a = data
+            reads = _expr_reads(a.value)
+            writes = {a.target}
+            cond = '1' if force else _dirty_cond(reads, dirty_idx)
+            val = _expr(a.value, sig_w, pack_map)
+            w = sig_w.get(a.target, 0)
+            if a.target in pack_map:
+                stmt = f'    {_pack_write(a.target, val, pack_map)}'
+            elif w and w < 64:
+                stmt = f'    s->{a.target} = ({_ctype(w)})({val} & {_mask(w)});'
+            else:
+                stmt = f'    s->{a.target} = {val};'
+            dirty_lines = _dirty_set_lines(writes & set(dirty_idx), dirty_idx)
+            if cond == '1':
+                lines.append(stmt)
+                if not force:
+                    lines.extend(dirty_lines)
+            else:
+                lines.append(f'    if ({cond}) {{')
+                lines.append(f'    {stmt}')
+                lines.extend(f'    {dl}' for dl in dirty_lines)
+                lines.append(f'    }}')
+
+        elif kind == 'comb':
+            blk = data
+            reads, writes = set(), set()
+            for stmt in blk.stmts:
+                _stmt_writes_reads(stmt, writes, reads)
+            cond = '1' if force else _dirty_cond(reads, dirty_idx)
+            body = []
+            _emit_stmts_batched(blk.stmts, body, sig_w, pack_map=pack_map)
+            dirty_lines = _dirty_set_lines(writes & set(dirty_idx), dirty_idx)
+            if cond == '1':
+                lines.extend(body)
+                if not force:
+                    lines.extend(dirty_lines)
+            else:
+                lines.append(f'    if ({cond}) {{')
+                lines.extend(f'    {b}' for b in body)
+                lines.extend(f'    {dl}' for dl in dirty_lines)
+                lines.append(f'    }}')
+
+        elif kind == 'instance':
+            inst = data
+            _emit_one_instance(inst, ir, registry, sig_w, pack_map,
+                               dirty_idx, leaf_types, lines, force)
+
+        elif kind == 'settle':
+            instances = data
+            # Collect all wires involved in the SCC for dirty tracking
+            scc_reads, scc_writes = set(), set()
+            for inst in instances:
+                child_ir = registry.get(inst.mod_type)
+                if not child_ir:
+                    continue
+                dirs = {p.name: p.direction for p in child_ir.ports}
+                for pname, wname in inst.ports:
+                    if dirs.get(pname) == 'input':
+                        scc_reads.add(wname)
+                    elif dirs.get(pname) == 'output':
+                        scc_writes.add(wname)
+
+            cond = '1' if force else _dirty_cond(scc_reads, dirty_idx)
+            if cond != '1':
+                lines.append(f'    if ({cond}) {{')
+
+            # Settle loop for SCC — 2 iterations
+            pad = '    ' if cond != '1' else ''
+            lines.append(f'{pad}    for (int _settle = 0; _settle < 2; _settle++) {{')
+            # Emit assigns between SCC instances
+            scc_names = {inst.inst_name for inst in instances}
+            scc_output_wires = set()
+            for inst in instances:
+                child_ir = registry.get(inst.mod_type)
+                if child_ir:
+                    dirs = {p.name: p.direction for p in child_ir.ports}
+                    scc_output_wires |= {w for p, w in inst.ports if dirs.get(p) == 'output'}
+            for a in ir.assigns:
+                reads = _expr_reads(a.value)
+                if reads & scc_output_wires:
+                    val = _expr(a.value, sig_w, pack_map)
+                    w = sig_w.get(a.target, 0)
+                    if a.target in pack_map:
+                        lines.append(f'{pad}        {_pack_write(a.target, val, pack_map)}')
+                    elif w and w < 64:
+                        lines.append(f'{pad}        s->{a.target} = ({_ctype(w)})({val} & {_mask(w)});')
+                    else:
+                        lines.append(f'{pad}        s->{a.target} = {val};')
+            for inst in instances:
+                _emit_one_instance(inst, ir, registry, sig_w, pack_map,
+                                   dirty_idx, leaf_types, lines, force=True,
+                                   extra_indent=pad + '    ')
+            lines.append(f'{pad}    }}')
+            if not force:
+                lines.extend(_dirty_set_lines(scc_writes & set(dirty_idx), dirty_idx))
+            if cond != '1':
+                lines.append(f'    }}')
+
+
+def _emit_one_instance(inst, parent_ir, registry, sig_w, pack_map,
+                       dirty_idx, leaf_types, lines, force=False,
+                       extra_indent=''):
+    """Emit copy-in, comb eval, copy-out for a single instance.
+
+    For leaf modules, inlines the child's comb logic directly.
+    """
+    child_ir = registry.get(inst.mod_type)
+    if not child_ir:
+        return
+    child_dirs = {p.name: p.direction for p in child_ir.ports}
+    child_cid = _c_ident(inst.mod_type)
+    pad = extra_indent + '    '
+
+    # Collect input/output wires for dirty tracking
+    input_wires = {w for p, w in inst.ports if child_dirs.get(p) == 'input'}
+    output_wires = {w for p, w in inst.ports if child_dirs.get(p) == 'output'}
+
+    cond = '1' if force else _dirty_cond(input_wires, dirty_idx)
+
+    if cond != '1':
+        lines.append(f'{pad}if ({cond}) {{')
+        ipad = pad + '    '
+    else:
+        ipad = pad
+
+    # Copy inputs
+    for pname, wname in inst.ports:
+        if child_dirs.get(pname) == 'input':
+            src = _pack_read(wname, pack_map) if wname in pack_map else f's->{wname}'
+            child_pack = _hier_pack_maps.get(inst.mod_type, {})
+            if pname in child_pack:
+                word, bit = child_pack[pname]
+                lines.append(f'{ipad}s->{inst.inst_name}.{word} = '
+                             f'(s->{inst.inst_name}.{word} & ~(1ULL << {bit}ULL)) '
+                             f'| (({src} & 1ULL) << {bit}ULL);')
+            else:
+                lines.append(f'{ipad}s->{inst.inst_name}.{pname} = {src};')
+
+    # Eval: call child _comb (leaf modules are already always_inline)
+    # In re-settle mode (force=False), call _comb_resettle if the child
+    # has one (modules with instances or seq blocks), avoiding full
+    # re-evaluation when only some inputs changed.
+    child_cid = _c_ident(inst.mod_type)
+    has_resettle = child_ir.instances or child_ir.seq_blocks
+    if not force and has_resettle:
+        lines.append(f'{ipad}_comb_resettle_{child_cid}(&s->{inst.inst_name});')
+    else:
+        lines.append(f'{ipad}_comb_{child_cid}(&s->{inst.inst_name});')
+
+    # Copy outputs
+    for pname, wname in inst.ports:
+        if child_dirs.get(pname) == 'output':
+            child_pack = _hier_pack_maps.get(inst.mod_type, {})
+            if pname in child_pack:
+                src = _pack_read(pname, child_pack)
+                src = src.replace('s->', f's->{inst.inst_name}.')
+            else:
+                src = f's->{inst.inst_name}.{pname}'
+            if wname in pack_map:
+                lines.append(f'{ipad}{_pack_write(wname, src, pack_map)}')
+            else:
+                lines.append(f'{ipad}s->{wname} = {src};')
+
+    # Mark output wires dirty
+    if not force:
+        dirty_lines = _dirty_set_lines(output_wires & set(dirty_idx), dirty_idx)
+        lines.extend(f'{ipad}{dl.strip()}' for dl in dirty_lines)
+
+    if cond != '1':
+        lines.append(f'{pad}}}')
+
+
+def _emit_hier_module(ir, mod_type, registry, lines, leaf_types=None):
+    """Emit State struct + _comb + _seq for one module type.
+
+    Instances are topologically sorted by data dependencies so that a
+    single-pass comb evaluation suffices.  Combinational cycles (SCCs)
+    get a minimal settle loop covering only the involved instances.
+    Leaf modules (no instances, no seq) are inlined into the parent.
+    1-bit signals are packed into uint64_t bitfields.
+    """
+    if leaf_types is None:
+        leaf_types = set()
+    cid = _c_ident(mod_type)
+    sig_w = _build_sig_widths(ir)
+    nba_sigs, nba_per_seq = _collect_nba_signals(ir)
+
+    # ── Collect all signals ──────────────────────────────────────
+    all_sigs = {}
+    for p in ir.ports:
+        all_sigs[p.name] = _resolve_width(p.width, ir.params)
+    for d in ir.wires:
+        all_sigs[d.name] = _resolve_width(d.width, ir.params)
+    for d in ir.regs:
+        all_sigs[d.name] = _resolve_width(d.width, ir.params)
+    for blk in ir.comb_blocks:
+        for name, width in blk.locals.items():
+            all_sigs.setdefault(name, _resolve_width(width, ir.params))
+    for blk in ir.seq_blocks:
+        for name, width in blk.locals.items():
+            all_sigs.setdefault(name, _resolve_width(width, ir.params))
+
+    # ── Signal packing + eval-order layout ───────────────────────
+    ordered_names = sorted(all_sigs.keys())
+    pack_map, pack_words = _build_pack_map(all_sigs, ordered_names)
+    # Store for use by emit_c_hier set/get API
+    _hier_pack_maps[mod_type] = pack_map
+
+    # ── Dirty-bit indices ────────────────────────────────────────
+    dirty_idx, n_dirty_words = _build_dirty_indices(sig_w, ir.mems)
+
+    # ── State struct ─────────────────────────────────────────────
+    lines.append(f'struct State_{cid} {{')
+
+    for name in ordered_names:
+        if name not in pack_map:
+            lines.append(f'    {_ctype(all_sigs[name])} {name};')
+    for pw in pack_words:
+        lines.append(f'    uint64_t {pw};')
+
+    # Memory arrays
+    for m in ir.mems:
+        if isinstance(m, MemDecl):
+            w = _resolve_width(m.width, ir.params)
+            d = _resolve_width(m.depth, ir.params) if isinstance(m.depth, str) else m.depth
+            lines.append(f'    {_ctype(w)} {m.name}[{d}];')
+
+    # Sub-module instances
+    for inst in ir.instances:
+        child_cid = _c_ident(inst.mod_type)
+        lines.append(f'    State_{child_cid} {inst.inst_name};')
+
+    # Edge detection prev values
+    clocks = set()
+    for blk in ir.seq_blocks:
+        for edge_kind, sig_name in blk.edges:
+            clocks.add(sig_name)
+    for clk in sorted(clocks):
+        lines.append(f'    uint8_t _prev_{clk};')
+
+    # NBA temporaries
+    for name in sorted(nba_sigs):
+        w = all_sigs.get(name, 32)
+        lines.append(f'    {_ctype(w)} _nba_{name};')
+
+    # Dirty bits
+    lines.append(f'    uint64_t _dirty[{n_dirty_words}];')
+
+    lines.append(f'}};')
+    lines.append('')
+
+    # ── Topo-sort evaluation units ───────────────────────────────
+    eval_units = _hier_topo_sort_units(ir, registry, sig_w)
+
+    # ── _comb function ───────────────────────────────────────────
+    inline = ' __attribute__((always_inline))' if not ir.instances else ''
+    lines.append(f'static inline void _comb_{cid}(State_{cid}* s){inline} {{')
+    _emit_hier_comb_body(ir, registry, eval_units, sig_w, pack_map,
+                         dirty_idx, leaf_types, lines, force=True)
+    lines.append('}')
+    lines.append('')
+
+    # ── _comb_resettle function (dirty-driven) ───────────────────
+    if ir.instances or ir.seq_blocks:
+        lines.append(f'static void _comb_resettle_{cid}(State_{cid}* s) {{')
+        _emit_hier_comb_body(ir, registry, eval_units, sig_w, pack_map,
+                             dirty_idx, leaf_types, lines, force=False)
+        lines.append('}')
+        lines.append('')
+
+    # ── _seq function ────────────────────────────────────────────
+    inline_s = ' __attribute__((always_inline))' if not ir.instances else ''
+    lines.append(f'static inline void _seq_{cid}(State_{cid}* s){inline_s} {{')
+
+    # Group seq blocks by edge
+    edge_blocks = {}
+    for i, blk in enumerate(ir.seq_blocks):
+        for edge_kind, sig_name in blk.edges:
+            edge_blocks.setdefault((edge_kind, sig_name), []).append(i)
+
+    for (edge_kind, clk), block_ids in sorted(edge_blocks.items()):
+        clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
+        if edge_kind == 'posedge':
+            cond = f'{clk_expr} && !s->_prev_{clk}'
+        else:
+            cond = f'!{clk_expr} && s->_prev_{clk}'
+        lines.append(f'    if ({cond}) {{')
+
+        # NBA snapshot
+        group_nba = set()
+        for idx in block_ids:
+            group_nba |= nba_per_seq[idx]
+        for name in sorted(group_nba):
+            src = _pack_read(name, pack_map) if name in pack_map else f's->{name}'
+            lines.append(f'        s->_nba_{name} = {src};')
+
+        # Seq blocks
+        for idx in block_ids:
+            body = []
+            _emit_stmts_batched(ir.seq_blocks[idx].stmts, body, sig_w,
+                                pack_map=pack_map, nba_sigs=nba_sigs)
+            lines.extend('    ' + ln for ln in body)
+
+        # NBA commit + mark dirty
+        for name in sorted(group_nba):
+            if name in pack_map:
+                lines.append(f'        {_pack_write(name, f"s->_nba_{name}", pack_map)}')
+            else:
+                lines.append(f'        s->{name} = s->_nba_{name};')
+        # Mark seq-written signals dirty for re-settle
+        from .flatten import _stmt_writes_reads as _swr
+        group_seq_writes = set()
+        for idx in block_ids:
+            ws = set()
+            for stmt in ir.seq_blocks[idx].stmts:
+                _swr(stmt, ws, set())
+            group_seq_writes |= ws & set(dirty_idx)
+        lines.extend(_dirty_set_lines(group_seq_writes, dirty_idx, indent=2))
+
+        lines.append('    }')
+
+    # Sub-module seq
+    for inst in ir.instances:
+        child_ir = registry.get(inst.mod_type)
+        if not child_ir:
+            continue
+        if child_ir.seq_blocks or child_ir.instances:
+            child_cid = _c_ident(inst.mod_type)
+            lines.append(f'    _seq_{child_cid}(&s->{inst.inst_name});')
+
+    # Update prev values
+    for clk in sorted(clocks):
+        clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
+        lines.append(f'    s->_prev_{clk} = {clk_expr};')
+
+    lines.append('}')
+    lines.append('')
+
+
+def _emit_hier_eval(top_ir, lines):
+    """Emit veripy_eval() for the top-level module.
+
+    1. Full comb settle (unconditional — runs all units).
+    2. Clear dirty bits.
+    3. Seq (marks dirty bits for NBA-committed signals).
+    4. Dirty-driven comb re-settle (only affected units).
+    """
+    cid = _c_ident(top_ir.name)
+    pack_map = _hier_pack_maps.get(top_ir.name, {})
+    sig_w = _build_sig_widths(top_ir)
+    dirty_idx, n_dirty_words = _build_dirty_indices(sig_w, top_ir.mems)
+    lines += [
+        'void veripy_eval(void* p) {',
+        f'    State_{cid}* s = (State_{cid}*)p;',
+        f'    _comb_{cid}(s);',
+        f'    memset(s->_dirty, 0, {n_dirty_words * 8});',
+        f'    _seq_{cid}(s);',
+        f'    _comb_resettle_{cid}(s);',
+        '}', '',
+    ]
+
 
 # ── Compile + load ───────────────────────────────────────────────────
 
-def compile_module(module, module_name=None):
+def compile_module(module, module_name=None, force_hier=False):
     """Compile a VeriPy Module to a CSimModel.
 
-    Handles lowering, sub-module collection, flattening, and compilation.
+    Uses hierarchical per-module compilation when the design has
+    sub-module instances (or force_hier=True), flat compilation otherwise.
     """
-    from .signal import Signal, Interface
     from .lower import lower_module
-    from .flatten import flatten_ir
-    from .emit_verilog import _to_snake
 
     if module_name is None:
         module_name = type(module).__name__.lower()
 
-    # Collect sub-module IRs into registry
-    registry = {}
-    def _collect(m, mname):
-        if mname in registry:
-            return
-        factory = getattr(type(m), '_veripy_factory', None)
-        fresh = factory() if factory else type(m)()
-        for sn, sub in fresh._submodules().items():
-            _collect(sub, _to_snake(type(sub).__name__))
-        registry[mname] = lower_module(fresh, mname)
-
-    from .module import Module as _Module
-    for k in dir(module):
-        v = getattr(module, k)
-        if isinstance(v, _Module) and v is not module:
-            _collect(v, _to_snake(type(v).__name__))
-
+    registry, patch_fn = _collect_submodule_registry(module)
     top_ir = lower_module(module, module_name)
-    flat_ir = flatten_ir(top_ir, registry) if top_ir.instances else top_ir
+    patch_fn(top_ir)
 
-    return CSimModel(flat_ir)
+    if top_ir.instances or force_hier:
+        return CSimModel(top_ir, registry=registry)
+    return CSimModel(top_ir)
 
 
 class CSimModel:
@@ -1065,25 +1986,28 @@ class CSimModel:
     Same API as VerilatorModel: set/get/eval/step/close.
     """
 
-    def __init__(self, ir: IRModule, build_dir=None):
-        from .flatten import topo_sort_comb
-
+    def __init__(self, ir: IRModule, build_dir=None, registry=None, trace=None):
         self._ptr = None
         self._tmpdir = None
         self._lib = None
 
-        if ir.instances:
-            raise ValueError('IR must be flattened before CSimModel '
-                             '(call flatten_ir first)')
-        ir = topo_sort_comb(ir)
-        ir = _inline_cont_assigns(ir)
+        if registry is not None:
+            # Hierarchical path — per-module compilation
+            c_src = emit_c_hier(ir, registry)
+        else:
+            # Flat path — legacy single-module compilation
+            from .flatten import topo_sort_comb
+            if ir.instances:
+                raise ValueError('IR must be flattened before CSimModel '
+                                 '(call flatten_ir first)')
+            ir = topo_sort_comb(ir)
+            ir = _inline_cont_assigns(ir)
+            c_src = emit_c(ir)
 
         self._signals = {}
         for p in ir.ports:
             w = _resolve_width(p.width, ir.params)
             self._signals[p.name] = (p.direction, w)
-
-        c_src = emit_c(ir)
 
         own_tmpdir = build_dir is None
         if own_tmpdir:
@@ -1123,10 +2047,66 @@ class CSimModel:
             fn.argtypes = [ctypes.c_void_p]
             self._getters[name] = fn
 
-    def set(self, name, val):
-        self._setters[name](self._ptr, val)
+        # Internal signal getters (regs, mems)
+        for r in ir.regs:
+            if r.name in self._getters:
+                continue
+            fn = getattr(self._lib, f'veripy_get_{r.name}')
+            fn.restype = ctypes.c_uint64
+            fn.argtypes = [ctypes.c_void_p]
+            self._getters[r.name] = fn
 
-    def get(self, name):
+        self._mem_getters = {}
+        self._mem_setters = {}
+        for m in ir.mems:
+            fn = getattr(self._lib, f'veripy_get_{m.name}')
+            fn.restype = ctypes.c_uint64
+            fn.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+            self._mem_getters[m.name] = fn
+            fn = getattr(self._lib, f'veripy_set_{m.name}')
+            fn.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint64]
+            self._mem_setters[m.name] = fn
+
+        # VCD trace
+        self._lib.veripy_trace_open.argtypes = [ctypes.c_char_p]
+        self._lib.veripy_trace_close.argtypes = []
+        self._lib.veripy_trace_enable.argtypes = [ctypes.c_int]
+        self._lib.veripy_assert_failed.restype = ctypes.c_int
+        self._lib.veripy_assert_clear.argtypes = []
+
+        if trace:
+            self.trace_open(trace)
+
+    def trace_open(self, path):
+        self._lib.veripy_trace_open(path.encode() if isinstance(path, str) else path)
+
+    def trace_close(self):
+        self._lib.veripy_trace_close()
+
+    def trace_enable(self, enabled: bool):
+        self._lib.veripy_trace_enable(int(enabled))
+
+    def assert_failed(self):
+        return bool(self._lib.veripy_assert_failed())
+
+    def assert_clear(self):
+        self._lib.veripy_assert_clear()
+
+    def set(self, name, val, idx=None):
+        if idx is not None:
+            self._mem_setters[name](self._ptr, idx, val)
+        else:
+            self._setters[name](self._ptr, val)
+
+    def load_mem(self, name, data, offset=0):
+        """Load data into a memory array. data is an iterable of int values."""
+        setter = self._mem_setters[name]
+        for i, val in enumerate(data):
+            setter(self._ptr, offset + i, val)
+
+    def get(self, name, idx=None):
+        if idx is not None:
+            return self._mem_getters[name](self._ptr, idx)
         return self._getters[name](self._ptr)
 
     def eval(self):
@@ -1141,6 +2121,7 @@ class CSimModel:
 
     def close(self):
         if self._ptr:
+            self.trace_close()
             self._lib.veripy_destroy(self._ptr)
             self._ptr = None
         if self._tmpdir:
@@ -1386,23 +2367,10 @@ def compile_bench(module, tb_ir, module_name=None):
     t0 = time.perf_counter()
 
     # Build flat model IR
-    registry = {}
-    def _collect(m, mname):
-        if mname in registry:
-            return
-        factory = getattr(type(m), '_veripy_factory', None)
-        fresh = factory() if factory else type(m)()
-        for sn, sub in fresh._submodules().items():
-            _collect(sub, _to_snake(type(sub).__name__))
-        registry[mname] = lower_module(fresh, mname)
-
-    from .module import Module as _Module
-    for k in dir(module):
-        v = getattr(module, k)
-        if isinstance(v, _Module) and v is not module:
-            _collect(v, _to_snake(type(v).__name__))
+    registry, patch_fn = _collect_submodule_registry(module)
 
     top_ir = lower_module(module, module_name)
+    patch_fn(top_ir)
     flat_ir = flatten_ir(top_ir, registry) if top_ir.instances else top_ir
     flat_ir = topo_sort_comb(flat_ir)
     flat_ir = _inline_cont_assigns(flat_ir)
