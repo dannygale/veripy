@@ -185,22 +185,29 @@ class VeripyTestCase(unittest.TestCase):
                 for sn in v._signals():
                     sigs[f'{k}_{sn}'] = getattr(v, sn)
 
-        # ── DUT Verilog ──────────────────────────────────────────────
-        parts = []
-        seen = set()
-        def _collect(m, mname):
-            if mname in seen:
-                return
-            seen.add(mname)
-            factory = getattr(type(m), '_veripy_factory', None)
-            fresh = factory() if factory else type(m)()
-            for sn, sub in fresh._submodules().items():
+        # ── DUT Verilog (cached per class) ───────────────────────────
+        cache_key = type(mod)
+        if not hasattr(self.__class__, '_dut_verilog_cache'):
+            self.__class__._dut_verilog_cache = {}
+        if cache_key in self.__class__._dut_verilog_cache:
+            verilog_src = self.__class__._dut_verilog_cache[cache_key]
+        else:
+            parts = []
+            seen = set()
+            def _collect(m, mname):
+                if mname in seen:
+                    return
+                seen.add(mname)
+                factory = getattr(type(m), '_veripy_factory', None)
+                fresh = factory() if factory else type(m)()
+                for sn, sub in fresh._submodules().items():
+                    _collect(sub, _to_snake(type(sub).__name__))
+                parts.append(fresh.to_verilog(mname))
+            for sn, sub in mod._submodules().items():
                 _collect(sub, _to_snake(type(sub).__name__))
-            parts.append(fresh.to_verilog(mname))
-        for sn, sub in mod._submodules().items():
-            _collect(sub, _to_snake(type(sub).__name__))
-        parts.append(mod.to_verilog(module_name))
-        verilog_src = '\n\n'.join(parts)
+            parts.append(mod.to_verilog(module_name))
+            verilog_src = '\n\n'.join(parts)
+            self.__class__._dut_verilog_cache[cache_key] = verilog_src
 
         # ── Detect module variable name from closures ────────────────
         mod_var = None
@@ -385,11 +392,13 @@ def _wrap_dual(fn):
 
         # Pass 2: iverilog
         # Reactive yields (until()) can't be lowered to Verilog — skip.
-        try:
-            self._run_iverilog()
-            self._all_outputs['verilog'] = dict(self._rtl_outputs)
-        except SyntaxError:
-            pass
+        skip_iverilog = os.environ.get('VERIPY_SKIP_IVERILOG', '') == '1'
+        if not skip_iverilog:
+            try:
+                self._run_iverilog()
+                self._all_outputs['verilog'] = dict(self._rtl_outputs)
+            except SyntaxError:
+                pass
 
         # Pass 3: csim flat (always-on)
         skip_csim = getattr(self, 'SKIP_CSIM', False) or \
