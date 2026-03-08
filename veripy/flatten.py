@@ -274,7 +274,12 @@ def topo_sort_comb(mod: IRModule) -> IRModule:
         level = next_level
 
     if len(order) != n:
-        raise ValueError('Combinational loop detected in comb assignments')
+        remaining = set(range(n)) - set(order)
+        loop_sigs = _find_loop_signals(nodes, adj, remaining)
+        raise ValueError(
+            f'Combinational loop detected in comb assignments. '
+            f'Signals in loop: {sorted(loop_sigs)}'
+        )
 
     # Rebuild assigns and comb_blocks in sorted order.
     # All nodes go into comb_blocks to preserve interleaved ordering;
@@ -291,6 +296,48 @@ def topo_sort_comb(mod: IRModule) -> IRModule:
             out.comb_blocks.append(deepcopy(obj))
 
     return out
+
+
+def _find_loop_signals(nodes, adj, remaining: set) -> set:
+    """Return signal names written by nodes involved in a combinational cycle.
+
+    Uses DFS to find a cycle in the subgraph of *remaining* nodes, then
+    collects all signal names written by nodes on that cycle.
+    """
+    sub_adj = {u: [v for v in adj[u] if v in remaining] for u in remaining}
+    visited, on_stack, stack_list = set(), set(), []
+    cycle_nodes: set = set()
+
+    def _dfs(u) -> bool:
+        visited.add(u); on_stack.add(u); stack_list.append(u)
+        for v in sub_adj[u]:
+            if v not in visited:
+                if _dfs(v):
+                    return True
+            elif v in on_stack:
+                # Found back-edge u→v; collect all nodes from v to u on stack
+                idx = stack_list.index(v)
+                cycle_nodes.update(stack_list[idx:])
+                return True
+        stack_list.pop(); on_stack.discard(u)
+        return False
+
+    for start in remaining:
+        if start not in visited:
+            if _dfs(start):
+                break
+
+    sigs: set = set()
+    for i in cycle_nodes:
+        kind, obj = nodes[i]
+        if kind == 'assign':
+            sigs.add(obj.target)
+        else:
+            for s in obj.stmts:
+                w: set = set()
+                _stmt_writes_reads(s, w, set())
+                sigs |= w
+    return sigs
 
 
 # ── Signal collection helpers ────────────────────────────────────────
