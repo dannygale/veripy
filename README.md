@@ -68,12 +68,7 @@ class TestCounter(VeripyTestCase):
         return counter(width=4)       # or Counter(width=4)
 
     def test_counting(self):
-        @self.always
-        def clock():
-            self.set(clock=0)
-            yield 5
-            self.set(clock=1)
-            yield 5
+        self.clock('clock', period=10)
 
         @self.initial
         def stimulus():
@@ -103,21 +98,23 @@ veripy build <file.py>              # emit Verilog (compile-checked via iverilog
 veripy build <file.py> -o out/      # write .v files to a directory
 veripy build <file.py> -p width=4   # pass parameters
 veripy test [path] [-v]             # dual-path test suite
+veripy check <file.py>              # behavioral vs RTL equivalence (requires hypothesis)
 veripy import <file.v>              # convert Verilog → VeriPy Python
 veripy import rtl/ -o src/          # convert entire project
 veripy lint <file.py>               # static checks
-veripy formal <file.py>            # emit .sby + Verilog for SymbiYosys
-veripy equiv gold.py gate.py       # formal equivalence checking (Yosys)
-veripy profile tests/test_foo.py   # compare backend performance
-veripy doc <file.py>               # generate markdown documentation
-veripy ip list                     # list installed IP packages
-veripy ip init <name>              # scaffold a new IP package
-veripy init                        # scaffold a new project with veripy.toml
+veripy formal <file.py>             # emit .sby + Verilog for SymbiYosys
+veripy equiv gold.py gate.py        # formal equivalence checking (Yosys)
+veripy profile tests/test_foo.py    # compare backend performance
+veripy doc <file.py>                # generate markdown documentation
+veripy ip list                      # list installed IP packages
+veripy ip init <name>               # scaffold a new IP package
+veripy init                         # scaffold a new project with veripy.toml
 ```
 
 ## Features
 
-- **Dual-path testing** — one test verifies Python sim, iverilog, csim, and optionally Verilator ([docs](docs/testing.md))
+- **Multi-tier testing** — `TestBench` (functional + multi-backend), `BehavioralTestCase` (combinational/intent), `FirmwareTestCase` (ELF/CPU) ([docs](docs/testing.md))
+- **Behavioral ↔ RTL equivalence** — `veripy check` fuzzes `@behavioral` vs RTL automatically via Hypothesis ([docs](docs/testing.md#behavioral--rtl-equivalence-checking))
 - **Native C simulation** — csim backend compiles IR to C for near-Verilator speed with sub-second compile times
 - **Signal types** — `Input`, `Output`, `Register`, `Signal`, `Mem`, bit slicing, concatenation ([docs](docs/signals.md))
 - **Lazy expressions** — signal operators return composable `_Expr` objects with width tracking ([docs](docs/signals.md#operators))

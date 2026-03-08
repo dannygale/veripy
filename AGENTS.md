@@ -29,7 +29,8 @@ veripy/
 │   ├── backend_equiv.py    # Yosys equivalence checking script generation
 │   ├── backend_wgpu.py     # WebGPU batch-parallel simulation
 │   ├── sim.py        # SimEngine, reactive yields (until), fork/join
-│   ├── verify.py     # VeripyTestCase: multi-backend dual-path testing
+│   ├── verify.py     # TestBench, BehavioralTestCase, VeripyTestCase: multi-backend testing
+│   ├── firmware_test.py  # FirmwareTestCase: ELF-based CPU/SoC testing
 │   ├── rand.py       # Constrained random (Rand, Range)
 │   ├── driver.py     # Protocol driver base class
 │   ├── blackbox.py   # BlackBox module for vendor IP instantiation
@@ -77,12 +78,15 @@ veripy build <file.py>
 # Lint
 veripy lint <file.py>
 
+# Behavioral vs RTL equivalence check (requires hypothesis)
+veripy check <file.py>
+
 # Run benchmarks
 python benchmarks/sim_vs_rtl.py
 python benchmarks/stress_test.py
 ```
 
-All 726+ tests must pass before committing.
+All 1002+ tests must pass before committing.
 
 ## C simulation backend (csim)
 
@@ -124,11 +128,15 @@ See `benchmarks/BASELINES.md` for current performance numbers.
 - **Signal types**: `Input`, `Output`, `Register`, `Signal` are the wire types. `_Expr` is a lazy expression from operators — not instantiated directly.
 - **Width inference**: The lowerer infers widths from RHS expressions in @comb blocks. Only declare `Register(width)` for locals when the RHS references other locals.
 - **Pipelines**: Lambda-chain for simple cases, `pipe.stage('name', stall, flush, field=source)` for CPU-style pipelines.
-- **Testing**: `VeripyTestCase` runs each test against up to 5 backends (Python sim, iverilog, csim flat, csim hierarchical, and optionally Verilator). Don't add tests unless the work requires them.
-  - Subclass `VeripyTestCase`, implement `create_module()` to return your module instance.
-  - Each `test_*` method runs automatically against all enabled backends — outputs are compared cycle-by-cycle.
-  - Use `@self.always` for clocks, `@self.initial` for stimulus. `self.set()` drives inputs, `self.out()` reads outputs.
-  - Reactive helpers: `yield until(lambda: cond)`, `self.fork()`, `self.fork_any()` for parallel blocks.
+- **Testing**: Four test case classes for different needs. Don't add tests unless the work requires them.
+  - `TestBench` — functional tests with multi-backend comparison (behavioral + csim by default). Subclass, implement `create_module()`, write `test_*` methods.
+  - `BehavioralTestCase` — combinational/intent tests, pure Python, no clock. `set()` evaluates immediately.
+  - `FirmwareTestCase` — ELF-based CPU/SoC tests. `load_elf()`, `run_until_halt()`, `run_arch_suite()`.
+  - `VeripyTestCase` — legacy alias for `TestBench` with `backend='all'`.
+  - Use `self.clock(name, period)` instead of `@self.always` clock boilerplate.
+  - Use `self.peripheral(fn)` for memory/bus callbacks that work in both behavioral and RTL replay.
+  - Use `@self.run_testbench(clock, period)` for linear coroutine style.
+  - Reactive helpers: `yield until(lambda: cond)`, `self.fork()`, `self.fork_any()`.
   - See [docs/testing.md](docs/testing.md) for full details.
 - **Minimal code**: Follow existing patterns. Don't over-abstract. Explicit wiring over magic.
 - **No separate Wire type**: `Signal` is the wire type.

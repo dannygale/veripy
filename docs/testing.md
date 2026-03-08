@@ -1,21 +1,31 @@
 # Testing
 
-## Dual-Path Testing
+## Test Case Types
 
-Write one test, verify both Python simulation and generated Verilog produce the same outputs:
+VeriPy provides four test case classes for different testing needs:
+
+| Class | Purpose | Backend |
+|---|---|---|
+| `TestBench` | Functional tests with multi-backend comparison | csim (default) |
+| `VeripyTestCase` | Same as `TestBench` with `backend='all'` | all backends |
+| `BehavioralTestCase` | Combinational / intent tests, no timing | Python only |
+| `FirmwareTestCase` | ELF-based CPU / SoC tests | behavioral + csim |
+
+---
+
+## TestBench — Functional Testing
+
+Write one test, verify Python simulation and RTL produce identical outputs:
 
 ```python
-from veripy import VeripyTestCase
+from veripy import TestBench
 
-class TestCounter(VeripyTestCase):
+class TestCounter(TestBench):
     def create_module(self):
         return counter(width=4)
 
     def test_counting(self):
-        @self.always
-        def clock():
-            self.set(clock=0); yield 5
-            self.set(clock=1); yield 5
+        self.clock('clock', period=10)
 
         @self.initial
         def stimulus():
@@ -28,36 +38,187 @@ class TestCounter(VeripyTestCase):
             self.assertEqual(self.out('count'), 5)
 ```
 
-Each `test_*` method automatically runs against up to five backends, and all outputs are compared:
+Or use the linear coroutine style with `run_testbench`:
 
-1. **Python simulation** — assertions run against the Python model
-2. **iverilog** — stimulus replayed through iverilog, outputs compared cycle-by-cycle
-3. **csim (flat)** — stimulus replayed through the native C simulation backend
-4. **csim (hierarchical)** — same as csim but forces hierarchical per-module compilation
-5. **Verilator** (opt-in) — stimulus replayed through Verilator co-simulation
+```python
+    def test_counting(self):
+        @self.run_testbench(clock='clock', period=10)
+        def run():
+            self.set(reset=1, enable=1)
+            yield 10
+            self.assertEqual(self.out('count'), 0)
+            self.set(reset=0)
+            for _ in range(5):
+                yield 10
+            self.assertEqual(self.out('count'), 5)
+```
 
-Backends 3–4 run automatically. Backend 5 is opt-in via `USE_VERILATOR = True` on the test class or `VERIPY_VERILATOR=1` environment variable.
+`@self.run_testbench(clock, period)` registers the clock and runs the simulation — no separate `@self.always` clock block needed.
 
-After all backends run, `_assert_all_match()` compares every output at every timestep across all backends — any mismatch is a test failure.
+### TestBench API
+
+```python
+self.clock(name, period=10)      # register a clock driver
+self.set(**kwargs)               # set input signal values
+self.out(name)                   # read output and record for comparison
+self.get(name)                   # read signal (works in peripheral callbacks too)
+self.module                      # direct access to the module under test
+self.run_sim()                   # run the simulation
+self.reset()                     # reset module and engine (fresh state)
+self.run_testbench(clock, period) # decorator: clock + initial + run_sim in one
+self.peripheral(fn)              # register a memory/bus callback (see below)
+self.fork(*fns)                  # parallel blocks, wait for all
+self.fork_any(*fns)              # parallel blocks, wait for first
+self.coverage_report()           # [(name, hit_count)] for cover points
+```
+
+### Peripheral Callbacks
+
+For modules with external memory or bus interfaces (e.g. a CPU pipeline), register
+a `peripheral` callback that fires every time unit during behavioral sim and after
+every `model.eval()` during RTL replay:
+
+```python
+class TestPipeline(TestBench):
+    def create_module(self): return Pipeline(reset_pc=0)
+
+    def test_addi(self):
+        imem = {0: encode_i(42, 0, 0, 1, OP_IMM)}
+
+        @self.peripheral
+        def memory():
+            addr = self.get('imem_addr') & ~3
+            self.set(imem_data=imem.get(addr, NOP))
+
+        @self.run_testbench(clock='clock', period=10)
+        def run():
+            yield 60
+            self.assertEqual(self.out('rd1'), 42)
+```
+
+The peripheral function uses `self.get()` to read signals and `self.set()` to write
+them. During RTL replay, these are automatically redirected to the compiled model.
+
+### Controlling Backends
+
+```python
+class TestMyModule(TestBench):
+    backend = 'check'      # behavioral + csim (default)
+    # backend = 'fast'     # csim only
+    # backend = 'thorough' # csim + iverilog
+    # backend = 'all'      # all backends
+    SKIP_CSIM = True       # skip csim for this class
+    USE_VERILATOR = True   # enable Verilator backend
+    vcd_on_fail = True     # dump VCD when any assertion fails
+```
+
+Environment variables:
+- `VERIPY_BACKENDS=csim,iverilog` — override backend selection globally
+- `VERIPY_SKIP_CSIM=1` — skip csim backends globally
+- `VERIPY_VERILATOR=1` — enable Verilator backend globally
+- `VERIPY_VCD_ON_FAIL=1` — dump VCD on failure globally
+
+Each `test_*` method runs against the configured backends and all outputs are
+compared cycle-by-cycle. Any mismatch is a test failure.
 
 ```
 $ veripy test tests/ -v
 ```
 
-### Controlling Backends
+---
+
+## BehavioralTestCase — Combinational / Intent Testing
+
+For combinational modules or pure behavioral models — no clock, no timing, just
+set inputs and check outputs:
 
 ```python
-class TestMyModule(VeripyTestCase):
-    SKIP_CSIM = True       # skip csim backends for this test class
-    USE_VERILATOR = True   # enable Verilator backend
+from veripy import BehavioralTestCase
+from src.alu import alu, ADD, SUB
 
-    def create_module(self):
-        return my_module()
+class TestAlu(BehavioralTestCase):
+    def create_module(self): return alu()
+
+    def test_add(self):
+        self.set(op=ADD, a=3, b=4)
+        self.assertEqual(self.out('result'), 7)
+
+    def test_sub(self):
+        self.set(op=SUB, a=10, b=3)
+        self.assertEqual(self.out('result'), 7)
 ```
 
-Environment variables:
-- `VERIPY_SKIP_CSIM=1` — skip csim backends globally
-- `VERIPY_VERILATOR=1` — enable Verilator backend globally
+`set()` evaluates comb and `@behavioral` blocks immediately. No `yield`, no
+`run_sim()`. Runs in pure Python — fast and simple.
+
+---
+
+## FirmwareTestCase — ELF / CPU Testing
+
+For CPU and SoC designs. Loads an ELF, runs until the firmware writes to `tohost`
+(standard riscv-tests halt protocol), and checks the result:
+
+```python
+from veripy import FirmwareTestCase
+from veripy.soc import SocConfig
+from src.pipeline import Pipeline
+
+class TestCompliance(FirmwareTestCase):
+    tohost_addr = 0x1000
+
+    def create_cpu(self): return Pipeline()
+    def create_soc(self): return SocConfig.minimal(ram_size=0x10000)
+
+    def _step(self):
+        """Advance CPU one cycle, servicing memory via self._soc."""
+        pc = self._soc.memory.read(self._cpu_pc_addr)
+        instr = self._soc.read(pc)
+        # ... drive CPU inputs, tick clock
+
+    def test_add(self):
+        self.load_elf('tests/rv32ui-p-add')
+        self.run_until_halt(timeout=20_000)
+        self.assertEqual(self.tohost(), 1)   # 1 = pass in riscv-tests
+
+    def test_rv32ui_suite(self):
+        self.run_arch_suite('tests/rv32ui-p-*.elf')
+```
+
+`run_arch_suite(pattern)` discovers all matching ELFs and runs each as a `subTest`,
+reporting individual pass/fail per ELF. This replaces custom compliance runner scripts.
+
+### FirmwareTestCase API
+
+```python
+self.load_elf(path)              # load ELF into SocSim memory
+self.run_until_halt(timeout)     # run until tohost write or timeout
+self.tohost()                    # return tohost value (1 = pass)
+self.run_arch_suite(glob)        # run all matching ELFs as subtests
+self._soc                        # SocSim instance (memory + peripherals)
+self._step()                     # override: advance CPU one cycle
+```
+
+---
+
+## Behavioral ↔ RTL Equivalence Checking
+
+For modules with both a `@behavioral` block and `@comb`/`@always` RTL, VeriPy can
+automatically fuzz-test them against each other using Hypothesis:
+
+```
+$ veripy check alu.py
+Checking alu (behavioral vs csim)...
+  alu: OK (200 examples)
+
+$ veripy check alu.py -n 1000
+```
+
+No test code required. VeriPy generates random inputs for all input signals,
+runs both paths, and reports the minimal failing case if they diverge.
+
+Requires `pip install hypothesis`.
+
+---
 
 ## SimEngine
 
@@ -83,7 +244,10 @@ def stimulus():
 sim.run()
 ```
 
-`@sim.initial` blocks run once. `@sim.always` blocks restart on completion. `yield N` advances N time units. `sim.clock(signal, period)` generates a free-running clock. Simulation ends when all initial blocks finish or `sim.finish()` is called.
+`@sim.initial` blocks run once. `@sim.always` blocks restart on completion.
+`yield N` advances N time units. `sim.clock(signal, period)` generates a
+free-running clock. Simulation ends when all initial blocks finish or
+`sim.finish()` is called.
 
 ## VCD Waveforms
 
@@ -93,6 +257,15 @@ Dump waveforms viewable in GTKWave:
 sim = SimEngine(c, vcd='counter.vcd')
 sim.run()
 ```
+
+From `TestBench`, enable on failure:
+
+```python
+class TestMyModule(TestBench):
+    vcd_on_fail = True   # writes <ClassName>_<test_name>.vcd on assertion failure
+```
+
+Or globally: `VERIPY_VCD_ON_FAIL=1`.
 
 ## Reactive Waits
 
@@ -114,7 +287,7 @@ Optional timeout raises `TimeoutError`:
 yield until(lambda: int(c.done), timeout=1000)
 ```
 
-Works in both `SimEngine` blocks and `VeripyTestCase` initial blocks.
+Works in both `SimEngine` blocks and `TestBench` initial blocks.
 
 ## Fork / Join
 
@@ -142,11 +315,12 @@ def send_data():
         yield until(lambda: int(c.tx_ready))
 ```
 
-In `VeripyTestCase`, use `self.fork()` and `self.fork_any()`.
+In `TestBench`, use `self.fork()` and `self.fork_any()`.
 
 ## Native C Simulation (csim)
 
-The csim backend compiles your design to native C for near-Verilator performance. It runs automatically in `VeripyTestCase` — no setup needed.
+The csim backend compiles your design to native C for near-Verilator performance.
+It runs automatically in `TestBench` — no setup needed.
 
 For standalone use:
 
@@ -171,7 +345,9 @@ with CSimModel(my_module, 'my_module', trace='out.vcd') as model:
 
 ## Protocol Drivers
 
-Subclass `Driver` to build reusable transaction-level helpers that drive and monitor bus protocols. Drivers use `yield` and `until()` internally — call them with `yield from` in testbench blocks:
+Subclass `Driver` to build reusable transaction-level helpers that drive and monitor
+bus protocols. Drivers use `yield` and `until()` internally — call them with
+`yield from` in testbench blocks:
 
 ```python
 from veripy.driver import Driver
@@ -206,7 +382,8 @@ def stim():
     val = yield from drv.recv()
 ```
 
-Override `send(txn)`, `recv()`, and optionally `reset()`. See [`examples/spi_driver.py`](../examples/spi_driver.py) for a complete example.
+Override `send(txn)`, `recv()`, and optionally `reset()`. See
+[`examples/spi_driver.py`](../examples/spi_driver.py) for a complete example.
 
 ## Constrained Random
 
@@ -247,4 +424,4 @@ for name, count in m.coverage_report().items():
     print(f'{name}: hit {count} times')
 ```
 
-In `VeripyTestCase`, use `self.coverage_report()`.
+In `TestBench`, use `self.coverage_report()`.
