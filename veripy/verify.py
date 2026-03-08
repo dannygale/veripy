@@ -631,7 +631,7 @@ class BehavioralTestCase(unittest.TestCase):
         for name, val in kwargs.items():
             getattr(self._mod, name)._val = val
         self._mod._settle_comb()
-        if self._mod._behavioral is not None:
+        if getattr(self._mod, '_behavioral', None) is not None:
             self._mod._behavioral()
 
     def out(self, name):
