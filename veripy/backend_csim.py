@@ -2363,19 +2363,17 @@ def compile_module(module, module_name=None, force_hier=False, coverage=False):
 
     Uses hierarchical per-module compilation when the design has
     sub-module instances (or force_hier=True), flat compilation otherwise.
+    Both paths use SHA256-cached .so reuse.
     """
-    from .lower import lower_module
-
     if module_name is None:
         module_name = type(module).__name__.lower()
 
-    registry, patch_fn = _collect_submodule_registry(module)
-    top_ir = lower_module(module, module_name)
-    patch_fn(top_ir)
+    if force_hier:
+        lib_path, top_ir = compile_model_hier(module, module_name)
+        return CSimModel(top_ir, lib_path=lib_path)
 
-    if top_ir.instances or force_hier:
-        return CSimModel(top_ir, registry=registry)
-    return CSimModel(top_ir, coverage=coverage)
+    lib_path, flat_ir, _, _ = compile_model(module, module_name, coverage=coverage)
+    return CSimModel(flat_ir, lib_path=lib_path, coverage=coverage)
 
 
 class CSimModel:
@@ -2384,59 +2382,63 @@ class CSimModel:
     Same API as VerilatorModel: set/get/eval/step/close.
     """
 
-    def __init__(self, ir: IRModule, build_dir=None, registry=None, trace=None, coverage=False):
+    def __init__(self, ir: IRModule, build_dir=None, registry=None, trace=None, coverage=False, lib_path=None):
         self._ptr = None
         self._tmpdir = None
         self._lib = None
         self._coverage = coverage
 
-        if registry is not None:
-            # Hierarchical path — per-module compilation
-            c_src = emit_c_hier(ir, registry)
-        else:
-            # Flat path — legacy single-module compilation
-            from .flatten import topo_sort_comb
-            if ir.instances:
-                raise ValueError('IR must be flattened before CSimModel '
-                                 '(call flatten_ir first)')
-            ir = topo_sort_comb(ir)
-            ir = _inline_cont_assigns(ir)
-            c_src = emit_c(ir, coverage=coverage)
+        if lib_path is None:
+            if registry is not None:
+                # Hierarchical path — per-module compilation
+                c_src = emit_c_hier(ir, registry)
+            else:
+                # Flat path — legacy single-module compilation
+                from .flatten import topo_sort_comb
+                if ir.instances:
+                    raise ValueError('IR must be flattened before CSimModel '
+                                     '(call flatten_ir first)')
+                ir = topo_sort_comb(ir)
+                ir = _inline_cont_assigns(ir)
+                c_src = emit_c(ir, coverage=coverage)
 
-        from .dce import optimize
-        ir = optimize(ir)
+            from .dce import optimize
+            ir = optimize(ir)
+
+            own_tmpdir = build_dir is None
+            if own_tmpdir:
+                build_dir = tempfile.mkdtemp(prefix='veripy_csim_')
+            self._tmpdir = build_dir if own_tmpdir else None
+
+            c_path = os.path.join(build_dir, f'{ir.name}.c')
+            with open(c_path, 'w') as f:
+                f.write(c_src)
+
+            ext = '.dylib' if os.uname().sysname == 'Darwin' else '.so'
+            lib_path = os.path.join(build_dir, f'lib{ir.name}{ext}')
+
+            cc = os.environ.get('CC', 'cc')
+            flag = '-dynamiclib' if ext == '.dylib' else '-shared'
+            fstapi_dir, fstapi_srcs = _find_fstapi()
+            extra_flags = []
+            extra_srcs = []
+            if fstapi_dir:
+                extra_flags = [f'-I{fstapi_dir}', '-DVERIPY_FST', '-lz']
+                extra_srcs = fstapi_srcs
+            r = subprocess.run(
+                [cc, '-O3', '-march=native', '-flto', '-fPIC', flag, '-o', lib_path,
+                 c_path] + extra_srcs + extra_flags,
+                capture_output=True, text=True)
+            if r.returncode != 0:
+                raise RuntimeError(f'C compilation failed:\n{r.stderr}')
+        else:
+            from .dce import optimize
+            ir = optimize(ir)
 
         self._signals = {}
         for p in ir.ports:
             w = _resolve_width(p.width, ir.params)
             self._signals[p.name] = (p.direction, w)
-
-        own_tmpdir = build_dir is None
-        if own_tmpdir:
-            build_dir = tempfile.mkdtemp(prefix='veripy_csim_')
-        self._tmpdir = build_dir if own_tmpdir else None
-
-        c_path = os.path.join(build_dir, f'{ir.name}.c')
-        with open(c_path, 'w') as f:
-            f.write(c_src)
-
-        ext = '.dylib' if os.uname().sysname == 'Darwin' else '.so'
-        lib_path = os.path.join(build_dir, f'lib{ir.name}{ext}')
-
-        cc = os.environ.get('CC', 'cc')
-        flag = '-dynamiclib' if ext == '.dylib' else '-shared'
-        fstapi_dir, fstapi_srcs = _find_fstapi()
-        extra_flags = []
-        extra_srcs = []
-        if fstapi_dir:
-            extra_flags = [f'-I{fstapi_dir}', '-DVERIPY_FST', '-lz']
-            extra_srcs = fstapi_srcs
-        r = subprocess.run(
-            [cc, '-O3', '-march=native', '-flto', '-fPIC', flag, '-o', lib_path,
-             c_path] + extra_srcs + extra_flags,
-            capture_output=True, text=True)
-        if r.returncode != 0:
-            raise RuntimeError(f'C compilation failed:\n{r.stderr}')
 
         self._lib = ctypes.CDLL(lib_path)
         self._lib.veripy_create.restype = ctypes.c_void_p
@@ -2861,12 +2863,17 @@ def emit_c_header(ir: IRModule, model_c_src: str) -> str:
 
 def _default_model_cache_dir() -> str:
     base = os.environ.get('VERIPY_CSIM_CACHE',
-                          os.path.join(os.path.expanduser('~'), '.cache', 'veripy', 'csim'))
+                          os.path.join(os.getcwd(), 'build', 'csim'))
     os.makedirs(base, exist_ok=True)
     return base
 
 
-def compile_model(module, module_name=None, cache_dir=None):
+# In-process cache: avoids re-lowering/emitting when the same module class
+# is compiled multiple times (e.g. across test methods in VeripyTestCase).
+_compile_cache = {}  # (module_class, module_name, kind) → result tuple
+
+
+def compile_model(module, module_name=None, cache_dir=None, coverage=False):
     """Compile a VeriPy Module to a cached model .so.
 
     The model is compiled once and cached by content hash.  Subsequent calls
@@ -2887,6 +2894,10 @@ def compile_model(module, module_name=None, cache_dir=None):
     if module_name is None:
         module_name = type(module).__name__.lower()
 
+    cache_key = (type(module), module_name, 'flat', coverage, cache_dir)
+    if cache_key in _compile_cache:
+        return _compile_cache[cache_key]
+
     if cache_dir is None:
         cache_dir = _default_model_cache_dir()
 
@@ -2898,7 +2909,7 @@ def compile_model(module, module_name=None, cache_dir=None):
     flat_ir = _inline_cont_assigns(flat_ir)
     flat_ir = optimize(flat_ir)
 
-    model_c_src = emit_c(flat_ir)
+    model_c_src = emit_c(flat_ir, coverage=coverage)
     content_hash = hashlib.sha256(model_c_src.encode()).hexdigest()[:16]
 
     ext = '.dylib' if os.uname().sysname == 'Darwin' else '.so'
@@ -2924,7 +2935,69 @@ def compile_model(module, module_name=None, cache_dir=None):
             raise RuntimeError(f'Model compilation failed:\n{r.stderr}')
 
     header_src = emit_c_header(flat_ir, model_c_src)
-    return lib_path, flat_ir, model_c_src, header_src
+    result = lib_path, flat_ir, model_c_src, header_src
+    _compile_cache[cache_key] = result
+    return result
+
+
+def compile_model_hier(module, module_name=None, cache_dir=None):
+    """Compile a VeriPy Module to a cached hierarchical model .so.
+
+    Same SHA256 content-hash caching as compile_model(), but uses
+    emit_c_hier() for the hierarchical compilation path.
+
+    Returns:
+        (lib_path, top_ir)
+        lib_path — absolute path to the compiled .so/.dylib
+        top_ir   — optimized top-level IRModule (for ctypes binding)
+    """
+    import hashlib
+    from .lower import lower_module
+    from .dce import optimize
+
+    if module_name is None:
+        module_name = type(module).__name__.lower()
+
+    cache_key = (type(module), module_name, 'hier')
+    if cache_key in _compile_cache:
+        return _compile_cache[cache_key]
+
+    if cache_dir is None:
+        cache_dir = _default_model_cache_dir()
+
+    registry, patch_fn = _collect_submodule_registry(module)
+    top_ir = lower_module(module, module_name)
+    patch_fn(top_ir)
+
+    c_src = emit_c_hier(top_ir, registry)
+    top_ir = optimize(top_ir)
+    content_hash = hashlib.sha256(c_src.encode()).hexdigest()[:16]
+
+    ext = '.dylib' if os.uname().sysname == 'Darwin' else '.so'
+    lib_name = f'lib{module_name}_hier_{content_hash}{ext}'
+    lib_path = os.path.join(cache_dir, lib_name)
+
+    if not os.path.exists(lib_path):
+        c_path = os.path.join(cache_dir, f'{module_name}_hier_{content_hash}.c')
+        with open(c_path, 'w') as f:
+            f.write(c_src)
+
+        cc = os.environ.get('CC', 'cc')
+        flag = '-dynamiclib' if ext == '.dylib' else '-shared'
+        fstapi_dir, fstapi_srcs = _find_fstapi()
+        extra_flags = [f'-I{fstapi_dir}', '-DVERIPY_FST', '-lz'] if fstapi_dir else []
+        extra_srcs = fstapi_srcs if fstapi_dir else []
+
+        r = subprocess.run(
+            [cc, '-O3', '-march=native', '-flto', '-fPIC', flag,
+             '-o', lib_path, c_path] + extra_srcs + extra_flags,
+            capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f'Hier model compilation failed:\n{r.stderr}')
+
+    result = lib_path, top_ir
+    _compile_cache[cache_key] = result
+    return result
 
 
 def compile_tb(tb_ir, model_lib_path, model_c_src, flat_ir, half_period=10):
