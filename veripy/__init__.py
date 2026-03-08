@@ -15,6 +15,7 @@ from .cdc import Synchronizer, AsyncFIFO
 from .ip import (SyncFifo, EdgeDetector, Debouncer, RoundRobinArbiter,
                  PriorityArbiter, ClockDivider, CreditFlowControl)
 from .axi4lite import Axi4LiteBus, Axi4LiteSub
+from .axi4 import Axi4Bus, Axi4Sub
 from .csr import Field, Reg, RegisterMap
 from .project import Project
 from .verify import VeripyTestCase
