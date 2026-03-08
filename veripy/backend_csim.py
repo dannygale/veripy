@@ -2004,6 +2004,9 @@ class CSimModel:
             ir = _inline_cont_assigns(ir)
             c_src = emit_c(ir)
 
+        from .dce import optimize
+        ir = optimize(ir)
+
         self._signals = {}
         for p in ir.ports:
             w = _resolve_width(p.width, ir.params)
@@ -2374,6 +2377,9 @@ def compile_bench(module, tb_ir, module_name=None):
     flat_ir = flatten_ir(top_ir, registry) if top_ir.instances else top_ir
     flat_ir = topo_sort_comb(flat_ir)
     flat_ir = _inline_cont_assigns(flat_ir)
+
+    from .dce import optimize
+    flat_ir = optimize(flat_ir)
 
     model_c = emit_c(flat_ir)
 
