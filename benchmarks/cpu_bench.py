@@ -60,7 +60,9 @@ uint64_t run_bench(void) {{
     veripy_set_clock(p, 1); veripy_eval(p);
     veripy_set_reset(p, 0);
 
-    /* Run until halted */
+    /* Run until halted.
+       cycles is 0-indexed (breaks before increment), so add 1 to get
+       the 1-indexed cycle count matching vvp's post-NBA-commit check. */
     uint64_t cycles = 0;
     for (cycles = 0; cycles < {max_cycles}ULL; cycles++) {{
         veripy_set_clock(p, 0); veripy_eval(p);
@@ -69,7 +71,7 @@ uint64_t run_bench(void) {{
     }}
 
     veripy_destroy(p);
-    return cycles;
+    return cycles + 1;
 }}
 """
     return model_c + bench
@@ -136,6 +138,7 @@ module tb;
         begin : run_block
             repeat ({max_cycles}) begin
                 @(posedge clock);
+                #1;
                 cycles = cycles + 1;
                 if (halted) disable run_block;
             end
