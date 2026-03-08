@@ -9,8 +9,10 @@ def emit_sby(ir: IRModule, *, depth: int = 20, engine: str = 'smtbmc') -> str:
 
     Returns the .sby file content as a string.
     """
-    has_assert = any(p.kind == 'assert' for p in ir.formal_props)
-    has_cover = any(p.kind == 'cover' for p in ir.formal_props)
+    has_assert = (any(p.kind == 'assert' for p in ir.formal_props) or
+                  any(p.kind == 'assert' for p in ir.temporal_props))
+    has_cover  = (any(p.kind == 'cover'  for p in ir.formal_props) or
+                  any(p.kind == 'cover'  for p in ir.temporal_props))
 
     tasks = []
     if has_assert:

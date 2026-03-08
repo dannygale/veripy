@@ -173,6 +173,77 @@ class FormalProperty:
     name: str        # property name (from function name)
 
 
+# ── SVA temporal sequence IR nodes ───────────────────────────────────
+
+class SeqExpr:
+    """Base class for SVA sequence expressions."""
+
+@dataclass
+class SeqBool(SeqExpr):
+    """A boolean expression as a one-cycle sequence."""
+    expr: Expr
+
+@dataclass
+class SeqConcat(SeqExpr):
+    """Sequence concatenation with delay: left ##[lo:hi] right."""
+    left: SeqExpr
+    right: SeqExpr
+    lo: int = 1
+    hi: int = 1      # -1 means $ (unbounded)
+
+@dataclass
+class SeqRepeat(SeqExpr):
+    """Consecutive repetition: seq[*lo:hi]."""
+    seq: SeqExpr
+    lo: int = 1
+    hi: int = 1      # -1 means $ (unbounded)
+
+@dataclass
+class SeqAnd(SeqExpr):
+    """Sequence and: both must complete."""
+    left: SeqExpr
+    right: SeqExpr
+
+@dataclass
+class SeqOr(SeqExpr):
+    """Sequence or: either must complete."""
+    left: SeqExpr
+    right: SeqExpr
+
+@dataclass
+class SeqNot(SeqExpr):
+    """Sequence negation."""
+    seq: SeqExpr
+
+@dataclass
+class SeqImplication(SeqExpr):
+    """Implication: antecedent |-> consequent (overlapping) or |=> (non-overlapping)."""
+    antecedent: SeqExpr
+    consequent: SeqExpr
+    overlapping: bool = True  # True = |->, False = |=>
+
+@dataclass
+class SeqWithin(SeqExpr):
+    """Within: inner within outer."""
+    inner: SeqExpr
+    outer: SeqExpr
+
+@dataclass
+class SeqEventually(SeqExpr):
+    """s_eventually: eventually the sequence holds."""
+    seq: SeqExpr
+
+
+@dataclass
+class TemporalProperty:
+    """SVA temporal property (sequence-based assertion)."""
+    kind: str        # 'assert' | 'cover' | 'assume'
+    clock: str       # clock signal name
+    edge: str        # 'posedge' | 'negedge'
+    seq: SeqExpr     # temporal sequence
+    name: str        # property name
+
+
 # ── Declarations ─────────────────────────────────────────────────────
 
 @dataclass
@@ -253,4 +324,5 @@ class IRModule:
     seq_blocks: list = field(default_factory=list)    # list[SeqBlock]
     initial_blocks: list = field(default_factory=list) # list[InitialBlock]
     always_blocks: list = field(default_factory=list)  # list[AlwaysBlock]
-    formal_props: list = field(default_factory=list)   # list[FormalProperty]
+    formal_props: list = field(default_factory=list)    # list[FormalProperty]
+    temporal_props: list = field(default_factory=list)  # list[TemporalProperty]

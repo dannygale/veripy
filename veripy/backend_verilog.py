@@ -10,6 +10,8 @@ from .ir import (
     Repeat, ForLoop, Disable,
     ContAssign, CombBlock, SeqBlock, InitialBlock, AlwaysBlock,
     DualPortMemDecl, TrueDualPortMemDecl, FormalProperty,
+    SeqBool, SeqConcat, SeqRepeat, SeqAnd, SeqOr, SeqNot,
+    SeqImplication, SeqWithin, SeqEventually, TemporalProperty,
     IRModule,
 )
 
@@ -26,6 +28,7 @@ def emit_verilog(ir: IRModule) -> str:
     _emit_initial_blocks(ir, lines)
     _emit_always_blocks(ir, lines)
     _emit_formal_props(ir, lines)
+    _emit_temporal_props(ir, lines)
     lines.append('')
     lines.append('endmodule')
     return '\n'.join(lines)
@@ -293,6 +296,64 @@ def _emit_formal_props(ir, lines):
         lines.append(f'    always @({prop.edge} {prop.clock}) begin')
         lines.append(f'        {kw}({_expr(prop.expr)});  // {prop.name}')
         lines.append(f'    end')
+    lines.append('`endif')
+
+
+def _seq_expr(node) -> str:
+    """Emit an SVA sequence expression as a Verilog string."""
+    if isinstance(node, SeqBool):
+        return _expr(node.expr)
+    if isinstance(node, SeqConcat):
+        lo, hi = node.lo, node.hi
+        if lo == hi:
+            delay = f'##{lo}'
+        elif hi == -1:
+            delay = f'##[{lo}:$]'
+        else:
+            delay = f'##[{lo}:{hi}]'
+        return f'({_seq_expr(node.left)} {delay} {_seq_expr(node.right)})'
+    if isinstance(node, SeqRepeat):
+        lo, hi = node.lo, node.hi
+        if lo == 0 and hi == -1:
+            rep = '[*]'
+        elif lo == 1 and hi == -1:
+            rep = '[+]'
+        elif lo == hi:
+            rep = f'[*{lo}]'
+        elif hi == -1:
+            rep = f'[*{lo}:$]'
+        else:
+            rep = f'[*{lo}:{hi}]'
+        return f'({_seq_expr(node.seq)}{rep})'
+    if isinstance(node, SeqAnd):
+        return f'({_seq_expr(node.left)} and {_seq_expr(node.right)})'
+    if isinstance(node, SeqOr):
+        return f'({_seq_expr(node.left)} or {_seq_expr(node.right)})'
+    if isinstance(node, SeqNot):
+        return f'(not {_seq_expr(node.seq)})'
+    if isinstance(node, SeqImplication):
+        op = '|->' if node.overlapping else '|=>'
+        return f'({_seq_expr(node.antecedent)} {op} {_seq_expr(node.consequent)})'
+    if isinstance(node, SeqWithin):
+        return f'({_seq_expr(node.inner)} within {_seq_expr(node.outer)})'
+    if isinstance(node, SeqEventually):
+        return f'(s_eventually {_seq_expr(node.seq)})'
+    raise TypeError(f"Unknown SeqExpr node: {type(node).__name__}")
+
+
+def _emit_temporal_props(ir, lines):
+    if not ir.temporal_props:
+        return
+    lines.append('')
+    lines.append('`ifdef FORMAL')
+    for prop in ir.temporal_props:
+        kw = {'assert': 'assert property', 'cover': 'cover property',
+              'assume': 'assume property'}[prop.kind]
+        seq_str = _seq_expr(prop.seq)
+        lines.append(f'    property {prop.name}_prop;')
+        lines.append(f'        @({prop.edge} {prop.clock}) {seq_str};')
+        lines.append(f'    endproperty')
+        lines.append(f'    {kw} ({prop.name}_prop);  // {prop.name}')
     lines.append('`endif')
 
 
