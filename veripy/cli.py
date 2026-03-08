@@ -143,11 +143,13 @@ def cmd_init(args):
 def cmd_build(args):
     # If no file given, try loading from veripy.toml
     if not args.file:
-        from .config import load_config
+        from .config import load_config, get_target
         cfg = load_config()
         if cfg is None:
             sys.exit("error: no file given and no veripy.toml found")
         build = cfg["build"]
+        if getattr(args, 'target', None):
+            build = get_target(cfg, args.target)
         if not build["top"]:
             sys.exit("error: [build] top is not set in veripy.toml")
         # Resolve relative to config dir
@@ -158,6 +160,9 @@ def cmd_build(args):
             args.module = build["module"]
         if not args.param and build["params"]:
             args.param = [f"{k}={v}" for k, v in build["params"].items()]
+        args._synth = build.get("synth", False)
+    else:
+        args._synth = False
 
     params = _parse_params(args.param)
     modules = _load_modules(args.file, module_name=args.module, params=params)
@@ -180,7 +185,10 @@ def cmd_build(args):
             _collect(fresh, sub_snake)
         from .lower import lower_module
         from .backend_verilog import emit_verilog as _emit_v
-        all_modules.append((mod_name, _emit_v(lower_module(mod, mod_name))))
+        ir = lower_module(mod, mod_name)
+        if args._synth:
+            ir.formal_props.clear()
+        all_modules.append((mod_name, _emit_v(ir)))
 
     for name, instance in modules:
         _collect(instance, _to_snake(name))
@@ -501,6 +509,7 @@ def main():
     p_build.add_argument("-o", "--output", help="Output directory for .v files (default: stdout)")
     p_build.add_argument("-m", "--module", help="Target a specific Module subclass by name")
     p_build.add_argument("-p", "--param", action="append", help="Module parameter (e.g. -p n=4)")
+    p_build.add_argument("--target", help="Build target name from [build.targets.*] in veripy.toml")
 
     # test
     p_test = sub.add_parser("test", help="Run dual-path VeripyTestCase suite")

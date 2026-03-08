@@ -94,3 +94,24 @@ def _find_config() -> str | None:
 def find_config() -> str | None:
     """Return path to nearest veripy.toml, or None."""
     return _find_config()
+
+
+def get_target(cfg: dict, name: str) -> dict:
+    """Return merged [build] config for the named target.
+
+    The target's keys override the base [build] section; params are merged
+    (target params take precedence over base params).  Exits if the target
+    is not defined.
+    """
+    targets = cfg.get("build", {}).get("targets", {})
+    if name not in targets:
+        available = list(targets.keys())
+        sys.exit(
+            f"error: target '{name}' not found. "
+            f"Available: {available if available else ['(none)']}"
+        )
+    base = {k: v for k, v in cfg["build"].items() if k != "targets"}
+    override = targets[name]
+    merged = {**base, **override}
+    merged["params"] = {**base.get("params", {}), **override.get("params", {})}
+    return merged

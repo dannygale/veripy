@@ -162,5 +162,175 @@ class TestCmdInit(unittest.TestCase):
             self.assertEqual(cfg["build"]["top"], "src/top.py")
 
 
+class TestGetTarget(unittest.TestCase):
+    def _write_toml(self, d, content):
+        path = os.path.join(d, "veripy.toml")
+        with open(path, "w") as f:
+            f.write(textwrap.dedent(content))
+        return path
+
+    def _load(self, content):
+        from veripy.config import load_config
+        with tempfile.TemporaryDirectory() as d:
+            p = self._write_toml(d, content)
+            return load_config(p)
+
+    def test_get_target_merges_base(self):
+        from veripy.config import get_target
+        cfg = self._load("""\
+            [build]
+            top = "src/top.py"
+            output = "rtl/"
+
+            [build.targets.synth]
+            output = "synth/"
+            synth = true
+        """)
+        t = get_target(cfg, "synth")
+        self.assertEqual(t["top"], "src/top.py")
+        self.assertEqual(t["output"], "synth/")
+        self.assertTrue(t["synth"])
+
+    def test_get_target_merges_params(self):
+        from veripy.config import get_target
+        cfg = self._load("""\
+            [build]
+            top = "src/top.py"
+            params = { width = 8, depth = 4 }
+
+            [build.targets.wide]
+            params = { width = 16 }
+        """)
+        t = get_target(cfg, "wide")
+        self.assertEqual(t["params"], {"width": 16, "depth": 4})
+
+    def test_get_target_unknown_exits(self):
+        from veripy.config import get_target
+        cfg = self._load("""\
+            [build]
+            top = "src/top.py"
+
+            [build.targets.sim]
+            output = "sim/"
+        """)
+        with self.assertRaises(SystemExit):
+            get_target(cfg, "missing")
+
+    def test_get_target_no_targets_exits(self):
+        from veripy.config import get_target
+        cfg = self._load("[build]\ntop = \"src/top.py\"\n")
+        with self.assertRaises(SystemExit):
+            get_target(cfg, "anything")
+
+    def test_get_target_does_not_include_targets_key(self):
+        from veripy.config import get_target
+        cfg = self._load("""\
+            [build]
+            top = "src/top.py"
+
+            [build.targets.sim]
+            output = "sim/"
+        """)
+        t = get_target(cfg, "sim")
+        self.assertNotIn("targets", t)
+
+
+class TestCmdBuildSynthStripping(unittest.TestCase):
+    """Test that synth=true targets strip formal properties from emitted Verilog."""
+
+    def _make_module_file(self, d):
+        src = textwrap.dedent("""\
+            from veripy import module, Input, Output, Register, posedge
+            from veripy.context import comb, always, assert_always
+
+            @module
+            def top():
+                clock = Input()
+                reset = Input()
+                x     = Output(8)
+                r     = Register(8)
+
+                @comb
+                def drive():
+                    x = r
+
+                @always(posedge(clock))
+                def seq():
+                    if reset:
+                        r = 0
+                    else:
+                        r = r + 1
+
+                @assert_always(clock)
+                def r_lt_200():
+                    return r < 200
+        """)
+        path = os.path.join(d, "top.py")
+        with open(path, "w") as f:
+            f.write(src)
+        return path
+
+    def test_synth_strips_formal_props(self):
+        import argparse
+        from veripy.cli import cmd_build
+        with tempfile.TemporaryDirectory() as d:
+            mod_path = self._make_module_file(d)
+            toml_path = os.path.join(d, "veripy.toml")
+            with open(toml_path, "w") as f:
+                f.write(textwrap.dedent(f"""\
+                    [build]
+                    top = "top.py"
+                    output = "rtl/"
+
+                    [build.targets.synth]
+                    synth = true
+                    output = "synth/"
+                """))
+            out_dir = os.path.join(d, "synth")
+            args = argparse.Namespace(
+                file=None, output=out_dir, module=None, param=None, target="synth"
+            )
+            old = os.getcwd()
+            os.chdir(d)
+            try:
+                cmd_build(args)
+            finally:
+                os.chdir(old)
+            v_path = os.path.join(out_dir, "top.v")
+            with open(v_path) as f:
+                verilog = f.read()
+            self.assertNotIn("assert", verilog)
+
+    def test_no_synth_keeps_formal_props(self):
+        import argparse
+        from veripy.cli import cmd_build
+        with tempfile.TemporaryDirectory() as d:
+            mod_path = self._make_module_file(d)
+            toml_path = os.path.join(d, "veripy.toml")
+            with open(toml_path, "w") as f:
+                f.write(textwrap.dedent(f"""\
+                    [build]
+                    top = "top.py"
+                    output = "rtl/"
+
+                    [build.targets.sim]
+                    output = "sim/"
+                """))
+            out_dir = os.path.join(d, "sim")
+            args = argparse.Namespace(
+                file=None, output=out_dir, module=None, param=None, target="sim"
+            )
+            old = os.getcwd()
+            os.chdir(d)
+            try:
+                cmd_build(args)
+            finally:
+                os.chdir(old)
+            v_path = os.path.join(out_dir, "top.v")
+            with open(v_path) as f:
+                verilog = f.read()
+            self.assertIn("assert", verilog)
+
+
 if __name__ == "__main__":
     unittest.main()
