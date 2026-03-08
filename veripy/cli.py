@@ -222,6 +222,11 @@ def cmd_test(args):
         if cfg is not None:
             test_path = os.path.join(cfg["_dir"], cfg["test"]["path"])
 
+    jobs = getattr(args, "jobs", None)
+    if jobs is not None:
+        from .parallel_runner import run_parallel
+        sys.exit(run_parallel(test_path or "tests", jobs=jobs or None, verbose=args.verbose))
+
     argv = ["python", "-m", "unittest"]
     if test_path:
         argv += ["discover", "-s", test_path, "-p", "test_*.py"]
@@ -642,6 +647,8 @@ def main():
     p_test = sub.add_parser("test", help="Run dual-path VeripyTestCase suite")
     p_test.add_argument("path", nargs="?", help="Test file or directory (default: discover)")
     p_test.add_argument("-v", "--verbose", action="store_true")
+    p_test.add_argument("-j", "--jobs", nargs="?", const=0, type=int, metavar="N",
+                        help="Run test files in parallel (N workers; default: cpu_count)")
 
     # import
     p_import = sub.add_parser("import", help="Convert Verilog to VeriPy Python")
