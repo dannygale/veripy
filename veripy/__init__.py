@@ -12,6 +12,7 @@ from .context import (comb, always, fsm, assert_always, cover, assume, pipeline,
 
 from .sim import until
 from .driver import Driver
+from .rv import QuickRunMixin
 from .cdc import Synchronizer, AsyncFIFO
 from .ip import (SyncFifo, EdgeDetector, Debouncer, RoundRobinArbiter,
                  PriorityArbiter, ClockDivider, CreditFlowControl,
@@ -21,7 +22,8 @@ from .axi4lite import Axi4LiteBus, Axi4LiteSub
 from .axi4 import Axi4Bus, Axi4Sub, Axi4Crossbar
 from .csr import Field, Reg, RegisterMap
 from .project import Project
-from .verify import TestBench, VeripyTestCase
+from .verify import TestBench, VeripyTestCase, BehavioralTestCase
+from .firmware_test import FirmwareTestCase
 from .firmware import ElfSegment, ElfImage, load_elf
 from .soc_sim import FlatMemory, UartPeripheral, SocSim
 from .gdb_stub import GdbStub

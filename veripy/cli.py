@@ -214,7 +214,87 @@ def cmd_build(args):
         print(header + combined)
 
 
-def cmd_test(args):
+def cmd_check(args):
+    """Run Hypothesis-based behavioral vs RTL equivalence checking."""
+    try:
+        from hypothesis import given, settings, HealthCheck
+        import hypothesis.strategies as st
+    except ImportError:
+        print('error: hypothesis is required: pip install hypothesis')
+        sys.exit(1)
+
+    from .backend_csim import compile_module as csim_compile
+
+    modules = _load_modules(args.file, args.module, args.param)
+    if not modules:
+        print('error: no modules found')
+        sys.exit(1)
+
+    failures = 0
+    for mod_name, mod in modules:
+        # Collect input signals
+        from .signal import Signal
+        inputs = {k: v for k, v in vars(mod).items()
+                  if isinstance(v, Signal) and v._kind == 'input'}
+        outputs = {k: v for k, v in vars(mod).items()
+                   if isinstance(v, Signal) and v._kind == 'output'}
+
+        if not hasattr(mod, '_behavioral') or mod._behavioral is None:
+            if args.verbose:
+                print(f'  {mod_name}: no @behavioral block, skipping')
+            continue
+
+        print(f'Checking {mod_name} (behavioral vs csim)...')
+
+        # Build Hypothesis strategy for each input
+        input_strategies = {
+            name: st.integers(min_value=0, max_value=(1 << sig.width) - 1)
+            for name, sig in inputs.items()
+        }
+
+        try:
+            with csim_compile(mod, mod_name) as cm:
+                @given(**input_strategies)
+                @settings(max_examples=args.examples,
+                          suppress_health_check=[HealthCheck.too_slow])
+                def prop(**kwargs):
+                    # Behavioral path
+                    fresh = type(mod)() if not hasattr(type(mod), '_veripy_factory') \
+                        else type(mod)._veripy_factory()
+                    for name, val in kwargs.items():
+                        getattr(fresh, name)._val = val
+                    fresh._settle_comb()
+                    if fresh._behavioral is not None:
+                        fresh._behavioral()
+                    behavioral_out = {k: int(getattr(fresh, k)) for k in outputs}
+
+                    # RTL path
+                    for name, val in kwargs.items():
+                        cm.set(name, val)
+                    cm.eval()
+                    rtl_out = {k: cm.get(k) for k in outputs}
+
+                    for sig_name in outputs:
+                        b_val = behavioral_out[sig_name]
+                        r_val = rtl_out[sig_name]
+                        if b_val != r_val:
+                            inputs_str = ', '.join(f'{k}={v}' for k, v in kwargs.items())
+                            raise AssertionError(
+                                f'{mod_name}.{sig_name}: behavioral={b_val} rtl={r_val} '
+                                f'with inputs {inputs_str}')
+
+                prop()
+                print(f'  {mod_name}: OK ({args.examples} examples)')
+        except AssertionError as e:
+            print(f'  {mod_name}: FAIL — {e}')
+            failures += 1
+        except Exception as e:
+            print(f'  {mod_name}: ERROR — {e}')
+            failures += 1
+
+    sys.exit(1 if failures else 0)
+
+
     test_path = args.path
     if not test_path:
         from .config import load_config
@@ -702,6 +782,21 @@ def cmd_ip(args):
         print(f"\nTo install for development: pip install -e {path}")
 
 
+def cmd_run(args):
+    """Execute a Python script with the project directory on sys.path."""
+    script = args.file
+    project_dir = os.path.dirname(os.path.abspath(script)) if not args.project else os.path.abspath(args.project)
+    if project_dir not in sys.path:
+        sys.path.insert(0, project_dir)
+    # Also add cwd if different
+    cwd = os.getcwd()
+    if cwd not in sys.path:
+        sys.path.insert(0, cwd)
+    with open(script) as f:
+        code = f.read()
+    exec(compile(code, script, 'exec'), {'__name__': '__main__', '__file__': script})
+
+
 def main():
     parser = argparse.ArgumentParser(prog="veripy", description="VeriPy HDL toolchain")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -823,10 +918,24 @@ def main():
     p_ip_init.add_argument("name", help="IP package name (e.g. 'axi' creates veripy-axi)")
     p_ip_init.add_argument("-o", "--output", help="Output directory (default: current dir)")
 
+    # check
+    p_check = sub.add_parser("check", help="Hypothesis-based behavioral vs RTL equivalence checking")
+    p_check.add_argument("file", nargs="?", help="Python file containing Module subclass(es) (default: from veripy.toml)")
+    p_check.add_argument("-m", "--module", help="Target a specific Module subclass by name")
+    p_check.add_argument("-p", "--param", action="append", help="Module parameter (e.g. -p n=4)")
+    p_check.add_argument("-n", "--examples", type=int, default=200, metavar="N",
+                         help="Number of Hypothesis examples per module (default: 200)")
+    p_check.add_argument("-v", "--verbose", action="store_true")
+
     # init
     p_init = sub.add_parser("init", help="Scaffold a new VeriPy project with veripy.toml")
     p_init.add_argument("name", help="Project name")
     p_init.add_argument("-o", "--output", help="Output directory (default: ./<name>)")
+
+    # run
+    p_run = sub.add_parser("run", help="Run a Python script with project on sys.path")
+    p_run.add_argument("file", help="Python script to execute")
+    p_run.add_argument("--project", help="Project root to add to sys.path (default: script's directory)")
 
     args = parser.parse_args()
     {
@@ -834,7 +943,8 @@ def main():
         "lint": cmd_lint, "formal": cmd_formal, "profile": cmd_profile,
         "equiv": cmd_equiv, "doc": cmd_doc, "ip": cmd_ip,
         "init": cmd_init, "soc": cmd_soc, "fpga": cmd_fpga,
-        "graph": cmd_graph, "stats": cmd_stats,
+        "graph": cmd_graph, "stats": cmd_stats, "check": cmd_check,
+        "run": cmd_run,
     }[args.command](args)
 
 

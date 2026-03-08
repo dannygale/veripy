@@ -163,6 +163,77 @@ class SimEngine:
         """Stop the simulation (like $finish)."""
         self._finished = True
 
+    def trace(self, *names, period=None, fmt='hex', when=None, stop=None):
+        """Declarative signal watch — prints a formatted table each cycle.
+
+        Args:
+            *names: signal names to watch (strings). Dot notation for sub-module
+                    signals (e.g. 'core.pc'). '_cycle' is a virtual column.
+            period: clock period for stepping (default: 10). Trace samples once
+                    per period.
+            fmt: 'hex', 'dec', or 'bin' (default: 'hex')
+            when: optional predicate ``fn(sigs_dict) -> bool``. Only prints rows
+                  where this returns True. Receives dict of {name: int_value}.
+            stop: optional predicate ``fn(sigs_dict) -> bool``. Calls finish()
+                  when True.
+
+        Usage::
+
+            sim.trace('pc', 'stall', 'is_ebreak',
+                      when=lambda s: s['is_ebreak'] or s['_cycle'] < 20,
+                      stop=lambda s: s['is_ebreak'])
+        """
+        T = period or 10
+
+        def _resolve(name):
+            """Walk dot-separated path to find signal on module tree."""
+            parts = name.split('.')
+            obj = self.mod
+            for part in parts[:-1]:
+                obj = getattr(obj, part)
+            return getattr(obj, parts[-1])
+
+        # resolve signals up front (deferred until initial block runs)
+        resolved = None
+
+        def _fmt(val):
+            if fmt == 'dec':
+                return str(val)
+            elif fmt == 'bin':
+                return bin(val)
+            return f'0x{val:x}'
+
+        @self.initial
+        def _trace():
+            nonlocal resolved
+            resolved = [(n, _resolve(n)) for n in names if n != '_cycle']
+            has_cycle = '_cycle' in names
+
+            # header
+            cols = list(names)
+            print(' | '.join(f'{c:>16s}' for c in cols))
+            print('-+-'.join('-' * 16 for _ in cols))
+
+            cycle = 0
+            while True:
+                sigs = {n: int(sig) for n, sig in resolved}
+                if has_cycle:
+                    sigs['_cycle'] = cycle
+
+                if when is None or when(sigs):
+                    row = []
+                    for c in names:
+                        v = sigs[c]
+                        row.append(f'{_fmt(v):>16s}' if c != '_cycle' else f'{v:>16d}')
+                    print(' | '.join(row))
+
+                if stop is not None and stop(sigs):
+                    self.finish()
+                    return
+
+                cycle += 1
+                yield T
+
     def run(self):
         """Run the simulation until all initial blocks complete or finish() is called."""
         if self._vcd_path:
