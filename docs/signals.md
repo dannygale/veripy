@@ -209,3 +209,55 @@ sig._tick()          # apply pending update
 ```
 
 This is handled automatically by `@comb`/`@always` blocks and `SimEngine`. You rarely need to call these directly.
+
+## Parameters and Parametric Widths
+
+### `Parameter`
+
+`Parameter` is a deferred width placeholder for class-based modules. It resolves to a Verilog parameter at emission time:
+
+```python
+from veripy import Parameter
+
+class MyModule(Module):
+    def __init__(self):
+        self.width = Parameter(8)
+        self.data  = Input(self.width)
+        self.out   = Output(self.width)
+        super().__init__()
+```
+
+### Arithmetic on Parameters
+
+Parameters support `+`, `-`, `*`, `//`. These return `ParamExpr` objects that resolve at elaboration:
+
+```python
+self.out = Output(self.width + 1)       # width+1 bits
+self.addr = Input(self.depth // 2)
+```
+
+### Comparison Operators
+
+Parameters support `>`, `<`, `>=`, `<=`, `==`, `!=`. These evaluate against the default value during Python simulation:
+
+```python
+if self.width > 16:
+    self.overflow = Output(1)
+```
+
+### `clog2()`
+
+Compute `$clog2()` of a parameter for address widths:
+
+```python
+from veripy.parameter import clog2
+
+class Fifo(Module):
+    def __init__(self):
+        self.depth = Parameter(16)
+        self.width = Parameter(8)
+        self.addr  = Input(clog2(self.depth))  # 4 bits for depth=16
+        super().__init__()
+```
+
+Emits `$clog2(depth)` in Verilog. Works with `Parameter`, `ParamExpr`, and plain integers.

@@ -86,7 +86,7 @@ class TestCounter(VeripyTestCase):
             self.assertEqual(self.out('count'), 5)
 ```
 
-Each `test_*` method automatically runs twice: once in Python simulation, once through iverilog — outputs are compared cycle-by-cycle.
+Each `test_*` method automatically runs against up to five backends — Python simulation, iverilog, native C simulation (csim flat and hierarchical), and optionally Verilator — all outputs are compared cycle-by-cycle.
 
 ## Installation
 
@@ -107,15 +107,24 @@ veripy import <file.v>              # convert Verilog → VeriPy Python
 veripy import rtl/ -o src/          # convert entire project
 veripy lint <file.py>               # static checks
 veripy formal <file.py>            # emit .sby + Verilog for SymbiYosys
+veripy equiv gold.py gate.py       # formal equivalence checking (Yosys)
+veripy profile tests/test_foo.py   # compare backend performance
+veripy doc <file.py>               # generate markdown documentation
+veripy ip list                     # list installed IP packages
+veripy ip init <name>              # scaffold a new IP package
+veripy init                        # scaffold a new project with veripy.toml
 ```
 
 ## Features
 
-- **Dual-path testing** — one test verifies both Python sim and generated Verilog ([docs](docs/testing.md))
+- **Dual-path testing** — one test verifies Python sim, iverilog, csim, and optionally Verilator ([docs](docs/testing.md))
+- **Native C simulation** — csim backend compiles IR to C for near-Verilator speed with sub-second compile times
 - **Signal types** — `Input`, `Output`, `Register`, `Signal`, `Mem`, bit slicing, concatenation ([docs](docs/signals.md))
 - **Lazy expressions** — signal operators return composable `_Expr` objects with width tracking ([docs](docs/signals.md#operators))
+- **Parameters** — `Parameter`, `ParamExpr`, `clog2()` for parametric widths with Verilog emission ([docs](docs/signals.md#parameters-and-parametric-widths))
 - **Sub-modules** — hierarchical composition with automatic port wiring ([docs](docs/guide.md#sub-modules))
 - **BlackBox** — port-only wrappers for vendor/external IP instantiation ([docs](docs/guide.md#blackbox))
+- **Behavioral models** — `@behavioral` decorator for Python-only simulation models alongside RTL ([docs](docs/guide.md#behavioral--python-only-simulation-model))
 - **FSM sugar** — declarative state machines ([docs](docs/guide.md#fsm))
 - **Formal properties** — `assert_always`, `cover` ([docs](docs/guide.md#formal-properties))
 - **Pipelines** — lambda-chain for simple stages, named stages with per-stage stall/flush for CPU pipelines ([docs](docs/guide.md#pipelines))
@@ -126,11 +135,15 @@ veripy formal <file.py>            # emit .sby + Verilog for SymbiYosys
 - **Lint** — undriven outputs, multi-driven signals, missing reset, unused signals, CDC violations, combinational loops ([docs](docs/verilog.md#lint))
 - **CDC primitives** — `Synchronizer`, `AsyncFIFO` with gray-code pointers ([docs](docs/guide.md#cdc))
 - **IP library** — `SyncFifo`, `EdgeDetector`, `Debouncer`, `RoundRobinArbiter`, `PriorityArbiter`, `ClockDivider`, `CreditFlowControl` ([docs](docs/guide.md#ip-library))
+- **IP packaging** — pip-installable IP packages with `veripy ip` CLI
 - **Event-driven simulation** — `SimEngine` with proper Verilog scheduling ([docs](docs/testing.md#simengine))
 - **Verilator co-simulation** — compile to shared lib, drive from Python via ctypes for 100-1000x speedup
 - **GPU simulation** — batch-parallel verification on WebGPU, thousands of instances per dispatch ([docs](docs/gpu.md))
 - **Reactive testing** — `yield until(cond)`, `fork`/`join`, constrained random, coverage reporting ([docs](docs/testing.md#reactive-waits))
 - **Protocol drivers** — reusable `Driver` base class for transaction-level bus helpers ([docs](docs/testing.md#protocol-drivers))
+- **Equivalence checking** — formal equivalence via Yosys ([docs](docs/equiv.md))
+- **Auto-documentation** — generate markdown docs from module definitions
+- **Project configuration** — `veripy.toml` for project settings, `veripy init` for scaffolding
 
 ## Omnibus Example
 
@@ -154,8 +167,8 @@ veripy formal <file.py>            # emit .sby + Verilog for SymbiYosys
 
 - **[Guide](docs/guide.md)** — `@module` tutorial: signals, logic blocks, parameters, sub-modules, FSM, pipelines, formal, timing, interfaces
 - **[Class-based API](docs/class-api.md)** — the `Module` base class for advanced use cases
-- **[Signals](docs/signals.md)** — signal types, operations, slicing, memory arrays
-- **[Testing](docs/testing.md)** — dual-path testing, SimEngine, VCD waveforms
+- **[Signals](docs/signals.md)** — signal types, operations, slicing, memory arrays, parameters
+- **[Testing](docs/testing.md)** — multi-backend testing, SimEngine, VCD waveforms, csim
 - **[Verilog](docs/verilog.md)** — import, export, emission, lint
 - **[Equivalence Checking](docs/equiv.md)** — formal equivalence via Yosys equiv_check
 - **[GPU Simulation](docs/gpu.md)** — WGPU backend, batch-parallel verification, flattening

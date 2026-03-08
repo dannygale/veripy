@@ -85,6 +85,55 @@ def alu(width=8):
 a = alu(width=16)  # out is 17 bits wide
 ```
 
+### `Parameter` Type
+
+For class-based modules, use `Parameter` for deferred width resolution:
+
+```python
+from veripy import Parameter
+from veripy.parameter import clog2
+
+class Fifo(Module):
+    def __init__(self):
+        self.depth = Parameter(16)
+        self.width = Parameter(8)
+        self.din   = Input(self.width)
+        self.addr  = Input(clog2(self.depth))  # $clog2(depth) in Verilog
+        super().__init__()
+```
+
+Parameters support arithmetic (`+`, `-`, `*`, `//`) and comparisons (`>`, `<`, `>=`, `<=`, `==`, `!=`). `clog2(param)` emits `$clog2(param)` in Verilog.
+
+### `@behavioral` — Python-Only Simulation Model
+
+Use `@behavioral` to provide a pure-Python function that replaces the `@comb`/`@always` blocks during simulation. The behavioral model runs instead of the RTL logic in Python sim, while the RTL blocks are still used for Verilog emission:
+
+```python
+from veripy.context import behavioral
+
+@module
+def alu(width=8):
+    a   = Input(width)
+    b   = Input(width)
+    op  = Input(2)
+    out = Output(width)
+
+    @comb
+    def logic():
+        if op == 0: out = a + b
+        elif op == 1: out = a - b
+        elif op == 2: out = a & b
+        else: out = a | b
+
+    @behavioral
+    def sim_model():
+        ops = [lambda: int(a)+int(b), lambda: int(a)-int(b),
+               lambda: int(a)&int(b), lambda: int(a)|int(b)]
+        out._val = ops[int(op)]() & ((1 << width) - 1)
+```
+
+This is useful when the RTL is complex but the behavioral intent is simple, or when you want a golden reference model for verification.
+
 ## Logic Blocks
 
 ### `@comb` — Combinational Logic

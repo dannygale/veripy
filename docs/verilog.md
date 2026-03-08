@@ -23,6 +23,20 @@ veripy build counter.py -m Counter          # target specific module
 
 `build` always compiles through iverilog before outputting — broken RTL is caught immediately.
 
+## Other CLI Commands
+
+```
+veripy equiv gold.py gate.py               # formal equivalence checking (Yosys)
+veripy equiv gold.py gate.py --run         # run Yosys automatically
+veripy profile tests/test_counter.py       # compare Python sim vs iverilog performance
+veripy doc counter.py                      # generate markdown documentation
+veripy doc counter.py -o docs/             # write .md files to directory
+veripy ip list                             # list installed VeriPy IP packages
+veripy ip show <name>                      # show IP package details
+veripy ip init <name>                      # scaffold a new IP package
+veripy init                                # scaffold a new VeriPy project with veripy.toml
+```
+
 ## Importing Verilog
 
 Convert existing RTL to VeriPy:
@@ -58,6 +72,7 @@ Detects:
 - Missing reset on sequential blocks
 - Unused signals
 - Clock domain crossing violations (unsynchronized register reads across `@always(posedge(...))` blocks on different clocks)
+- Combinational loops
 
 From Python:
 

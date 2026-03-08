@@ -28,14 +28,36 @@ class TestCounter(VeripyTestCase):
             self.assertEqual(self.out('count'), 5)
 ```
 
-Each `test_*` method runs three ways:
-1. Python simulation — assertions against the Python model
-2. Sim vs RTL — stimulus replayed through iverilog, outputs compared cycle-by-cycle
-3. Verilog — assertions against iverilog outputs
+Each `test_*` method automatically runs against up to five backends, and all outputs are compared:
+
+1. **Python simulation** — assertions run against the Python model
+2. **iverilog** — stimulus replayed through iverilog, outputs compared cycle-by-cycle
+3. **csim (flat)** — stimulus replayed through the native C simulation backend
+4. **csim (hierarchical)** — same as csim but forces hierarchical per-module compilation
+5. **Verilator** (opt-in) — stimulus replayed through Verilator co-simulation
+
+Backends 3–4 run automatically. Backend 5 is opt-in via `USE_VERILATOR = True` on the test class or `VERIPY_VERILATOR=1` environment variable.
+
+After all backends run, `_assert_all_match()` compares every output at every timestep across all backends — any mismatch is a test failure.
 
 ```
 $ veripy test tests/ -v
 ```
+
+### Controlling Backends
+
+```python
+class TestMyModule(VeripyTestCase):
+    SKIP_CSIM = True       # skip csim backends for this test class
+    USE_VERILATOR = True   # enable Verilator backend
+
+    def create_module(self):
+        return my_module()
+```
+
+Environment variables:
+- `VERIPY_SKIP_CSIM=1` — skip csim backends globally
+- `VERIPY_VERILATOR=1` — enable Verilator backend globally
 
 ## SimEngine
 
@@ -121,6 +143,31 @@ def send_data():
 ```
 
 In `VeripyTestCase`, use `self.fork()` and `self.fork_any()`.
+
+## Native C Simulation (csim)
+
+The csim backend compiles your design to native C for near-Verilator performance. It runs automatically in `VeripyTestCase` — no setup needed.
+
+For standalone use:
+
+```python
+from veripy import CSimModel
+
+with CSimModel(my_module, 'my_module') as model:
+    model.set('enable', 1)
+    model.eval()
+    print(model.get('count'))
+```
+
+### VCD Tracing from csim
+
+```python
+with CSimModel(my_module, 'my_module', trace='out.vcd') as model:
+    for _ in range(100):
+        model.set('clock', 0); model.eval()
+        model.set('clock', 1); model.eval()
+# out.vcd written on context exit
+```
 
 ## Protocol Drivers
 
