@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import tempfile
 
 from .fpga import Board, ConstraintSet
 
@@ -104,6 +103,79 @@ def _synth_ecp5(
     return bit_path
 
 
+# ── Vivado flow ────────────────────────────────────────────────────────────────
+
+def _synth_vivado(
+    verilog_path: str,
+    top: str,
+    board: Board,
+    cs: ConstraintSet,
+    out_dir: str,
+    stem: str,
+) -> str:
+    """Run Vivado in batch mode. Returns path to .bit bitstream."""
+    xdc_path = os.path.join(out_dir, f"{stem}.xdc")
+    bit_path  = os.path.join(out_dir, f"{stem}.bit")
+    tcl_path  = os.path.join(out_dir, f"{stem}_vivado.tcl")
+
+    with open(xdc_path, "w") as f:
+        f.write(cs.emit_xdc())
+
+    tcl = (
+        f"read_verilog {verilog_path}\n"
+        f"read_xdc {xdc_path}\n"
+        f"synth_design -top {top} -part {board.part}\n"
+        f"opt_design\n"
+        f"place_design\n"
+        f"route_design\n"
+        f"write_bitstream -force {bit_path}\n"
+    )
+    with open(tcl_path, "w") as f:
+        f.write(tcl)
+
+    _run(["vivado", "-mode", "batch", "-source", tcl_path], cwd=out_dir)
+    return bit_path
+
+
+# ── Quartus flow ───────────────────────────────────────────────────────────────
+
+def _synth_quartus(
+    verilog_path: str,
+    top: str,
+    board: Board,
+    cs: ConstraintSet,
+    out_dir: str,
+    stem: str,
+) -> str:
+    """Run Quartus in batch mode. Returns path to .sof bitstream."""
+    sdc_path = os.path.join(out_dir, "constraints.sdc")
+    qsf_path = os.path.join(out_dir, f"{stem}.qsf")
+    qpf_path = os.path.join(out_dir, f"{stem}.qpf")
+    sof_path = os.path.join(out_dir, "output_files", f"{stem}.sof")
+
+    with open(sdc_path, "w") as f:
+        f.write(cs.emit_sdc())
+
+    qsf = (
+        f"set_global_assignment -name DEVICE {board.part}\n"
+        f"set_global_assignment -name TOP_LEVEL_ENTITY {top}\n"
+        f"set_global_assignment -name VERILOG_FILE {verilog_path}\n"
+        f"set_global_assignment -name SDC_FILE {sdc_path}\n"
+    )
+    for port, loc, io_std in cs._pins:
+        qsf += f"set_location_assignment PIN_{loc} -to {port}\n"
+        std = io_std or "3.3-V LVTTL"
+        qsf += f"set_instance_assignment -name IO_STANDARD \"{std}\" -to {port}\n"
+    with open(qsf_path, "w") as f:
+        f.write(qsf)
+
+    with open(qpf_path, "w") as f:
+        f.write(f"PROJECT_REVISION = \"{stem}\"\n")
+
+    _run(["quartus_sh", "--flow", "compile", stem], cwd=out_dir)
+    return sof_path
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def synthesize(
@@ -116,10 +188,11 @@ def synthesize(
     """Synthesize *verilog_src* for *board* and return the bitstream path.
 
     Writes intermediate files (JSON, constraint file, bitstream) to
-    *output_dir*.  Requires ``yosys``, ``nextpnr-<family>``, and the
-    appropriate pack tool on PATH.
+    *output_dir*.  Requires the appropriate vendor tools on PATH:
+    ``yosys``/``nextpnr`` for open-source targets, ``vivado`` for Xilinx,
+    ``quartus_sh`` for Intel.
 
-    Supported families: ``ice40``, ``ecp5``.
+    Supported families: ``ice40``, ``ecp5``, ``xilinx``, ``intel``.
     """
     os.makedirs(output_dir, exist_ok=True)
     stem = top
@@ -133,8 +206,12 @@ def synthesize(
         return _synth_ice40(v_path, top, board, cs, output_dir, stem)
     elif family == "ecp5":
         return _synth_ecp5(v_path, top, board, cs, output_dir, stem)
+    elif family == "xilinx":
+        return _synth_vivado(v_path, top, board, cs, output_dir, stem)
+    elif family == "intel":
+        return _synth_quartus(v_path, top, board, cs, output_dir, stem)
     else:
         sys.exit(
             f"error: synthesis not supported for family '{family}'. "
-            "Supported: ice40, ecp5"
+            "Supported: ice40, ecp5, xilinx, intel"
         )

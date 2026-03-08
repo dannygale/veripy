@@ -122,6 +122,34 @@ class ConstraintSet:
             )
         return "\n".join(lines) + ("\n" if lines else "")
 
+    def emit_qsf(self) -> str:
+        """Emit Intel Quartus QSF settings file."""
+        lines = [
+            f"set_global_assignment -name DEVICE {self.board.part}",
+        ]
+        for port, loc, io_std in self._pins:
+            lines.append(f"set_location_assignment PIN_{loc} -to {port}")
+            std = io_std or "3.3-V LVTTL"
+            lines.append(f"set_instance_assignment -name IO_STANDARD \"{std}\" -to {port}")
+        for port, freq_mhz in self._clocks:
+            period_ns = 1000.0 / freq_mhz
+            lines.append(
+                f"set_global_assignment -name SDC_FILE constraints.sdc"
+            )
+            break  # SDC file added once; clocks go in SDC
+        return "\n".join(lines) + ("\n" if lines else "")
+
+    def emit_sdc(self) -> str:
+        """Emit SDC timing constraints (used by Quartus and Vivado)."""
+        lines = []
+        for port, freq_mhz in self._clocks:
+            period_ns = 1000.0 / freq_mhz
+            lines.append(
+                f"create_clock -period {period_ns:.3f} -name {port} "
+                f"[get_ports {{{port}}}]"
+            )
+        return "\n".join(lines) + ("\n" if lines else "")
+
     def emit(self) -> str:
         """Emit the appropriate constraint file for the board's family."""
         family = self.board.family
@@ -131,6 +159,8 @@ class ConstraintSet:
             return self.emit_lpf()
         elif family in ("xilinx", "gowin"):
             return self.emit_xdc()
+        elif family == "intel":
+            return self.emit_qsf()
         else:
             raise ValueError(f"No constraint emitter for family '{family}'")
 
@@ -143,6 +173,8 @@ class ConstraintSet:
             return ".lpf"
         elif family in ("xilinx", "gowin"):
             return ".xdc"
+        elif family == "intel":
+            return ".qsf"
         else:
             return ".cst"
 

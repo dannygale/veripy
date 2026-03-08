@@ -166,7 +166,7 @@ class TestBuiltinBoards(unittest.TestCase):
 
 class TestUnsupportedFamily(unittest.TestCase):
     def test_emit_unknown_family(self):
-        board = Board("custom", "intel", "5CSEBA6U23I7")
+        board = Board("custom", "unknown_vendor", "XYZ123")
         cs = ConstraintSet(board)
         cs.pin("clk", "V11")
         with self.assertRaises(ValueError):
