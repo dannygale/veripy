@@ -49,6 +49,8 @@ def _find_fstapi():
                 return d, srcs
     return None, []
 
+
+def _collect_submodule_registry(module):
     """Build a registry of sub-module IRs, keyed by unique type+params.
 
     Different parameterizations of the same module (e.g. cache with
@@ -2820,6 +2822,161 @@ def emit_tb_c(tb_ir, model_c_src, half_period=10, model_ir=None):
     lines.append('    return 0;')
     lines.append('}')
     return '\n'.join(lines) + '\n'
+
+
+def _extract_state_struct(model_c_src: str) -> str:
+    """Extract the 'typedef struct { ... } State;' block from model C source."""
+    start = model_c_src.find('typedef struct {')
+    if start == -1:
+        return ''
+    end = model_c_src.find('} State;', start)
+    if end == -1:
+        return ''
+    return model_c_src[start:end + len('} State;')]
+
+
+def emit_c_header(ir: IRModule, model_c_src: str) -> str:
+    """Emit a C header for the model: State struct + extern function declarations.
+
+    Used by compile_tb() so the testbench can access the State struct directly
+    and call model functions without recompiling the model source.
+    """
+    lines = [
+        '#pragma once',
+        '#include <stdint.h>',
+        '',
+        _extract_state_struct(model_c_src),
+        '',
+        'extern void* veripy_create(void);',
+        'extern void  veripy_destroy(void* p);',
+        'extern void  veripy_eval(void* p);',
+    ]
+    for p in ir.ports:
+        if p.direction == 'input':
+            lines.append(f'extern void     veripy_set_{p.name}(void* p, uint64_t v);')
+        lines.append(f'extern uint64_t veripy_get_{p.name}(void* p);')
+    lines.append('')
+    return '\n'.join(lines) + '\n'
+
+
+def _default_model_cache_dir() -> str:
+    base = os.environ.get('VERIPY_CSIM_CACHE',
+                          os.path.join(os.path.expanduser('~'), '.cache', 'veripy', 'csim'))
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+def compile_model(module, module_name=None, cache_dir=None):
+    """Compile a VeriPy Module to a cached model .so.
+
+    The model is compiled once and cached by content hash.  Subsequent calls
+    with the same module source return the cached .so immediately.
+
+    Returns:
+        (lib_path, flat_ir, model_c_src, header_src)
+        lib_path    — absolute path to the compiled .so/.dylib
+        flat_ir     — flattened IRModule (needed by compile_tb)
+        model_c_src — emitted C source (needed by compile_tb for struct access)
+        header_src  — C header string (State struct + extern decls)
+    """
+    import hashlib
+    from .lower import lower_module
+    from .flatten import flatten_ir, topo_sort_comb
+    from .dce import optimize
+
+    if module_name is None:
+        module_name = type(module).__name__.lower()
+
+    if cache_dir is None:
+        cache_dir = _default_model_cache_dir()
+
+    registry, patch_fn = _collect_submodule_registry(module)
+    top_ir = lower_module(module, module_name)
+    patch_fn(top_ir)
+    flat_ir = flatten_ir(top_ir, registry) if top_ir.instances else top_ir
+    flat_ir = topo_sort_comb(flat_ir)
+    flat_ir = _inline_cont_assigns(flat_ir)
+    flat_ir = optimize(flat_ir)
+
+    model_c_src = emit_c(flat_ir)
+    content_hash = hashlib.sha256(model_c_src.encode()).hexdigest()[:16]
+
+    ext = '.dylib' if os.uname().sysname == 'Darwin' else '.so'
+    lib_name = f'lib{module_name}_{content_hash}{ext}'
+    lib_path = os.path.join(cache_dir, lib_name)
+
+    if not os.path.exists(lib_path):
+        c_path = os.path.join(cache_dir, f'{module_name}_{content_hash}.c')
+        with open(c_path, 'w') as f:
+            f.write(model_c_src)
+
+        cc = os.environ.get('CC', 'cc')
+        flag = '-dynamiclib' if ext == '.dylib' else '-shared'
+        fstapi_dir, fstapi_srcs = _find_fstapi()
+        extra_flags = [f'-I{fstapi_dir}', '-DVERIPY_FST', '-lz'] if fstapi_dir else []
+        extra_srcs = fstapi_srcs if fstapi_dir else []
+
+        r = subprocess.run(
+            [cc, '-O3', '-march=native', '-flto', '-fPIC', flag,
+             '-o', lib_path, c_path] + extra_srcs + extra_flags,
+            capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f'Model compilation failed:\n{r.stderr}')
+
+    header_src = emit_c_header(flat_ir, model_c_src)
+    return lib_path, flat_ir, model_c_src, header_src
+
+
+def compile_tb(tb_ir, model_lib_path, model_c_src, flat_ir, half_period=10):
+    """Compile a testbench .so that links against a pre-compiled model .so.
+
+    Uses emit_tb_c() with just the model header (State struct + extern decls)
+    instead of the full model source, then links against model_lib_path.
+
+    Returns:
+        (run_fn, compile_time, cleanup_fn)
+    """
+    t0 = time.perf_counter()
+
+    header_src = emit_c_header(flat_ir, model_c_src)
+    tb_c = emit_tb_c(tb_ir, header_src, half_period, model_ir=flat_ir)
+
+    build_dir = tempfile.mkdtemp(prefix='veripy_tb_')
+    c_path = os.path.join(build_dir, 'bench.c')
+    with open(c_path, 'w') as f:
+        f.write(tb_c)
+
+    ext = '.dylib' if os.uname().sysname == 'Darwin' else '.so'
+    lib_path = os.path.join(build_dir, f'libbench{ext}')
+    model_dir = os.path.dirname(model_lib_path)
+    model_stem = os.path.basename(model_lib_path)
+    # Strip lib prefix and extension to get -l<name>
+    lib_link_name = model_stem[3:].rsplit('.', 1)[0]  # e.g. libcounter_abc.dylib → counter_abc
+
+    cc = os.environ.get('CC', 'cc')
+    flag = '-dynamiclib' if ext == '.dylib' else '-shared'
+    rpath_flag = f'-Wl,-rpath,{model_dir}'
+
+    r = subprocess.run(
+        [cc, '-O2', '-fPIC', flag,
+         '-o', lib_path, c_path,
+         f'-L{model_dir}', f'-l{lib_link_name}', rpath_flag],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f'TB compilation failed:\n{r.stderr}\n\nSource:\n{tb_c}')
+
+    compile_t = time.perf_counter() - t0
+
+    lib = ctypes.CDLL(lib_path)
+    lib.run_bench.restype = ctypes.c_uint64
+
+    def run():
+        lib.run_bench()
+
+    def cleanup():
+        shutil.rmtree(build_dir, ignore_errors=True)
+
+    return run, compile_t, cleanup
 
 
 def compile_bench(module, tb_ir, module_name=None):
