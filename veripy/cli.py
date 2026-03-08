@@ -467,6 +467,99 @@ def cmd_profile(args):
     print()
 
 
+def cmd_fpga(args):
+    """FPGA subcommands: build and boards."""
+    if args.fpga_command == 'boards':
+        from .fpga import BOARDS
+        print(f"  {'Name':<12} {'Family':<8} {'Part':<22} {'Package'}")
+        print("  " + "-" * 56)
+        for name, board in sorted(BOARDS.items()):
+            print(f"  {board.name:<12} {board.family:<8} {board.part:<22} {board.package}")
+        return
+
+    if args.fpga_command == 'build':
+        from .fpga import get_board, ConstraintSet
+        from .backend_fpga import synthesize
+        from .lower import lower_module
+        from .backend_verilog import emit_verilog
+        from .flatten import flatten_ir
+        from .emit_verilog import _to_snake
+
+        # Resolve board
+        board_name = args.board
+        if not board_name:
+            from .config import load_config
+            cfg = load_config()
+            if cfg:
+                board_name = cfg.get("fpga", {}).get("board", "")
+        if not board_name:
+            sys.exit("error: --board <name> is required (or set [fpga] board in veripy.toml)")
+
+        try:
+            board = get_board(board_name)
+        except KeyError as e:
+            sys.exit(f"error: {e}")
+
+        # Resolve source file
+        src_file = args.file
+        if not src_file:
+            from .config import load_config
+            cfg = load_config()
+            if cfg is None:
+                sys.exit("error: no file given and no veripy.toml found")
+            build = cfg["build"]
+            if not build["top"]:
+                sys.exit("error: [build] top is not set in veripy.toml")
+            src_file = os.path.join(cfg["_dir"], build["top"])
+
+        params = _parse_params(args.param)
+        modules = _load_modules(src_file, module_name=args.module, params=params)
+        if not modules:
+            sys.exit(f"error: no modules found in {src_file}")
+
+        top_name, top_inst = modules[0]
+        top_snake = _to_snake(top_name)
+
+        ir = lower_module(top_inst, top_snake)
+        verilog_src = emit_verilog(ir)
+
+        # Build port map from --map port=BOARD_PIN args
+        port_map = {}
+        for mapping in (args.map or []):
+            if "=" not in mapping:
+                sys.exit(f"error: bad --map format '{mapping}', expected port=BOARD_PIN")
+            port, pin_name = mapping.split("=", 1)
+            port_map[port] = pin_name
+
+        # Also read from veripy.toml [fpga.pins]
+        try:
+            from .config import load_config
+            cfg = load_config()
+            if cfg:
+                toml_pins = cfg.get("fpga", {}).get("pins", {})
+                for port, pin_name in toml_pins.items():
+                    if port not in port_map:
+                        port_map[port] = pin_name
+        except Exception:
+            pass
+
+        if not port_map:
+            sys.exit(
+                "error: no pin mappings provided. Use --map port=BOARD_PIN "
+                "or set [fpga.pins] in veripy.toml"
+            )
+
+        try:
+            cs = board.constraint_set(port_map)
+        except KeyError as e:
+            sys.exit(f"error: unknown board pin {e}. "
+                     f"Run 'veripy fpga boards' to see available pins.")
+
+        out_dir = args.output or "build"
+        bitstream = synthesize(verilog_src, board, cs, top_snake, out_dir)
+        print(f"Bitstream: {bitstream}")
+
+
 def cmd_soc(args):
     """SoC builder subcommands."""
     if args.soc_command == 'build':
@@ -567,6 +660,19 @@ def main():
     p_equiv.add_argument("--gate-param", action="append", default=[], help="Gate module param (e.g. --gate-param n=4)")
     p_equiv.add_argument("--run", action="store_true", help="Run Yosys automatically (requires yosys on PATH)")
 
+    # fpga
+    p_fpga = sub.add_parser("fpga", help="FPGA build flow")
+    fpga_sub = p_fpga.add_subparsers(dest="fpga_command", required=True)
+    fpga_sub.add_parser("boards", help="List built-in board definitions")
+    p_fpga_build = fpga_sub.add_parser("build", help="Synthesize to FPGA bitstream")
+    p_fpga_build.add_argument("file", nargs="?", help="Python file (default: from veripy.toml)")
+    p_fpga_build.add_argument("--board", help="Target board name (e.g. icebreaker, ulx3s, arty)")
+    p_fpga_build.add_argument("-m", "--module", help="Target a specific module by name")
+    p_fpga_build.add_argument("-p", "--param", action="append", help="Module parameter (e.g. -p n=4)")
+    p_fpga_build.add_argument("--map", action="append", metavar="PORT=BOARD_PIN",
+                               help="Map module port to board pin (e.g. --map clk=CLK)")
+    p_fpga_build.add_argument("-o", "--output", help="Output directory (default: build/)")
+
     # soc
     p_soc = sub.add_parser("soc", help="SoC builder commands")
     soc_sub = p_soc.add_subparsers(dest="soc_command", required=True)
@@ -590,10 +696,12 @@ def main():
     p_init.add_argument("-o", "--output", help="Output directory (default: ./<name>)")
 
     args = parser.parse_args()
-    {"build": cmd_build, "test": cmd_test, "import": cmd_import,
-     "lint": cmd_lint, "formal": cmd_formal, "profile": cmd_profile,
-     "equiv": cmd_equiv, "doc": cmd_doc, "ip": cmd_ip,
-     "init": cmd_init, "soc": cmd_soc}[args.command](args)
+    {
+        "build": cmd_build, "test": cmd_test, "import": cmd_import,
+        "lint": cmd_lint, "formal": cmd_formal, "profile": cmd_profile,
+        "equiv": cmd_equiv, "doc": cmd_doc, "ip": cmd_ip,
+        "init": cmd_init, "soc": cmd_soc, "fpga": cmd_fpga,
+    }[args.command](args)
 
 
 if __name__ == "__main__":
