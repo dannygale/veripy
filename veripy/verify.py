@@ -178,6 +178,18 @@ class TestBench(unittest.TestCase):
         self._ran_sim = True
         self._engine.run()
 
+    def run(self, result=None):
+        """Override to catch accidental self.run() in test methods."""
+        if hasattr(self, '_mod'):
+            raise RuntimeError(
+                "Did you mean self.run_sim()? "
+                "self.run() invokes the unittest runner, not the simulation.")
+        return super().run(result)
+
+    def reset(self):
+        """Reset module and simulation state (fresh create_module + engine)."""
+        self._begin()
+
     def always(self, fn):
         """Register a generator function as an always block."""
         self._engine.always(fn)

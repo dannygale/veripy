@@ -2,6 +2,7 @@
 
 from .signal import Signal, Input, Output, Register, Mem, DualPortMem, TrueDualPortMem
 from .signal import Edge, SensitivityList, Interface, posedge, negedge
+from .signal import clz, ctz, popcount, sext
 from .module import Module
 from .blackbox import BlackBox
 from .parameter import Parameter

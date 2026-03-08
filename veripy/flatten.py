@@ -8,7 +8,7 @@ from collections import deque
 from copy import deepcopy
 from .ir import (
     Const, Param, Sig, BinOp, UnaryOp, Compare, BoolOp, Mux,
-    Slice, Index, Concat,
+    Slice, Index, Concat, Clz, Ctz, Popcount, Sext,
     Assign, SliceAssign, If, Case, MemWrite,
     ContAssign, CombBlock, SeqBlock, InitialBlock, AlwaysBlock,
     FormalProperty, IRModule,
@@ -423,6 +423,10 @@ def _expr_reads(node) -> set:
         for p in node.parts:
             out |= _expr_reads(p)
         return out
+    if isinstance(node, (Clz, Ctz, Popcount)):
+        return _expr_reads(node.operand)
+    if isinstance(node, Sext):
+        return _expr_reads(node.operand)
     return set()
 
 
@@ -494,6 +498,10 @@ def _rename_expr(node, rename: dict, resolved_params: dict | None = None):
                      _rename_expr(node.idx, rename, resolved_params))
     if isinstance(node, Concat):
         return Concat([_rename_expr(p, rename) for p in node.parts])
+    if isinstance(node, (Clz, Ctz, Popcount)):
+        return type(node)(_rename_expr(node.operand, rename, resolved_params), node.width)
+    if isinstance(node, Sext):
+        return Sext(_rename_expr(node.operand, rename, resolved_params), node.src_width, node.dst_width)
     return node
 
 

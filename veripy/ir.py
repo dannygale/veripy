@@ -64,6 +64,27 @@ class Index(Expr):
 class Concat(Expr):
     parts: list      # list[Expr], MSB first
 
+@dataclass
+class Clz(Expr):
+    operand: Expr
+    width: int       # input signal width
+
+@dataclass
+class Ctz(Expr):
+    operand: Expr
+    width: int
+
+@dataclass
+class Popcount(Expr):
+    operand: Expr
+    width: int
+
+@dataclass
+class Sext(Expr):
+    operand: Expr
+    src_width: int   # width of source signal
+    dst_width: int   # target width
+
 
 # ── Statements ───────────────────────────────────────────────────────
 

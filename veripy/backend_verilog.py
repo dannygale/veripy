@@ -5,7 +5,7 @@ Pure pattern matching on IR nodes — no Python AST, no name resolution.
 
 from .ir import (
     Const, Param, Sig, BinOp, UnaryOp, Compare, BoolOp, Mux,
-    Slice, Index, Concat,
+    Slice, Index, Concat, Clz, Ctz, Popcount, Sext,
     Assign, SliceAssign, If, Case, MemWrite, Delay, Display, Finish,
     Repeat, ForLoop, Disable,
     ContAssign, CombBlock, SeqBlock, InitialBlock, AlwaysBlock,
@@ -29,6 +29,7 @@ def emit_verilog(ir: IRModule) -> str:
     _emit_always_blocks(ir, lines)
     _emit_formal_props(ir, lines)
     _emit_temporal_props(ir, lines)
+    _emit_builtin_funcs(ir, lines)
     lines.append('')
     lines.append('endmodule')
     return '\n'.join(lines)
@@ -357,6 +358,95 @@ def _emit_temporal_props(ir, lines):
     lines.append('`endif')
 
 
+# ── Built-in function emission ───────────────────────────────────────
+
+def _scan_ir_exprs(ir):
+    """Collect all Clz/Ctz/Popcount nodes used in the IR."""
+    needed = set()
+    def _walk_expr(e):
+        if isinstance(e, (Clz, Ctz, Popcount)):
+            needed.add((type(e).__name__.lower(), e.width))
+            _walk_expr(e.operand)
+        elif isinstance(e, Sext):
+            _walk_expr(e.operand)
+        elif isinstance(e, BinOp):
+            _walk_expr(e.left); _walk_expr(e.right)
+        elif isinstance(e, UnaryOp):
+            _walk_expr(e.operand)
+        elif isinstance(e, Compare):
+            _walk_expr(e.left); _walk_expr(e.right)
+        elif isinstance(e, BoolOp):
+            for v in e.values: _walk_expr(v)
+        elif isinstance(e, Mux):
+            _walk_expr(e.sel); _walk_expr(e.true_val); _walk_expr(e.false_val)
+        elif isinstance(e, Slice):
+            _walk_expr(e.signal)
+        elif isinstance(e, Index):
+            _walk_expr(e.signal); _walk_expr(e.idx)
+        elif isinstance(e, Concat):
+            for p in e.parts: _walk_expr(p)
+    def _walk_stmt(s):
+        if isinstance(s, Assign):
+            _walk_expr(s.value)
+        elif isinstance(s, SliceAssign):
+            _walk_expr(s.value)
+        elif isinstance(s, If):
+            _walk_expr(s.cond)
+            for st in s.then_body: _walk_stmt(st)
+            for st in s.else_body: _walk_stmt(st)
+        elif isinstance(s, Case):
+            _walk_expr(s.sel)
+            for _, stmts in s.cases:
+                for st in stmts: _walk_stmt(st)
+            if s.default:
+                for st in s.default: _walk_stmt(st)
+    for blk in ir.comb_blocks:
+        for s in blk.stmts: _walk_stmt(s)
+    for blk in ir.seq_blocks:
+        for s in blk.stmts: _walk_stmt(s)
+    for ca in ir.assigns:
+        _walk_expr(ca.value)
+    return needed
+
+def _emit_builtin_funcs(ir, lines):
+    needed = _scan_ir_exprs(ir)
+    if not needed:
+        return
+    rw = lambda w: (w + 1).bit_length()  # result width
+    for kind, w in sorted(needed):
+        lines.append('')
+        if kind == 'clz':
+            lines.append(f'    function [{rw(w)-1}:0] _veripy_clz{w};')
+            lines.append(f'        input [{w-1}:0] val;')
+            lines.append(f'        integer i;')
+            lines.append(f'        begin')
+            lines.append(f'            _veripy_clz{w} = {w};')
+            lines.append(f'            for (i = 0; i < {w}; i = i + 1)')
+            lines.append(f'                if (val[i]) _veripy_clz{w} = {w-1} - i;')
+            lines.append(f'        end')
+            lines.append(f'    endfunction')
+        elif kind == 'ctz':
+            lines.append(f'    function [{rw(w)-1}:0] _veripy_ctz{w};')
+            lines.append(f'        input [{w-1}:0] val;')
+            lines.append(f'        integer i;')
+            lines.append(f'        begin')
+            lines.append(f'            _veripy_ctz{w} = {w};')
+            lines.append(f'            for (i = {w-1}; i >= 0; i = i - 1)')
+            lines.append(f'                if (val[i]) _veripy_ctz{w} = i;')
+            lines.append(f'        end')
+            lines.append(f'    endfunction')
+        elif kind == 'popcount':
+            lines.append(f'    function [{rw(w)-1}:0] _veripy_popcount{w};')
+            lines.append(f'        input [{w-1}:0] val;')
+            lines.append(f'        integer i;')
+            lines.append(f'        begin')
+            lines.append(f'            _veripy_popcount{w} = 0;')
+            lines.append(f'            for (i = 0; i < {w}; i = i + 1)')
+            lines.append(f'                if (val[i]) _veripy_popcount{w} = _veripy_popcount{w} + 1;')
+            lines.append(f'        end')
+            lines.append(f'    endfunction')
+
+
 # ── Expression emission ──────────────────────────────────────────────
 
 def _expr(node) -> str:
@@ -404,6 +494,22 @@ def _expr(node) -> str:
     if isinstance(node, Concat):
         parts = [_expr(e) for e in node.parts]
         return '{' + ', '.join(parts) + '}'
+
+    if isinstance(node, Clz):
+        return f'_veripy_clz{node.width}({_expr(node.operand)})'
+
+    if isinstance(node, Ctz):
+        return f'_veripy_ctz{node.width}({_expr(node.operand)})'
+
+    if isinstance(node, Popcount):
+        return f'_veripy_popcount{node.width}({_expr(node.operand)})'
+
+    if isinstance(node, Sext):
+        src = _expr(node.operand)
+        sw, dw = node.src_width, node.dst_width
+        sign_bit = f'{src}[{sw - 1}]'
+        mask = (1 << dw) - (1 << sw)
+        return f'({sign_bit} ? ({src} | {dw}\'d{mask}) : {src})'
 
     raise ValueError(f'Unknown IR expr: {node}')
 

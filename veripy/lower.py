@@ -10,7 +10,7 @@ import textwrap
 
 from .ir import (
     Expr, Const, Param, Sig, BinOp, UnaryOp, Compare, BoolOp, Mux,
-    Slice, Index, Concat,
+    Slice, Index, Concat, Clz, Ctz, Popcount, Sext,
     Stmt, Assign, SliceAssign, If, Case, MemWrite, Delay, Display, Finish,
     Repeat, ForLoop, Disable,
     ContAssign, CombBlock, SeqBlock, InitialBlock, AlwaysBlock,
@@ -272,6 +272,17 @@ class _Lowerer:
             # int(expr) → just the inner expr
             if isinstance(func, ast.Name) and func.id == 'int' and len(node.args) == 1:
                 return self._expr(node.args[0])
+            # Built-in bit primitives: clz, ctz, popcount, sext
+            if isinstance(func, ast.Name) and func.id in ('clz', 'ctz', 'popcount') and len(node.args) == 1:
+                operand = self._expr(node.args[0])
+                w = self._signal_width(operand)
+                cls = {'clz': Clz, 'ctz': Ctz, 'popcount': Popcount}[func.id]
+                return cls(operand, w)
+            if isinstance(func, ast.Name) and func.id == 'sext' and len(node.args) == 2:
+                operand = self._expr(node.args[0])
+                src_w = self._signal_width(operand)
+                dst_w = self._const_eval(node.args[1])
+                return Sext(operand, src_w, dst_w)
 
         if isinstance(node, ast.List):
             return Concat([self._expr(e) for e in reversed(node.elts)])
@@ -321,7 +332,8 @@ class _Lowerer:
                     return [Assign(name, self._expr(stmt.value), blocking)]
                 # Plain local — treat as reg
                 if name not in self._reg_locals:
-                    self._reg_locals[name] = 32
+                    w = self._infer_rhs_width(stmt.value)
+                    self._reg_locals[name] = w if w is not None else 32
                 return [Assign(name, self._expr(stmt.value), blocking=True)]
 
             # self.x[slice] = val
@@ -373,6 +385,16 @@ class _Lowerer:
                     return [Assign(sig.name, self._expr(call.args[0]), blocking)]
 
         return []  # skip unrecognized (docstrings, etc.)
+        # Warn on silently dropped statements (skip docstrings and pass)
+        if isinstance(stmt, ast.Pass):
+            return []
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
+            return []  # docstring
+        import warnings
+        loc = f' (line {stmt.lineno})' if hasattr(stmt, 'lineno') else ''
+        warnings.warn(f'@comb/@always: unsupported statement dropped{loc}: {ast.dump(stmt)[:80]}',
+                      stacklevel=2)
+        return []
 
     # ── Case detection ───────────────────────────────────────────────
 
@@ -448,11 +470,45 @@ class _Lowerer:
         else:
             start, stop, step = args
         var = node.target.id
+        # Detect break → unroll as elif chain for priority semantics
+        has_break = any(isinstance(n, ast.Break)
+                        for n in ast.walk(ast.Module(body=node.body, type_ignores=[])))
+        if has_break:
+            return self._unroll_for_break(node.body, var, start, stop, step, blocking)
         out = []
         for val in range(start, stop, step):
             body = self._subst_var(node.body, var, val)
             out.extend(self._stmts(body, blocking))
         return out
+
+    def _unroll_for_break(self, body_ast, var, start, stop, step, blocking):
+        """Unroll a for loop with break into a nested if/elif chain."""
+        iterations = list(range(start, stop, step))
+        if not iterations:
+            return []
+        # Build elif chain from last to first (innermost else is empty)
+        result = []
+        for val in reversed(iterations):
+            sub = self._subst_var(body_ast, var, val)
+            # Strip break statements from the body
+            sub = [s for s in sub if not isinstance(s, ast.Break)]
+            # Find the if-break pattern: if cond: stmts; break
+            if (len(sub) == 1 and isinstance(sub[0], ast.If)):
+                if_node = sub[0]
+                # Strip breaks from the if body
+                then_body = [s for s in if_node.body if not isinstance(s, ast.Break)]
+                cond = self._expr(if_node.test)
+                then_stmts = self._stmts(then_body, blocking)
+                result = [If(cond, then_stmts, result)]
+            else:
+                # General case: lower the body, wrap in elif
+                stmts = self._stmts(sub, blocking)
+                if result:
+                    # Can't easily chain — emit as flat with a guard local
+                    # Fall back to flat unroll (break has no effect)
+                    return self._stmts(sub, blocking) + result
+                result = stmts
+        return result
 
     def _subst_var(self, stmts, var_name, val):
         import copy
@@ -492,6 +548,21 @@ class _Lowerer:
 
     # ── Scan for Register locals ─────────────────────────────────────
 
+    def _signal_width(self, ir_expr):
+        """Get the width of an IR expression from known signal widths."""
+        if isinstance(ir_expr, Sig) and ir_expr.name in self.signals:
+            s = self.signals[ir_expr.name]
+            return s.width if hasattr(s, 'width') else getattr(s, '_width', 64)
+        if isinstance(ir_expr, Slice):
+            if ir_expr.hi is None:
+                return 1
+            if isinstance(ir_expr.hi, Const) and isinstance(ir_expr.lo, Const):
+                return ir_expr.hi.value - ir_expr.lo.value + 1
+        if isinstance(ir_expr, Index):
+            return 1
+        # Default: try to find width from the widest signal in the expression
+        return 64
+
     def _infer_rhs_width(self, node):
         """Try to evaluate an AST expression to get its width."""
         try:
@@ -505,7 +576,34 @@ class _Lowerer:
             val = eval(compile(ast.Expression(body=node), '<width>', 'eval'), ns)
             return getattr(val, '_width', None) or getattr(val, 'width', None)
         except Exception:
-            return None
+            return self._infer_width_from_signals(node)
+
+    def _infer_width_from_signals(self, node):
+        """Fallback: find the widest signal referenced in an AST expression."""
+        max_w = 0
+        for child in ast.walk(node):
+            name = None
+            if isinstance(child, ast.Attribute) and self._is_self(child.value):
+                name = child.attr
+            elif isinstance(child, ast.Name) and child.id in self.signals:
+                name = child.id
+            elif isinstance(child, ast.Name):
+                try:
+                    r = self._resolve_name(child.id)
+                    if r[0] == 'obj' and isinstance(r[1], Signal):
+                        w = r[1].width
+                        if isinstance(w, int) and w > max_w:
+                            max_w = w
+                        continue
+                except (SyntaxError, AttributeError):
+                    pass
+                continue
+            if name and name in self.signals:
+                sig = self.signals[name]
+                w = sig.width if hasattr(sig, 'width') else getattr(sig, '_width', 0)
+                if isinstance(w, int) and w > max_w:
+                    max_w = w
+        return max_w if max_w > 0 else None
 
     def _scan_reg_locals(self, tree):
         regs = {}
@@ -529,7 +627,8 @@ class _Lowerer:
                         except SyntaxError:
                             regs[name] = 32
                     else:
-                        regs[name] = 32
+                        w = self._infer_rhs_width(node.value)
+                        regs[name] = w if w is not None else 32
                 elif name not in self.signals:
                     w = self._infer_rhs_width(node.value)
                     if w is not None:

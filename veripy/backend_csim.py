@@ -14,7 +14,7 @@ import time
 
 from .ir import (
     Const, Param, Sig, BinOp, UnaryOp, Compare, BoolOp, Mux,
-    Slice, Index, Concat,
+    Slice, Index, Concat, Clz, Ctz, Popcount, Sext,
     Assign, SliceAssign, If, Case, MemWrite,
     ContAssign, CombBlock, SeqBlock, IRModule,
     Port, WireDecl, RegDecl, MemDecl,
@@ -399,6 +399,22 @@ def _expr(node, sig_w, pack_map=None) -> str:
             result = f'(({_expr(p, sig_w, pack_map)} << {shift}ULL) | {result})'
             shift += pw
         return result
+    if isinstance(node, Clz):
+        inner = _expr(node.operand, sig_w, pack_map)
+        w = node.width
+        return f'({inner} == 0 ? {w}ULL : (uint64_t)__builtin_clzll((uint64_t){inner}) - {64 - w}ULL)'
+    if isinstance(node, Ctz):
+        inner = _expr(node.operand, sig_w, pack_map)
+        w = node.width
+        return f'({inner} == 0 ? {w}ULL : (uint64_t)__builtin_ctzll((uint64_t){inner}))'
+    if isinstance(node, Popcount):
+        inner = _expr(node.operand, sig_w, pack_map)
+        return f'((uint64_t)__builtin_popcountll((uint64_t){inner}))'
+    if isinstance(node, Sext):
+        inner = _expr(node.operand, sig_w, pack_map)
+        sw, dw = node.src_width, node.dst_width
+        mask = (1 << dw) - (1 << sw)
+        return f'(({inner} >> {sw - 1}ULL) & 1ULL ? ({inner} | {mask}ULL) : {inner})'
     raise ValueError(f'Unknown IR expr: {node}')
 
 
@@ -642,6 +658,10 @@ def _expr_width(node, sig_w) -> int:
         return 1
     if isinstance(node, UnaryOp):
         return _expr_width(node.operand, sig_w)
+    if isinstance(node, Clz) or isinstance(node, Ctz) or isinstance(node, Popcount):
+        return (node.width + 1).bit_length()
+    if isinstance(node, Sext):
+        return node.dst_width
     return 32
 
 

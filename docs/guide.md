@@ -146,6 +146,63 @@ def drive():
 
 Simple assignments emit `assign`. Control flow emits `always @(*)`.
 
+### For-Loop Unrolling in `@comb`
+
+`for i in range(N)` is unrolled at compile time — each iteration becomes separate hardware. This is the standard way to express repetitive bit-level logic:
+
+```python
+from veripy import module, Input, Output, Signal, clz, ctz, popcount, sext
+from veripy.context import comb
+
+@module
+def bit_ops(width=8):
+    a      = Input(width)
+    lz     = Output(4)   # leading zeros
+    tz     = Output(4)   # trailing zeros
+    ones   = Output(4)   # population count
+    a_sext = Output(16)  # sign-extended
+
+    @comb
+    def compute():
+        lz     = clz(a)
+        tz     = ctz(a)
+        ones   = popcount(a)
+        a_sext = sext(a, 16)
+```
+
+`clz`, `ctz`, `popcount`, and `sext` are built-in primitives that lower to efficient Verilog functions and C builtins. For custom patterns, use explicit for loops:
+
+```python
+@comb
+def priority_encode():
+    # Last-write-wins: scan low→high, highest match sticks
+    out = 8  # default: not found
+    for i in range(8):
+        if a[i]:
+            out = 7 - i
+
+@comb
+def popcount_manual():
+    cnt = 0
+    for i in range(8):
+        if a[i]:
+            cnt = cnt + 1
+    out = cnt
+```
+
+Use `break` for priority encoding (first-match-wins). The loop unrolls into an if/elif chain:
+
+```python
+@comb
+def find_first():
+    out = 8  # default
+    for i in range(8):
+        if a[7 - i]:
+            out = i
+            break
+    # Equivalent to: if a[7]: out=0; elif a[6]: out=1; ...
+```
+
 ### `@always(posedge(signal))` — Sequential Logic
 
 ```python

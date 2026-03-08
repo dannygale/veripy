@@ -7,7 +7,7 @@ from copy import deepcopy
 
 from .ir import (
     Const, Sig, BinOp, UnaryOp, Compare, BoolOp, Mux,
-    Slice, Index, Concat,
+    Slice, Index, Concat, Clz, Ctz, Popcount, Sext,
     Assign, SliceAssign, If, Case, MemWrite,
     CombBlock, SeqBlock, IRModule,
 )
@@ -71,6 +71,10 @@ def _try_fold(node):
         return Index(_try_fold(node.signal), _try_fold(node.idx))
     if isinstance(node, Concat):
         return Concat([_try_fold(p) for p in node.parts])
+    if isinstance(node, (Clz, Ctz, Popcount)):
+        return type(node)(_try_fold(node.operand), node.width)
+    if isinstance(node, Sext):
+        return Sext(_try_fold(node.operand), node.src_width, node.dst_width)
     return node
 
 
@@ -106,6 +110,10 @@ def _subst_expr(node, const_map):
                      _subst_expr(node.idx, const_map))
     if isinstance(node, Concat):
         return Concat([_subst_expr(p, const_map) for p in node.parts])
+    if isinstance(node, (Clz, Ctz, Popcount)):
+        return type(node)(_subst_expr(node.operand, const_map), node.width)
+    if isinstance(node, Sext):
+        return Sext(_subst_expr(node.operand, const_map), node.src_width, node.dst_width)
     return node
 
 

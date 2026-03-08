@@ -590,3 +590,52 @@ class TrueDualPortMem:
             addr, val = self._pending_b
             self._data[addr] = val
             self._pending_b = None
+
+
+# ── Built-in bit-manipulation helpers ────────────────────────────────
+
+def clz(sig):
+    """Count leading zeros. Works in behavioral sim and @comb blocks."""
+    w = getattr(sig, '_width', None) or getattr(sig, 'width', 1)
+    def _fn():
+        v = int(sig)
+        if v == 0:
+            return w
+        for i in range(w - 1, -1, -1):
+            if (v >> i) & 1:
+                return w - 1 - i
+        return w
+    return _Expr(_fn, w.bit_length() if isinstance(w, int) else 7, 'clz', (sig,))
+
+
+def ctz(sig):
+    """Count trailing zeros. Works in behavioral sim and @comb blocks."""
+    w = getattr(sig, '_width', None) or getattr(sig, 'width', 1)
+    def _fn():
+        v = int(sig)
+        if v == 0:
+            return w
+        for i in range(w):
+            if (v >> i) & 1:
+                return i
+        return w
+    return _Expr(_fn, w.bit_length() if isinstance(w, int) else 7, 'ctz', (sig,))
+
+
+def popcount(sig):
+    """Population count (number of set bits). Works in behavioral sim and @comb blocks."""
+    w = getattr(sig, '_width', None) or getattr(sig, 'width', 1)
+    def _fn():
+        return bin(int(sig) & ((1 << w) - 1)).count('1')
+    return _Expr(_fn, w.bit_length() if isinstance(w, int) else 7, 'popcount', (sig,))
+
+
+def sext(sig, target_width):
+    """Sign-extend a signal to target_width. Works in behavioral sim and @comb blocks."""
+    src_w = getattr(sig, '_width', None) or getattr(sig, 'width', 1)
+    def _fn():
+        v = int(sig) & ((1 << src_w) - 1)
+        if (v >> (src_w - 1)) & 1:
+            v |= ((1 << target_width) - 1) ^ ((1 << src_w) - 1)
+        return v & ((1 << target_width) - 1)
+    return _Expr(_fn, target_width, 'sext', (sig,))
