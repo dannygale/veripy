@@ -813,7 +813,7 @@ def _dirty_set_lines(sigs, dirty_idx, indent: int = 1) -> list:
 # ── Top-level C emitter ──────────────────────────────────────────────
 
 
-def emit_c(ir: IRModule) -> str:
+def emit_c(ir: IRModule, coverage: bool = False) -> str:
     """Emit C source from a flat, topo-sorted IRModule.
 
     The module should have been processed through ``flatten_ir`` and
@@ -976,6 +976,47 @@ def emit_c(ir: IRModule) -> str:
     lines.append('static int _assert_fail = 0;')
     lines.append('')
 
+    # Pre-compute edge_blocks (needed for coverage metadata and Phase 2)
+    edge_blocks = {}
+    for i, blk in enumerate(ir.seq_blocks):
+        for edge_kind, sig_name in blk.edges:
+            phys = clock_aliases.get(sig_name, sig_name)
+            edge_blocks.setdefault((edge_kind, phys), []).append(i)
+
+    # ── Coverage statics ─────────────────────────────────────────
+    # cov_sigs: (name, width, read_expr) for toggle tracking — ports + regs only
+    cov_sigs = []
+    for name in struct_ordered:
+        if name.startswith('_prev_') or name.startswith('_nba_') or name.startswith('_dirty'):
+            continue
+        w = all_sigs.get(name, 1)
+        if name in pack_map:
+            word, bit = pack_map[name]
+            read_expr = f'((s->{word} >> {bit}ULL) & 1ULL)'
+        else:
+            read_expr = f's->{name}'
+        cov_sigs.append((name, w, read_expr))
+
+    # FSM detection: look for _fsm_state in regs
+    fsm_reg = next((r for r in ir.regs if r.name == '_fsm_state'), None)
+    fsm_n_states = 0
+    if fsm_reg is not None:
+        w = _resolve_width(fsm_reg.width, ir.params)
+        fsm_n_states = 1 << w  # upper bound; actual states may be fewer
+
+    n_cov_lines = len(merge_groups) + len(edge_blocks)  # comb groups + seq edge groups
+    n_cov_sigs = len(cov_sigs)
+
+    if coverage:
+        lines.append(f'static uint64_t _cov_line[{max(1, n_cov_lines)}];')
+        lines.append(f'static uint64_t _cov_tog_ones[{max(1, n_cov_sigs)}];')
+        lines.append(f'static uint64_t _cov_tog_zeros[{max(1, n_cov_sigs)}];')
+        if fsm_n_states > 0:
+            lines.append(f'static uint64_t _cov_fsm_visited;')
+            lines.append(f'static uint64_t _cov_fsm_prev;')
+            lines.append(f'static uint64_t _cov_fsm_trans[{max(1, fsm_n_states * fsm_n_states)}];')
+        lines.append('')
+
     # ── create / destroy ─────────────────────────────────────────
     lines.append('void* veripy_create(void) {')
     lines.append('    State* s = calloc(1, sizeof(State));')
@@ -1029,25 +1070,25 @@ def emit_c(ir: IRModule) -> str:
             all_stmts.extend(ir.comb_blocks[idx].stmts)
         body = []
         _emit_stmts_batched(all_stmts, body, sig_w, pack_map=pack_map)
+        if coverage:
+            lines.append(f'    _cov_line[{gi}]++;')
         lines.extend(body)
 
     # Clear dirty bits after initial comb settle
     lines.append(f'    memset(s->_dirty, 0, {n_dirty_words * 8});')
 
     # ── Phase 2: Sequential logic (edge-triggered) ──────────────
-    edge_blocks = {}
-    for i, blk in enumerate(ir.seq_blocks):
-        for edge_kind, sig_name in blk.edges:
-            phys = clock_aliases.get(sig_name, sig_name)
-            edge_blocks.setdefault((edge_kind, phys), []).append(i)
+    # edge_blocks already computed above (before coverage statics)
 
-    for (edge_kind, clk), block_ids in sorted(edge_blocks.items()):
+    for _seq_gi, ((edge_kind, clk), block_ids) in enumerate(sorted(edge_blocks.items())):
         clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
         if edge_kind == 'posedge':
             cond = f'{clk_expr} && !s->_prev_{clk}'
         else:
             cond = f'!{clk_expr} && s->_prev_{clk}'
         lines.append(f'    if ({cond}) {{')
+        if coverage:
+            lines.append(f'        _cov_line[{len(merge_groups) + _seq_gi}]++;')
         # NBA snapshot
         group_nba = set()
         for idx in block_ids:
@@ -1067,6 +1108,11 @@ def emit_c(ir: IRModule) -> str:
                 lines.append(f'        {_pack_write(name, f"s->_nba_{name}", pack_map)}')
             else:
                 lines.append(f'        s->{name} = s->_nba_{name};')
+        # FSM coverage: track visited states and transitions after NBA commit
+        if coverage and fsm_n_states > 0 and '_fsm_state' in group_nba:
+            lines.append(f'        _cov_fsm_trans[_cov_fsm_prev * {fsm_n_states} + s->_fsm_state] = 1;')
+            lines.append(f'        _cov_fsm_visited |= (1ULL << s->_fsm_state);')
+            lines.append(f'        _cov_fsm_prev = s->_fsm_state;')
         # Mark seq outputs dirty
         group_seq_writes: set = set()
         for idx in block_ids:
@@ -1131,6 +1177,14 @@ def emit_c(ir: IRModule) -> str:
     for clk in sorted(clocks):
         clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
         lines.append(f'    s->_prev_{clk} = {clk_expr};')
+
+    # ── Coverage: toggle tracking ─────────────────────────────────
+    if coverage:
+        for ci, (name, w, read_expr) in enumerate(cov_sigs):
+            mask = _mask(w)
+            lines.append(f'    {{ uint64_t _cv = {read_expr};')
+            lines.append(f'      _cov_tog_ones[{ci}] |= _cv & {mask};')
+            lines.append(f'      _cov_tog_zeros[{ci}] |= (~_cv) & {mask}; }}')
 
     lines.append('    _vcd_dump(s);')
     lines.append('}')
@@ -1219,6 +1273,35 @@ def emit_c(ir: IRModule) -> str:
     lines.append('    _vcd_time++;')
     lines.append('}')
     lines.append('')
+
+    # ── Coverage API ─────────────────────────────────────────────
+    if coverage:
+        lines.append(f'int veripy_cov_n_lines(void) {{ return {n_cov_lines}; }}')
+        lines.append(f'uint64_t veripy_cov_line(int i) {{ return _cov_line[i]; }}')
+        lines.append(f'int veripy_cov_n_sigs(void) {{ return {n_cov_sigs}; }}')
+        lines.append(f'uint64_t veripy_cov_tog_ones(int i) {{ return _cov_tog_ones[i]; }}')
+        lines.append(f'uint64_t veripy_cov_tog_zeros(int i) {{ return _cov_tog_zeros[i]; }}')
+        lines.append(f'int veripy_cov_n_fsm_states(void) {{ return {fsm_n_states}; }}')
+        if fsm_n_states > 0:
+            lines.append(f'uint64_t veripy_cov_fsm_visited(void) {{ return _cov_fsm_visited; }}')
+            lines.append(f'uint64_t veripy_cov_fsm_trans(int i) {{ return _cov_fsm_trans[i]; }}')
+        else:
+            lines.append(f'uint64_t veripy_cov_fsm_visited(void) {{ return 0; }}')
+            lines.append(f'uint64_t veripy_cov_fsm_trans(int i) {{ (void)i; return 0; }}')
+        lines.append('void veripy_cov_reset(void) {')
+        lines.append(f'    memset(_cov_line, 0, sizeof(_cov_line));')
+        lines.append(f'    memset(_cov_tog_ones, 0, sizeof(_cov_tog_ones));')
+        lines.append(f'    memset(_cov_tog_zeros, 0, sizeof(_cov_tog_zeros));')
+        if fsm_n_states > 0:
+            lines.append(f'    _cov_fsm_visited = 0; _cov_fsm_prev = 0;')
+            lines.append(f'    memset(_cov_fsm_trans, 0, sizeof(_cov_fsm_trans));')
+        lines.append('}')
+        lines.append('')
+        # Signal name table for Python to map index → name
+        sig_names_c = ', '.join(f'"{n}"' for n, _, _ in cov_sigs)
+        lines.append(f'static const char* _cov_sig_names[] = {{{sig_names_c}}};')
+        lines.append(f'const char* veripy_cov_sig_name(int i) {{ return _cov_sig_names[i]; }}')
+        lines.append('')
 
     # ── Per-signal set/get ───────────────────────────────────────
     for p in ir.ports:
@@ -1960,7 +2043,7 @@ def _emit_hier_eval(top_ir, lines):
 
 # ── Compile + load ───────────────────────────────────────────────────
 
-def compile_module(module, module_name=None, force_hier=False):
+def compile_module(module, module_name=None, force_hier=False, coverage=False):
     """Compile a VeriPy Module to a CSimModel.
 
     Uses hierarchical per-module compilation when the design has
@@ -1977,7 +2060,7 @@ def compile_module(module, module_name=None, force_hier=False):
 
     if top_ir.instances or force_hier:
         return CSimModel(top_ir, registry=registry)
-    return CSimModel(top_ir)
+    return CSimModel(top_ir, coverage=coverage)
 
 
 class CSimModel:
@@ -1986,10 +2069,11 @@ class CSimModel:
     Same API as VerilatorModel: set/get/eval/step/close.
     """
 
-    def __init__(self, ir: IRModule, build_dir=None, registry=None, trace=None):
+    def __init__(self, ir: IRModule, build_dir=None, registry=None, trace=None, coverage=False):
         self._ptr = None
         self._tmpdir = None
         self._lib = None
+        self._coverage = coverage
 
         if registry is not None:
             # Hierarchical path — per-module compilation
@@ -2002,7 +2086,7 @@ class CSimModel:
                                  '(call flatten_ir first)')
             ir = topo_sort_comb(ir)
             ir = _inline_cont_assigns(ir)
-            c_src = emit_c(ir)
+            c_src = emit_c(ir, coverage=coverage)
 
         from .dce import optimize
         ir = optimize(ir)
@@ -2077,6 +2161,24 @@ class CSimModel:
         self._lib.veripy_assert_failed.restype = ctypes.c_int
         self._lib.veripy_assert_clear.argtypes = []
 
+        # Coverage API (only bound when coverage=True and flat path)
+        if coverage and registry is None:
+            self._lib.veripy_cov_n_lines.restype = ctypes.c_int
+            self._lib.veripy_cov_line.restype = ctypes.c_uint64
+            self._lib.veripy_cov_line.argtypes = [ctypes.c_int]
+            self._lib.veripy_cov_n_sigs.restype = ctypes.c_int
+            self._lib.veripy_cov_tog_ones.restype = ctypes.c_uint64
+            self._lib.veripy_cov_tog_ones.argtypes = [ctypes.c_int]
+            self._lib.veripy_cov_tog_zeros.restype = ctypes.c_uint64
+            self._lib.veripy_cov_tog_zeros.argtypes = [ctypes.c_int]
+            self._lib.veripy_cov_n_fsm_states.restype = ctypes.c_int
+            self._lib.veripy_cov_fsm_visited.restype = ctypes.c_uint64
+            self._lib.veripy_cov_fsm_trans.restype = ctypes.c_uint64
+            self._lib.veripy_cov_fsm_trans.argtypes = [ctypes.c_int]
+            self._lib.veripy_cov_sig_name.restype = ctypes.c_char_p
+            self._lib.veripy_cov_sig_name.argtypes = [ctypes.c_int]
+            self._lib.veripy_cov_reset.argtypes = []
+
         if trace:
             self.trace_open(trace)
 
@@ -2094,6 +2196,44 @@ class CSimModel:
 
     def assert_clear(self):
         self._lib.veripy_assert_clear()
+
+    def get_coverage(self):
+        """Return coverage data as a dict (only valid when coverage=True, flat path).
+
+        Keys:
+          'line': list of (block_index, count)
+          'toggle': list of (signal_name, ones_mask, zeros_mask)
+          'fsm_visited': int bitmask of visited states (0 if no FSM)
+          'fsm_trans': list of (from_state, to_state) pairs seen
+        """
+        if not self._coverage:
+            return {}
+        lib = self._lib
+        n_lines = lib.veripy_cov_n_lines()
+        n_sigs = lib.veripy_cov_n_sigs()
+        n_fsm = lib.veripy_cov_n_fsm_states()
+        result = {
+            'line': [(i, lib.veripy_cov_line(i)) for i in range(n_lines)],
+            'toggle': [
+                (lib.veripy_cov_sig_name(i).decode(),
+                 lib.veripy_cov_tog_ones(i),
+                 lib.veripy_cov_tog_zeros(i))
+                for i in range(n_sigs)
+            ],
+            'fsm_visited': lib.veripy_cov_fsm_visited(),
+            'fsm_trans': [
+                (f, t)
+                for f in range(n_fsm)
+                for t in range(n_fsm)
+                if lib.veripy_cov_fsm_trans(f * n_fsm + t)
+            ] if n_fsm > 0 else [],
+        }
+        return result
+
+    def reset_coverage(self):
+        """Reset all coverage counters."""
+        if self._coverage:
+            self._lib.veripy_cov_reset()
 
     def set(self, name, val, idx=None):
         if idx is not None:

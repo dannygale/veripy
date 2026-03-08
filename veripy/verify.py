@@ -25,6 +25,26 @@ def _flush_coverage():
 atexit.register(_flush_coverage)
 
 
+def _merge_csim_coverage(cov):
+    """Merge csim structural coverage into the global coverage db."""
+    if not cov:
+        return
+    for i, count in cov.get('line', []):
+        if count:
+            _coverage_db[f'csim:line:{i}'] = _coverage_db.get(f'csim:line:{i}', 0) + count
+    for name, ones, zeros in cov.get('toggle', []):
+        key_ones = f'csim:toggle:{name}:ones'
+        key_zeros = f'csim:toggle:{name}:zeros'
+        _coverage_db[key_ones] = _coverage_db.get(key_ones, 0) | ones
+        _coverage_db[key_zeros] = _coverage_db.get(key_zeros, 0) | zeros
+    visited = cov.get('fsm_visited', 0)
+    if visited:
+        _coverage_db['csim:fsm:visited'] = _coverage_db.get('csim:fsm:visited', 0) | visited
+    for f, t in cov.get('fsm_trans', []):
+        key = f'csim:fsm:trans:{f}->{t}'
+        _coverage_db[key] = _coverage_db.get(key, 0) + 1
+
+
 def _collect_locals(stmts, declared, regs):
     """Scan IR stmts for Assign targets not in declared → add RegDecl."""
     from .ir import Assign, If, Repeat, ForLoop, RegDecl
@@ -332,8 +352,11 @@ class VeripyTestCase(unittest.TestCase):
         mod = self._mod
         module_name = type(mod).__name__.lower()
         try:
-            with csim_compile(mod, module_name, force_hier=force_hier) as cm:
+            with csim_compile(mod, module_name, force_hier=force_hier,
+                              coverage=not force_hier) as cm:
                 out = self._replay_stimuli(cm)
+                if not force_hier:
+                    _merge_csim_coverage(cm.get_coverage())
         except Exception:
             return False
         key = 'csim_hier' if force_hier else 'csim'
