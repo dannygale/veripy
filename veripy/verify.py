@@ -1,8 +1,22 @@
 """Dual-path test case: write one test, verify Python sim and iverilog agree."""
 
-import unittest, subprocess, tempfile, os
+import atexit, json, unittest, subprocess, tempfile, os
 from .signal import Signal, Mem, Interface
 from .sim import SimEngine
+
+# Global coverage accumulator: {cover_point_name: hit_count}
+_coverage_db = {}
+
+
+def _flush_coverage():
+    """Write accumulated coverage to VERIPY_COVERAGE_FILE if set."""
+    path = os.environ.get('VERIPY_COVERAGE_FILE')
+    if path and _coverage_db:
+        with open(path, 'w') as f:
+            json.dump(_coverage_db, f)
+
+
+atexit.register(_flush_coverage)
 
 
 def _collect_locals(stmts, declared, regs):
@@ -335,6 +349,10 @@ def _wrap_dual(fn):
             if not self._ran_sim:
                 self.run_sim()
         self._all_outputs['python'] = dict(self._py_outputs)
+
+        # Accumulate cover point hits into global db
+        for name, hits in self._mod.coverage_report():
+            _coverage_db[name] = _coverage_db.get(name, 0) + hits
 
         # Pass 2: iverilog
         # Reactive yields (until()) can't be lowered to Verilog — skip.
