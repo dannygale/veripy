@@ -635,6 +635,41 @@ def cmd_soc(args):
             print("(no firmware; pass --firmware <elf> to load)")
 
 
+def cmd_graph(args):
+    """Emit a DOT block diagram of the module hierarchy."""
+    from .viz import module_graph_dot
+    params = _parse_params(args.param)
+    modules = _load_modules(args.file, module_name=args.module, params=params)
+    if not modules:
+        sys.exit(f"error: no modules found in {args.file}")
+    name, instance = modules[0]
+    dot = module_graph_dot(instance, name=_to_snake(name))
+    if args.output:
+        with open(args.output, 'w') as f:
+            f.write(dot + '\n')
+        print(f"  {args.output}")
+    else:
+        print(dot)
+
+
+def cmd_stats(args):
+    """Print design statistics for a module."""
+    from .viz import module_stats
+    params = _parse_params(args.param)
+    modules = _load_modules(args.file, module_name=args.module, params=params)
+    if not modules:
+        sys.exit(f"error: no modules found in {args.file}")
+    for name, instance in modules:
+        s = module_stats(instance, name=_to_snake(name))
+        print(f"Module: {s['name']}")
+        print(f"  Ports:       {s['inputs']} inputs, {s['outputs']} outputs")
+        print(f"  Registers:   {s['registers']} ({s['reg_bits']} bits)")
+        print(f"  Memories:    {s['memories']} ({s['mem_bits']} bits)")
+        print(f"  Instances:   {s['instances']}")
+        print(f"  Comb blocks: {s['comb_blocks']}  Seq blocks: {s['seq_blocks']}")
+        print(f"  Comb depth:  ~{s['comb_depth_est']} (estimated)")
+
+
 def cmd_ip(args):
     """Manage installed VeriPy IP packages."""
     from .packaging import discover, scaffold
@@ -765,6 +800,19 @@ def main():
     p_soc_sim.add_argument("config", help="SoC config file (.yaml or .json)")
     p_soc_sim.add_argument("--firmware", metavar="ELF", help="Firmware ELF to load")
 
+    # graph
+    p_graph = sub.add_parser("graph", help="Emit DOT block diagram of module hierarchy")
+    p_graph.add_argument("file", help="Python file containing Module subclass(es)")
+    p_graph.add_argument("-o", "--output", help="Output .dot file (default: stdout)")
+    p_graph.add_argument("-m", "--module", help="Target a specific module by name")
+    p_graph.add_argument("-p", "--param", action="append", help="Module parameter (e.g. -p n=4)")
+
+    # stats
+    p_stats = sub.add_parser("stats", help="Print design statistics for a module")
+    p_stats.add_argument("file", help="Python file containing Module subclass(es)")
+    p_stats.add_argument("-m", "--module", help="Target a specific module by name")
+    p_stats.add_argument("-p", "--param", action="append", help="Module parameter (e.g. -p n=4)")
+
     # ip
     p_ip = sub.add_parser("ip", help="Manage VeriPy IP packages")
     ip_sub = p_ip.add_subparsers(dest="ip_command", required=True)
@@ -786,6 +834,7 @@ def main():
         "lint": cmd_lint, "formal": cmd_formal, "profile": cmd_profile,
         "equiv": cmd_equiv, "doc": cmd_doc, "ip": cmd_ip,
         "init": cmd_init, "soc": cmd_soc, "fpga": cmd_fpga,
+        "graph": cmd_graph, "stats": cmd_stats,
     }[args.command](args)
 
 
