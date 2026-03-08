@@ -223,9 +223,19 @@ def cmd_test(args):
             test_path = os.path.join(cfg["_dir"], cfg["test"]["path"])
 
     jobs = getattr(args, "jobs", None)
-    if jobs is not None:
+    seed = getattr(args, "seed", None)
+    save_baseline = getattr(args, "save_baseline", False)
+    regression = getattr(args, "regression", False)
+    if jobs is not None or seed is not None or save_baseline or regression:
         from .parallel_runner import run_parallel
-        sys.exit(run_parallel(test_path or "tests", jobs=jobs or None, verbose=args.verbose))
+        sys.exit(run_parallel(
+            test_path or "tests",
+            jobs=jobs or None,
+            verbose=args.verbose,
+            seed=seed,
+            save_baseline=save_baseline,
+            regression=regression,
+        ))
 
     argv = ["python", "-m", "unittest"]
     if test_path:
@@ -649,6 +659,12 @@ def main():
     p_test.add_argument("-v", "--verbose", action="store_true")
     p_test.add_argument("-j", "--jobs", nargs="?", const=0, type=int, metavar="N",
                         help="Run test files in parallel (N workers; default: cpu_count)")
+    p_test.add_argument("--seed", type=int, metavar="SEED",
+                        help="Fixed random seed for all tests (implies -j)")
+    p_test.add_argument("--save-baseline", action="store_true",
+                        help="Save pass/fail results as regression baseline")
+    p_test.add_argument("--regression", action="store_true",
+                        help="Compare results against saved baseline; fail on regressions")
 
     # import
     p_import = sub.add_parser("import", help="Convert Verilog to VeriPy Python")

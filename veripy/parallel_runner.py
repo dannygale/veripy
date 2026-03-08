@@ -2,11 +2,15 @@
 
 import json
 import os
+import random
 import subprocess
 import sys
 import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
+
+_SEEDS_FILE = ".veripy_seeds.json"
+_BASELINE_FILE = ".veripy_baseline.json"
 
 
 def _discover_test_files(path):
@@ -20,10 +24,8 @@ def _discover_test_files(path):
 
 
 def _run_file(args):
-    """Run a single test file; return (path, returncode, output)."""
-    path, verbose, coverage_file = args
-    cmd = [sys.executable, "-m", "unittest", path.replace(os.sep, ".").removesuffix(".py")]
-    # Convert file path to dotted module name relative to cwd
+    """Run a single test file; return (path, returncode, output, seed)."""
+    path, verbose, coverage_file, seed = args
     rel = os.path.relpath(path)
     module = rel.replace(os.sep, ".").removesuffix(".py")
     cmd = [sys.executable, "-m", "unittest", module]
@@ -32,9 +34,10 @@ def _run_file(args):
     env = os.environ.copy()
     if coverage_file:
         env['VERIPY_COVERAGE_FILE'] = coverage_file
+    env['VERIPY_SEED'] = str(seed)
     result = subprocess.run(cmd, capture_output=True, text=True, env=env)
-    output = result.stderr + result.stdout  # unittest writes to stderr
-    return path, result.returncode, output
+    output = result.stderr + result.stdout
+    return path, result.returncode, output, seed
 
 
 def _merge_coverage(coverage_files):
@@ -66,16 +69,55 @@ def _print_coverage(merged):
     print(f"{hit}/{total} cover points hit")
 
 
-def run_parallel(path, jobs=None, verbose=False):
+def _load_seeds(seed_file):
+    """Load seed map {path: seed} from file."""
+    if os.path.exists(seed_file):
+        try:
+            with open(seed_file) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_seeds(seed_map, seed_file):
+    """Persist seed map to file."""
+    with open(seed_file, "w") as f:
+        json.dump(seed_map, f, indent=2)
+
+
+def _load_baseline(baseline_file):
+    """Load baseline {path: 'pass'|'fail'} from file."""
+    if os.path.exists(baseline_file):
+        try:
+            with open(baseline_file) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_baseline(results, baseline_file):
+    """Save {path: 'pass'|'fail'} baseline."""
+    with open(baseline_file, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"Baseline saved to {baseline_file} ({len(results)} entries)")
+
+
+def run_parallel(path, jobs=None, verbose=False, seed=None,
+                 save_baseline=False, regression=False):
     """Discover and run test files under *path* in parallel.
 
     Args:
         path: Directory to discover tests in.
         jobs: Number of parallel workers (default: cpu_count).
         verbose: Pass -v to each test run.
+        seed: Fixed seed for all tests (int). If None, random seeds are used.
+        save_baseline: Write pass/fail results to .veripy_baseline.json.
+        regression: Compare results against .veripy_baseline.json and report regressions.
 
     Returns:
-        0 if all tests pass, 1 otherwise.
+        0 if all tests pass (and no regressions in regression mode), 1 otherwise.
     """
     files = _discover_test_files(path)
     if not files:
@@ -85,32 +127,43 @@ def run_parallel(path, jobs=None, verbose=False):
     workers = jobs or os.cpu_count() or 4
     workers = min(workers, len(files))
 
+    # Assign seeds: fixed seed fans out per-file, else random per file
+    if seed is not None:
+        rng = random.Random(seed)
+        seeds = {f: rng.randint(0, 2**31 - 1) for f in files}
+    else:
+        # Reuse recorded seeds for reproducibility; generate new ones otherwise
+        recorded = _load_seeds(_SEEDS_FILE)
+        seeds = {f: recorded.get(f, random.randint(0, 2**31 - 1)) for f in files}
+
     passed = []
     failed = []
+    results_map = {}  # path → 'pass'|'fail'
     t0 = time.monotonic()
 
     with tempfile.TemporaryDirectory() as cov_dir:
-        # Assign a unique coverage file to each test file
         cov_files = {f: os.path.join(cov_dir, f"{i}.json") for i, f in enumerate(files)}
 
         with ProcessPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(_run_file, (f, verbose, cov_files[f])): f
+                pool.submit(_run_file, (f, verbose, cov_files[f], seeds[f])): f
                 for f in files
             }
             for fut in as_completed(futures):
-                fpath, rc, output = fut.result()
+                fpath, rc, output, used_seed = fut.result()
                 name = os.path.basename(fpath)
-                # Extract summary line (last non-empty line of output)
                 lines = [l for l in output.splitlines() if l.strip()]
                 summary = lines[-1] if lines else ""
                 if rc == 0:
-                    passed.append(name)
+                    passed.append(fpath)
+                    results_map[fpath] = "pass"
                     status = "ok"
+                    print(f"  [{status:4s}] {name}  {summary}")
                 else:
-                    failed.append((name, output))
+                    failed.append((fpath, output, used_seed))
+                    results_map[fpath] = "fail"
                     status = "FAIL"
-                print(f"  [{status:4s}] {name}  {summary}")
+                    print(f"  [{status:4s}] {name}  {summary}  (seed={used_seed})")
 
         merged = _merge_coverage(list(cov_files.values()))
 
@@ -120,10 +173,38 @@ def run_parallel(path, jobs=None, verbose=False):
 
     _print_coverage(merged)
 
+    # Save seeds for all runs so failures can be replayed
+    _save_seeds({f: seeds[f] for f in files}, _SEEDS_FILE)
+
     if failed:
         print("\n--- Failures ---")
-        for name, output in failed:
-            print(f"\n=== {name} ===")
+        for fpath, output, used_seed in failed:
+            name = os.path.basename(fpath)
+            print(f"\n=== {name} (seed={used_seed}) ===")
             print(output)
-        return 1
-    return 0
+            print(f"  Replay: veripy test {fpath} --seed {used_seed}")
+
+    if save_baseline:
+        _save_baseline(results_map, _BASELINE_FILE)
+
+    if regression:
+        baseline = _load_baseline(_BASELINE_FILE)
+        if not baseline:
+            print("No baseline found. Run with --save-baseline first.", file=sys.stderr)
+            return 1
+        regressions = [f for f, r in results_map.items() if r == "fail" and baseline.get(f) == "pass"]
+        fixed = [f for f, r in results_map.items() if r == "pass" and baseline.get(f) == "fail"]
+        if regressions:
+            print("\n--- Regressions (newly failing) ---")
+            for f in regressions:
+                print(f"  REGRESSED  {os.path.basename(f)}")
+        if fixed:
+            print("\n--- Fixed (previously failing) ---")
+            for f in fixed:
+                print(f"  FIXED      {os.path.basename(f)}")
+        if not regressions and not fixed:
+            print("\nNo regressions.")
+        if regressions:
+            return 1
+
+    return 1 if failed else 0

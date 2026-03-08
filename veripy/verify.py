@@ -1,6 +1,12 @@
 """Dual-path test case: write one test, verify Python sim and iverilog agree."""
 
-import atexit, json, unittest, subprocess, tempfile, os
+import atexit, json, unittest, subprocess, tempfile, os, random
+
+# Seed Python's random from VERIPY_SEED if set (injected by parallel runner)
+_env_seed = os.environ.get('VERIPY_SEED')
+if _env_seed is not None:
+    random.seed(int(_env_seed))
+
 from .signal import Signal, Mem, Interface
 from .sim import SimEngine
 
