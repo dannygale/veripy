@@ -13,7 +13,8 @@ from .sim import until
 from .driver import Driver
 from .cdc import Synchronizer, AsyncFIFO
 from .ip import (SyncFifo, EdgeDetector, Debouncer, RoundRobinArbiter,
-                 PriorityArbiter, ClockDivider, CreditFlowControl, IntController)
+                 PriorityArbiter, ClockDivider, CreditFlowControl,
+                 IntController, DmaEngine)
 from .axi4lite import Axi4LiteBus, Axi4LiteSub
 from .axi4 import Axi4Bus, Axi4Sub
 from .csr import Field, Reg, RegisterMap

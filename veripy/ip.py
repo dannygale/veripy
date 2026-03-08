@@ -330,6 +330,117 @@ class CreditFlowControl(Module):
             self.recv_ready = 1 if self.cnt != credits else 0
 
 
+class DmaEngine(Module):
+    """Simple memory-to-memory DMA engine template.
+
+    Transfers *length* words from *src_addr* to *dst_addr* using a
+    generic read/write memory interface.  Assert ``start`` for one cycle
+    to begin a transfer; ``done`` pulses for one cycle on completion.
+
+    The read and write interfaces use a simple valid/ready handshake:
+
+    * **Read**: assert ``rd_en`` with ``rd_addr``; data arrives on
+      ``rd_data`` when ``rd_valid`` is high.
+    * **Write**: assert ``wr_en`` with ``wr_addr`` and ``wr_data``;
+      accepted when ``wr_ready`` is high.
+
+    Ports:
+        clock, reset   — system signals
+        start          — pulse to begin transfer
+        src_addr       — source start address
+        dst_addr       — destination start address
+        length         — number of words to transfer
+        done           — pulses for one cycle when transfer completes
+        busy           — high while transfer is in progress
+        rd_addr        — read address output
+        rd_en          — read enable output
+        rd_data        — read data input
+        rd_valid       — read data valid input
+        wr_addr        — write address output
+        wr_en          — write enable output
+        wr_data        — write data output
+        wr_ready       — write accepted input
+
+    Usage::
+
+        dma = DmaEngine(addr_width=32, data_width=32)
+    """
+
+    def __init__(self, addr_width=32, data_width=32):
+        self.clock    = Input()
+        self.reset    = Input()
+        self.start    = Input()
+        self.src_addr = Input(addr_width)
+        self.dst_addr = Input(addr_width)
+        self.length   = Input(addr_width)
+        self.done     = Output()
+        self.busy     = Output()
+
+        # Read interface
+        self.rd_addr  = Output(addr_width)
+        self.rd_en    = Output()
+        self.rd_data  = Input(data_width)
+        self.rd_valid = Input()
+
+        # Write interface
+        self.wr_addr  = Output(addr_width)
+        self.wr_en    = Output()
+        self.wr_data  = Output(data_width)
+        self.wr_ready = Input()
+
+        strb_width = data_width // 8
+
+        # State: 0=IDLE, 1=READ, 2=WRITE, 3=DONE
+        self.state    = Register(2)
+        self.cur_src  = Register(addr_width)
+        self.cur_dst  = Register(addr_width)
+        self.remain   = Register(addr_width)
+        self.rdbuf    = Register(data_width)   # read data buffer
+        super().__init__()
+
+        S_IDLE  = 0
+        S_READ  = 1
+        S_WRITE = 2
+        S_DONE  = 3
+
+        @self.posedge(self.clock)
+        def fsm():
+            if self.reset:
+                self.state   = S_IDLE
+                self.remain  = 0
+            elif self.state == S_IDLE:
+                if self.start:
+                    self.cur_src = self.src_addr
+                    self.cur_dst = self.dst_addr
+                    self.remain  = self.length
+                    self.state   = S_READ
+            elif self.state == S_READ:
+                if self.rd_valid:
+                    self.rdbuf  = self.rd_data
+                    self.state  = S_WRITE
+            elif self.state == S_WRITE:
+                if self.wr_ready:
+                    self.cur_src = self.cur_src + strb_width
+                    self.cur_dst = self.cur_dst + strb_width
+                    self.remain  = self.remain - 1
+                    if self.remain == 1:
+                        self.state = S_DONE
+                    else:
+                        self.state = S_READ
+            elif self.state == S_DONE:
+                self.state = S_IDLE
+
+        @self.comb
+        def outputs():
+            self.rd_addr = self.cur_src
+            self.rd_en   = 1 if self.state == S_READ else 0
+            self.wr_addr = self.cur_dst
+            self.wr_en   = 1 if self.state == S_WRITE else 0
+            self.wr_data = self.rdbuf
+            self.done    = 1 if self.state == S_DONE else 0
+            self.busy    = 1 if self.state != S_IDLE else 0
+
+
 class IntController(Module):
     """Edge-triggered interrupt controller for N interrupt sources.
 

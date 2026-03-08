@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
 from veripy import (VeripyTestCase, SyncFifo, EdgeDetector, Debouncer,
                     RoundRobinArbiter, PriorityArbiter, ClockDivider,
-                    CreditFlowControl, IntController)
+                    CreditFlowControl, IntController, DmaEngine)
 
 T = 5  # half-period
 
@@ -536,6 +536,102 @@ class TestIntControllerBasic(VeripyTestCase):
 
             self.assertEqual(self.out('ipr') & 1, 1)   # pending set
             self.assertEqual(self.out('irq_out'), 0)    # but not enabled
+
+
+# ── DmaEngine tests ──────────────────────────────────────────────────
+
+class TestDmaEngine(VeripyTestCase):
+    def create_module(self):
+        return DmaEngine(addr_width=16, data_width=32)
+
+    def test_single_word_transfer(self):
+        """Transfer one word: READ → WRITE → DONE."""
+        @self.always
+        def clock():
+            self.set(clock=0); yield T
+            self.set(clock=1); yield T
+
+        @self.initial
+        def stimulus():
+            self.set(reset=1, start=0, src_addr=0, dst_addr=0x100,
+                     length=0, rd_data=0, rd_valid=0, wr_ready=0)
+            yield T * 4
+            self.set(reset=0)
+            yield T * 2
+
+            # Start a 1-word transfer
+            self.set(start=1, src_addr=0x10, dst_addr=0x20, length=1)
+            yield T * 2
+            self.set(start=0)
+            yield T * 2
+
+            # DMA should be in READ state; rd_en=1
+            self.assertEqual(self.out('rd_en'), 1)
+            self.assertEqual(self.out('rd_addr'), 0x10)
+            self.assertEqual(self.out('busy'), 1)
+
+            # Provide read data
+            self.set(rd_data=0xABCD1234, rd_valid=1)
+            yield T * 2
+            self.set(rd_valid=0)
+            yield T * 2
+
+            # DMA should be in WRITE state; wr_en=1
+            self.assertEqual(self.out('wr_en'), 1)
+            self.assertEqual(self.out('wr_addr'), 0x20)
+            self.assertEqual(self.out('wr_data'), 0xABCD1234)
+
+            # Accept write
+            self.set(wr_ready=1)
+            yield T * 2                        # posedge → S_DONE
+            self.set(wr_ready=0)
+            # done is combinational — read before next posedge clears it
+            self.assertEqual(self.out('done'), 1)
+            self.assertEqual(self.out('busy'), 1)
+            yield T * 2                        # posedge → S_IDLE
+            # Back to IDLE
+            self.assertEqual(self.out('busy'), 0)
+            self.assertEqual(self.out('done'), 0)
+
+    def test_multi_word_transfer(self):
+        """Transfer 3 words sequentially."""
+        @self.always
+        def clock():
+            self.set(clock=0); yield T
+            self.set(clock=1); yield T
+
+        @self.initial
+        def stimulus():
+            self.set(reset=1, start=0, src_addr=0, dst_addr=0,
+                     length=0, rd_data=0, rd_valid=0, wr_ready=0)
+            yield T * 4
+            self.set(reset=0)
+            yield T * 2
+
+            self.set(start=1, src_addr=0, dst_addr=0x100, length=3)
+            yield T * 2
+            self.set(start=0)
+
+            words = [0x11111111, 0x22222222, 0x33333333]
+            for i, w in enumerate(words):
+                yield T * 2
+                self.assertEqual(self.out('rd_en'), 1)
+                self.assertEqual(self.out('rd_addr'), i * 4)
+                self.set(rd_data=w, rd_valid=1)
+                yield T * 2
+                self.set(rd_valid=0)
+                yield T * 2
+                self.assertEqual(self.out('wr_en'), 1)
+                self.assertEqual(self.out('wr_addr'), 0x100 + i * 4)
+                self.assertEqual(self.out('wr_data'), w)
+                self.set(wr_ready=1)
+                yield T * 2
+                self.set(wr_ready=0)
+
+            # done is combinational — read before next posedge clears it
+            self.assertEqual(self.out('done'), 1)
+            yield T * 2
+            self.assertEqual(self.out('busy'), 0)
 
 
 if __name__ == '__main__':
