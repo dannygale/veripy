@@ -468,7 +468,7 @@ def cmd_profile(args):
 
 
 def cmd_fpga(args):
-    """FPGA subcommands: build and boards."""
+    """FPGA subcommands: build, program, and boards."""
     if args.fpga_command == 'boards':
         from .fpga import BOARDS
         print(f"  {'Name':<12} {'Family':<8} {'Part':<22} {'Package'}")
@@ -558,6 +558,30 @@ def cmd_fpga(args):
         out_dir = args.output or "build"
         bitstream = synthesize(verilog_src, board, cs, top_snake, out_dir)
         print(f"Bitstream: {bitstream}")
+
+        if getattr(args, 'program', False):
+            from .backend_fpga import program
+            program(bitstream, board, programmer=getattr(args, 'programmer', None))
+
+    if args.fpga_command == 'program':
+        from .fpga import get_board
+        from .backend_fpga import program as _program
+
+        board_name = args.board
+        if not board_name:
+            from .config import load_config
+            cfg = load_config()
+            if cfg:
+                board_name = cfg.get("fpga", {}).get("board", "")
+        if not board_name:
+            sys.exit("error: --board <name> is required (or set [fpga] board in veripy.toml)")
+
+        try:
+            board = get_board(board_name)
+        except KeyError as e:
+            sys.exit(f"error: {e}")
+
+        _program(args.bitstream, board, programmer=args.programmer)
 
 
 def cmd_soc(args):
@@ -672,6 +696,15 @@ def main():
     p_fpga_build.add_argument("--map", action="append", metavar="PORT=BOARD_PIN",
                                help="Map module port to board pin (e.g. --map clk=CLK)")
     p_fpga_build.add_argument("-o", "--output", help="Output directory (default: build/)")
+    p_fpga_build.add_argument("--program", action="store_true",
+                               help="Program bitstream onto FPGA after synthesis")
+    p_fpga_build.add_argument("--programmer", choices=["iceprog", "openFPGALoader"],
+                               help="Programmer to use (default: auto-detected from board family)")
+    p_fpga_program = fpga_sub.add_parser("program", help="Program a bitstream onto an FPGA")
+    p_fpga_program.add_argument("bitstream", help="Bitstream file to program")
+    p_fpga_program.add_argument("--board", help="Target board name (e.g. icebreaker, ulx3s, arty)")
+    p_fpga_program.add_argument("--programmer", choices=["iceprog", "openFPGALoader"],
+                                 help="Programmer to use (default: auto-detected from board family)")
 
     # soc
     p_soc = sub.add_parser("soc", help="SoC builder commands")

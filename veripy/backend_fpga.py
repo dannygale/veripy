@@ -176,6 +176,31 @@ def _synth_quartus(
     return sof_path
 
 
+# ── Programming ───────────────────────────────────────────────────────────────
+
+def program(bitstream_path: str, board: Board, programmer: str | None = None) -> None:
+    """Program *bitstream_path* onto *board*.
+
+    Selects the programmer automatically based on board family unless
+    *programmer* is given explicitly (``"iceprog"`` or ``"openFPGALoader"``).
+
+    - ``ice40``: ``iceprog`` by default (``openFPGALoader`` also accepted)
+    - ``ecp5``, ``xilinx``, ``intel``, ``gowin``: ``openFPGALoader``
+    """
+    family = board.family
+    if programmer is None:
+        programmer = "iceprog" if family == "ice40" else "openFPGALoader"
+
+    if programmer == "iceprog":
+        cmd = ["iceprog", bitstream_path]
+    elif programmer == "openFPGALoader":
+        cmd = ["openFPGALoader", "-b", board.name, bitstream_path]
+    else:
+        sys.exit(f"error: unknown programmer '{programmer}'. Use 'iceprog' or 'openFPGALoader'")
+
+    _run(cmd, cwd=os.path.dirname(os.path.abspath(bitstream_path)))
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def synthesize(
