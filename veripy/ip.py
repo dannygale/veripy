@@ -328,3 +328,63 @@ class CreditFlowControl(Module):
         def output():
             self.send_ready = 1 if self.cnt != 0 else 0
             self.recv_ready = 1 if self.cnt != credits else 0
+
+
+class IntController(Module):
+    """Edge-triggered interrupt controller for N interrupt sources.
+
+    Each interrupt source has an enable bit (``ier``) and a pending bit
+    (``ipr``).  A rising edge on ``irq[i]`` sets ``ipr[i]``.  Software
+    clears pending bits by asserting the corresponding bit in ``ipr_clr``
+    for one cycle.  ``irq_out`` is asserted whenever any enabled interrupt
+    is pending.
+
+    Ports:
+        clock, reset   — system signals
+        irq            — N-bit interrupt request inputs (level, edge-detected)
+        irq_out        — 1-bit interrupt output to CPU
+        ier            — N-bit interrupt enable register (current value)
+        ier_we         — write enable for ier
+        ier_wdata      — write data for ier
+        ipr            — N-bit interrupt pending register (read-only)
+        ipr_clr        — N-bit write-1-to-clear for ipr
+
+    Usage::
+
+        ic = IntController(n=8)
+    """
+
+    def __init__(self, n=8):
+        self.clock     = Input()
+        self.reset     = Input()
+        self.irq       = Input(n)
+        self.irq_out   = Output()
+        self.ier       = Output(n)
+        self.ier_we    = Input()
+        self.ier_wdata = Input(n)
+        self.ipr       = Output(n)
+        self.ipr_clr   = Input(n)
+
+        self.ier_r  = Register(n)
+        self.ipr_r  = Register(n)
+        self.irq_d  = Register(n)   # previous irq for edge detection
+        super().__init__()
+
+        @self.posedge(self.clock)
+        def update():
+            if self.reset:
+                self.ier_r = 0
+                self.ipr_r = 0
+                self.irq_d = 0
+            else:
+                # Rising-edge detect: set pending bits; clear via ipr_clr
+                self.ipr_r = (self.ipr_r | (self.irq & ~self.irq_d)) & ~self.ipr_clr
+                self.irq_d = self.irq
+                if self.ier_we:
+                    self.ier_r = self.ier_wdata
+
+        @self.comb
+        def outputs():
+            self.ier     = self.ier_r
+            self.ipr     = self.ipr_r
+            self.irq_out = 1 if (self.ipr_r & self.ier_r) else 0

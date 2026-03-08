@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
 from veripy import (VeripyTestCase, SyncFifo, EdgeDetector, Debouncer,
                     RoundRobinArbiter, PriorityArbiter, ClockDivider,
-                    CreditFlowControl)
+                    CreditFlowControl, IntController)
 
 T = 5  # half-period
 
@@ -463,6 +463,79 @@ class TestIPVerilog(unittest.TestCase):
         self.assertIn('module creditflowcontrol', v)
         self.assertIn('send_ready', v)
         self.assertIn('recv_ready', v)
+
+
+# ── IntController tests ──────────────────────────────────────────────
+
+class TestIntControllerBasic(VeripyTestCase):
+    def create_module(self):
+        return IntController(n=4)
+
+    def test_irq_sets_pending(self):
+        """Rising edge on irq sets ipr bit; irq_out asserted when ier enabled."""
+        @self.always
+        def clock():
+            self.set(clock=0); yield T
+            self.set(clock=1); yield T
+
+        @self.initial
+        def stimulus():
+            self.set(reset=1, irq=0, ier_we=0, ier_wdata=0, ipr_clr=0)
+            yield T * 4
+            self.set(reset=0)
+            yield T * 2
+
+            # Enable interrupt 0
+            self.set(ier_we=1, ier_wdata=0b0001)
+            yield T * 2
+            self.set(ier_we=0)
+            yield T * 2
+
+            # irq_out should be 0 (no pending)
+            self.assertEqual(self.out('irq_out'), 0)
+
+            # Assert irq[0] (rising edge)
+            self.set(irq=0b0001)
+            yield T * 2
+            self.set(irq=0)
+            yield T * 2
+
+            # ipr[0] should be set, irq_out=1
+            self.assertEqual(self.out('ipr') & 1, 1)
+            self.assertEqual(self.out('irq_out'), 1)
+
+            # Clear pending bit
+            self.set(ipr_clr=0b0001)
+            yield T * 2
+            self.set(ipr_clr=0)
+            yield T * 2
+
+            # irq_out should be 0 again
+            self.assertEqual(self.out('irq_out'), 0)
+            self.assertEqual(self.out('ipr') & 1, 0)
+
+    def test_disabled_irq_no_output(self):
+        """Pending interrupt with ier=0 does not assert irq_out."""
+        @self.always
+        def clock():
+            self.set(clock=0); yield T
+            self.set(clock=1); yield T
+
+        @self.initial
+        def stimulus():
+            self.set(reset=1, irq=0, ier_we=0, ier_wdata=0, ipr_clr=0)
+            yield T * 4
+            self.set(reset=0)
+            yield T * 2
+
+            # irq fires but ier=0
+            self.set(irq=0b0001)
+            yield T * 2
+            self.set(irq=0)
+            yield T * 2
+
+            self.assertEqual(self.out('ipr') & 1, 1)   # pending set
+            self.assertEqual(self.out('irq_out'), 0)    # but not enabled
 
 
 if __name__ == '__main__':
