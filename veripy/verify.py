@@ -158,11 +158,26 @@ class TestBench(unittest.TestCase):
 
     # --- test API ---
 
+    @property
+    def module(self):
+        """The module under test."""
+        return self._mod
+
     def set(self, **kwargs):
         """Set input signal values."""
+        if self._replay_model is not None:
+            for name, val in kwargs.items():
+                self._replay_model.set(name, val)
+            return
         for name, val in kwargs.items():
             getattr(self._mod, name)._val = val
         self._trace_sets.append((self._engine.time, dict(kwargs)))
+
+    def get(self, name):
+        """Read a signal value from the current active model."""
+        if self._replay_model is not None:
+            return self._replay_model.get(name)
+        return int(getattr(self._mod, name))
 
     def out(self, name):
         """Read an output signal's current value and record for comparison."""
@@ -177,6 +192,44 @@ class TestBench(unittest.TestCase):
         """Run the event-driven simulation."""
         self._ran_sim = True
         self._engine.run()
+
+    def clock(self, name, period=10):
+        """Register a clock driver. Eliminates @self.always boilerplate."""
+        self._clock_name = name
+        self._clock_period = period
+        sig = getattr(self._mod, name)
+        self._engine.clock(sig, period)
+
+    def peripheral(self, fn):
+        """Register a combinational callback fired every time unit.
+
+        fn() may call self.get()/self.set() to read/write signals.
+        During behavioral sim: wrapped in @sim.always with yield 1.
+        During RTL replay: called after each model.eval().
+        """
+        self._peripherals.append(fn)
+        @self.always
+        def _periph():
+            fn()
+            yield 1
+        return fn
+
+    def run_testbench(self, clock, period=10):
+        """Decorator for linear coroutine testbench. Registers clock and runs sim.
+
+        Usage::
+
+            def test_foo(self):
+                @self.run_testbench(clock='clk', period=10)
+                def run():
+                    self.set(reset=1); yield 20
+                    self.assertEqual(self.out('count'), 5)
+        """
+        self.clock(clock, period)
+        def decorator(fn):
+            self.initial(fn)
+            self.run_sim()
+        return decorator
 
     def run(self, result=None):
         """Override to catch accidental self.run() in test methods."""
@@ -223,6 +276,10 @@ class TestBench(unittest.TestCase):
         self._py_outputs = {}      # {time: {name: val}}
         self._tb_always = []       # always block functions (for re-run)
         self._tb_initial = []      # initial block functions (for re-run)
+        self._clock_name = None    # clock signal name if clock() was called
+        self._clock_period = None  # clock period
+        self._peripherals = []     # peripheral callback functions
+        self._replay_model = None  # set during RTL replay to redirect set()/get()
         self._output_names = sorted(
             k for k in dir(self._mod)
             if isinstance(getattr(self._mod, k), Signal)
@@ -381,11 +438,15 @@ class TestBench(unittest.TestCase):
 
     def _replay_stimuli(self, model):
         """Replay recorded stimuli through a compiled model, return outputs dict."""
+        if self._clock_name is not None:
+            return self._replay_cycle_based(model)
+        return self._replay_time_based(model)
+
+    def _replay_time_based(self, model):
+        """Original time-based replay for tests without a registered clock."""
         model.eval()
         outputs = {}
         for t, sets in self._trace_sets:
-            # Capture outputs BEFORE applying this timestep's sets,
-            # matching Python sim where out() reads before set() at same time.
             if t in self._py_outputs and t not in outputs:
                 outputs[t] = {}
                 for name in self._py_outputs[t]:
@@ -393,12 +454,48 @@ class TestBench(unittest.TestCase):
             for name, val in sets.items():
                 model.set(name, val)
             model.eval()
-        # Capture outputs at times after the last trace_set
         for t in self._py_outputs:
             if t not in outputs:
                 outputs[t] = {}
                 for name in self._py_outputs[t]:
                     outputs[t][name] = model.get(name)
+        return outputs
+
+    def _replay_cycle_based(self, model):
+        """Cycle-based replay: toggle clock, call peripherals, capture outputs."""
+        half = self._clock_period // 2
+        max_time = self._engine.time
+
+        # Build non-clock sets by time
+        sets_by_time: dict = {}
+        for t, sets in self._trace_sets:
+            non_clk = {k: v for k, v in sets.items() if k != self._clock_name}
+            if non_clk:
+                sets_by_time.setdefault(t, {}).update(non_clk)
+
+        self._replay_model = model
+        try:
+            model.eval()
+            clk = 0
+            t = 0
+            outputs = {}
+            while t <= max_time:
+                if t in sets_by_time:
+                    for name, val in sets_by_time[t].items():
+                        model.set(name, val)
+                model.set(self._clock_name, clk)
+                model.eval()
+                for fn in self._peripherals:
+                    fn()
+                if self._peripherals:
+                    model.eval()
+                if t in self._py_outputs:
+                    outputs[t] = {name: model.get(name)
+                                  for name in self._py_outputs[t]}
+                clk ^= 1
+                t += half
+        finally:
+            self._replay_model = None
         return outputs
 
     def _run_verilator(self):
@@ -439,24 +536,35 @@ def _wrap_testbench(fn):
     """Wrap a test method to run configured backends, then compare outputs."""
     def wrapper(self):
         backends = _resolve_backends(self.__class__)
+        vcd_on_fail = (getattr(self.__class__, 'vcd_on_fail', False)
+                       or os.environ.get('VERIPY_VCD_ON_FAIL') == '1')
 
         # Pass 1: behavioral (Python sim) — always first if requested
         self._begin()
+        if vcd_on_fail:
+            vcd_path = f'{type(self).__name__}_{fn.__name__}.vcd'
+            self._engine = SimEngine(self._mod, vcd=vcd_path)
         self._all_outputs = {}
         self._ran_sim = False
-        if 'behavioral' in backends:
-            with self.subTest(backend='behavioral'):
+        try:
+            if 'behavioral' in backends:
+                with self.subTest(backend='behavioral'):
+                    fn(self)
+                    if not self._ran_sim:
+                        self.run_sim()
+                self._all_outputs['behavioral'] = dict(self._py_outputs)
+                for name, hits in self._mod.coverage_report():
+                    _coverage_db[name] = _coverage_db.get(name, 0) + hits
+            else:
+                # Still need to run the test to record stimuli for other backends
                 fn(self)
                 if not self._ran_sim:
                     self.run_sim()
-            self._all_outputs['behavioral'] = dict(self._py_outputs)
-            for name, hits in self._mod.coverage_report():
-                _coverage_db[name] = _coverage_db.get(name, 0) + hits
-        else:
-            # Still need to run the test to record stimuli for other backends
-            fn(self)
-            if not self._ran_sim:
-                self.run_sim()
+        except AssertionError:
+            if vcd_on_fail:
+                import sys
+                print(f'\nVCD written to {vcd_path}', file=sys.stderr)
+            raise
 
         # Pass 2: iverilog
         if 'iverilog' in backends:
@@ -493,3 +601,39 @@ class VeripyTestCase(TestBench):
     Equivalent to TestBench with backend='all'. Prefer TestBench for new code.
     """
     backend = 'all'
+
+
+class BehavioralTestCase(unittest.TestCase):
+    """Test case for behavioral-only testing — no clock, no timing.
+
+    Instantiates the module, sets inputs, evaluates comb/behavioral blocks,
+    and reads outputs. Runs in pure Python with no backend compilation.
+
+    Usage::
+
+        class TestAlu(BehavioralTestCase):
+            def create_module(self): return alu()
+
+            def test_add(self):
+                self.set(op=ADD, a=3, b=4)
+                self.assertEqual(self.out('result'), 7)
+    """
+
+    def create_module(self):
+        raise NotImplementedError
+
+    def setUp(self):
+        self._mod = self.create_module()
+        self._t = 0
+
+    def set(self, **kwargs):
+        """Set input signal values and evaluate."""
+        for name, val in kwargs.items():
+            getattr(self._mod, name)._val = val
+        self._mod._settle_comb()
+        if self._mod._behavioral is not None:
+            self._mod._behavioral()
+
+    def out(self, name):
+        """Read an output signal value."""
+        return int(getattr(self._mod, name))

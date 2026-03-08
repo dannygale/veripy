@@ -2526,7 +2526,10 @@ class CSimModel:
             self._lib.veripy_cov_reset.argtypes = []
 
         if trace:
+            self._trace = trace
             self.trace_open(trace)
+        else:
+            self._trace = None
 
     def trace_open(self, path):
         self._lib.veripy_trace_open(path.encode() if isinstance(path, str) else path)
@@ -2617,7 +2620,11 @@ class CSimModel:
 
     def close(self):
         if self._ptr:
-            self.trace_close()
+            if self._trace:
+                try:
+                    self.trace_close()
+                except Exception:
+                    pass
             self._lib.veripy_destroy(self._ptr)
             self._ptr = None
         if self._tmpdir:
@@ -2625,7 +2632,10 @@ class CSimModel:
             self._tmpdir = None
 
     def __del__(self):
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def __enter__(self):
         return self
