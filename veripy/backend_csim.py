@@ -19,6 +19,7 @@ from .ir import (
     ContAssign, CombBlock, SeqBlock, IRModule,
     Port, WireDecl, RegDecl, MemDecl,
     Delay, Display, Finish, ForLoop, Repeat, Disable,
+    SeqBool, SeqConcat, SeqRepeat, SeqImplication, TemporalProperty,
 )
 
 
@@ -374,6 +375,218 @@ def _expr(node, sig_w, pack_map=None) -> str:
             shift += pw
         return result
     raise ValueError(f'Unknown IR expr: {node}')
+
+
+# ── SVA temporal sequence compilation ───────────────────────────────
+
+def _seq_to_steps(node):
+    """Flatten a SeqExpr into a list of (expr, delay_before) pairs.
+
+    delay_before is the number of cycles to wait *before* checking expr,
+    relative to the previous step (or the trigger for step 0).
+    Returns None if the sequence is too complex to compile to a flat FSM.
+    """
+    if isinstance(node, SeqBool):
+        return [(node.expr, 0)]
+    if isinstance(node, SeqConcat):
+        if node.lo != node.hi:
+            return None  # range delays not supported in flat FSM
+        left = _seq_to_steps(node.left)
+        right = _seq_to_steps(node.right)
+        if left is None or right is None:
+            return None
+        result = list(left)
+        for i, (e, d) in enumerate(right):
+            result.append((e, node.lo + d if i == 0 else d))
+        return result
+    if isinstance(node, SeqRepeat):
+        if node.lo != node.hi or node.lo < 1:
+            return None
+        inner = _seq_to_steps(node.seq)
+        if inner is None:
+            return None
+        result = []
+        for _ in range(node.lo):
+            result.extend(inner)
+        return result
+    return None  # SeqAnd/SeqOr/SeqNot/SeqWithin/SeqEventually not supported
+
+
+def _emit_temporal_props_c(ir, lines, sig_w, pack_map, clock_aliases):
+    """Emit C FSM code for TemporalProperty nodes.
+
+    Adds static pending-check arrays and inserts FSM advancement into
+    the eval loop (called from Phase 4).  Returns a list of static
+    declarations to emit before veripy_eval().
+    """
+    if not ir.temporal_props:
+        return [], []
+
+    statics = []
+    eval_lines = []
+
+    for pi, prop in enumerate(ir.temporal_props):
+        if prop.kind not in ('assert', 'cover'):
+            continue
+
+        clk = clock_aliases.get(prop.clock, prop.clock)
+        clk_cur = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
+        if prop.edge == 'posedge':
+            edge_cond = f'({clk_cur} && !s->_prev_{clk})'
+        else:
+            edge_cond = f'(!{clk_cur} && s->_prev_{clk})'
+
+        seq = prop.seq
+
+        # ── Simple case: SeqBool → same as FormalProperty ────────
+        if isinstance(seq, SeqBool) and prop.kind == 'assert':
+            cond = _expr(seq.expr, sig_w, pack_map)
+            eval_lines.append(f'    if ({edge_cond} && !({cond})) {{')
+            eval_lines.append(f'        _assert_fail = 1; _assert_fail_prop = {pi};')
+            eval_lines.append(f'        _assert_fail_cycle = _eval_cycle;')
+            eval_lines.append(f'    }}')
+            continue
+
+        # ── Implication: SeqImplication(SeqBool(ant), cons) ──────
+        if isinstance(seq, SeqImplication) and isinstance(seq.antecedent, SeqBool):
+            cons_steps = _seq_to_steps(seq.consequent)
+            if cons_steps is not None:
+                ant_expr = _expr(seq.antecedent.expr, sig_w, pack_map)
+                # For non-overlapping (|=>), add 1 cycle before first cons step
+                if not seq.overlapping:
+                    e0, d0 = cons_steps[0]
+                    cons_steps = [(e0, d0 + 1)] + cons_steps[1:]
+                _emit_pending_fsm(pi, prop.kind, cons_steps, ant_expr,
+                                  edge_cond, statics, eval_lines, sig_w, pack_map)
+                continue
+
+        # ── Sequence property (no implication) ───────────────────
+        steps = _seq_to_steps(seq)
+        if steps is not None:
+            # Trigger on every clock edge; first step checked immediately
+            _emit_pending_fsm(pi, prop.kind, steps, None,
+                              edge_cond, statics, eval_lines, sig_w, pack_map)
+            continue
+
+        # Unsupported — emit a comment
+        eval_lines.append(f'    /* temporal property {prop.name!r}: too complex for csim FSM */')
+
+    return statics, eval_lines
+
+
+def _emit_pending_fsm(pi, kind, steps, trigger_expr,
+                      edge_cond, statics, eval_lines, sig_w, pack_map):
+    """Emit static arrays and eval-loop code for a pending-check FSM.
+
+    Delay semantics in the pending array:
+      delay=0  → check on the NEXT clock edge
+      delay=N  → check N+1 clock edges from now
+
+    When a step has delay d in the step list:
+      d=0 → check immediately (at the same clock edge as the trigger/previous step)
+      d>0 → add pending entry with delay=d-1
+    """
+    n = len(steps)
+    max_p = 16
+    p = f'_seq_p{pi}'
+
+    statics.append(f'static int8_t  {p}_step[{max_p}];')
+    statics.append(f'static int16_t {p}_dly[{max_p}];')
+    statics.append(f'static int     {p}_n = 0;')
+
+    eval_lines.append(f'    if ({edge_cond}) {{')
+
+    # Advance existing pending checks
+    eval_lines.append(f'        for (int _i = 0; _i < {p}_n; ) {{')
+    eval_lines.append(f'            if ({p}_dly[_i] > 0) {{ {p}_dly[_i]--; _i++; continue; }}')
+    eval_lines.append(f'            int _st = {p}_step[_i];')
+
+    for si, (expr, _delay) in enumerate(steps):
+        cond = _expr(expr, sig_w, pack_map)
+        next_si = si + 1
+        eval_lines.append(f'            if (_st == {si}) {{')
+        if kind == 'assert':
+            eval_lines.append(f'                if (!({cond})) {{')
+            eval_lines.append(f'                    _assert_fail = 1; _assert_fail_prop = {pi};')
+            eval_lines.append(f'                    _assert_fail_cycle = _eval_cycle;')
+            eval_lines.append(f'                }}')
+        if next_si < n:
+            next_delay = steps[next_si][1]
+            if next_delay == 0:
+                # Check next step immediately in the same clock edge
+                next_cond = _expr(steps[next_si][0], sig_w, pack_map)
+                if kind == 'assert':
+                    eval_lines.append(f'                if (!({next_cond})) {{')
+                    eval_lines.append(f'                    _assert_fail = 1; _assert_fail_prop = {pi};')
+                    eval_lines.append(f'                    _assert_fail_cycle = _eval_cycle;')
+                    eval_lines.append(f'                }}')
+                # Remove entry (sequence done after immediate check)
+                eval_lines.append(f'                {p}_step[_i] = {p}_step[--{p}_n];')
+                eval_lines.append(f'                {p}_dly[_i] = {p}_dly[{p}_n];')
+                eval_lines.append(f'                continue;')
+            else:
+                eval_lines.append(f'                {p}_step[_i] = {next_si};')
+                eval_lines.append(f'                {p}_dly[_i] = {next_delay - 1};')
+                eval_lines.append(f'                _i++; continue;')
+        else:
+            eval_lines.append(f'                {p}_step[_i] = {p}_step[--{p}_n];')
+            eval_lines.append(f'                {p}_dly[_i] = {p}_dly[{p}_n];')
+            eval_lines.append(f'                continue;')
+        eval_lines.append(f'            }}')
+
+    eval_lines.append(f'            _i++;')
+    eval_lines.append(f'        }}')
+
+    # Add new pending entry on trigger (or unconditionally for sequence props)
+    if trigger_expr is not None:
+        eval_lines.append(f'        if ({trigger_expr}) {{')
+    else:
+        eval_lines.append(f'        {{')
+
+    first_delay = steps[0][1]
+    if first_delay == 0:
+        # Check step 0 immediately at the trigger clock edge
+        cond0 = _expr(steps[0][0], sig_w, pack_map)
+        if n == 1:
+            # Single-step: check now, no pending entry needed
+            if kind == 'assert':
+                eval_lines.append(f'            if (!({cond0})) {{')
+                eval_lines.append(f'                _assert_fail = 1; _assert_fail_prop = {pi};')
+                eval_lines.append(f'                _assert_fail_cycle = _eval_cycle;')
+                eval_lines.append(f'            }}')
+        else:
+            # Multi-step: step 0 is a trigger (vacuously true if false).
+            # Only enqueue step 1 if step 0 is true.
+            # For implication (trigger_expr set), step 0 of consequent is an assertion.
+            next_delay = steps[1][1]
+            if trigger_expr is not None and kind == 'assert':
+                # Consequent step 0 must hold
+                eval_lines.append(f'            if (!({cond0})) {{')
+                eval_lines.append(f'                _assert_fail = 1; _assert_fail_prop = {pi};')
+                eval_lines.append(f'                _assert_fail_cycle = _eval_cycle;')
+                eval_lines.append(f'            }} else if ({p}_n < {max_p}) {{')
+            else:
+                # Sequence property: step 0 is trigger, no failure if false
+                eval_lines.append(f'            if (({cond0}) && {p}_n < {max_p}) {{')
+            if next_delay == 0:
+                # Check step 1 immediately too
+                cond1 = _expr(steps[1][0], sig_w, pack_map)
+                if kind == 'assert':
+                    eval_lines.append(f'                if (!({cond1})) {{')
+                    eval_lines.append(f'                    _assert_fail = 1; _assert_fail_prop = {pi};')
+                    eval_lines.append(f'                    _assert_fail_cycle = _eval_cycle;')
+                    eval_lines.append(f'                }}')
+            else:
+                eval_lines.append(f'                {p}_step[{p}_n] = 1; {p}_dly[{p}_n] = {next_delay - 1}; {p}_n++;')
+            eval_lines.append(f'            }}')
+    else:
+        # Step 0 has a delay: add pending entry
+        eval_lines.append(f'            if ({p}_n < {max_p}) {{')
+        eval_lines.append(f'                {p}_step[{p}_n] = 0; {p}_dly[{p}_n] = {first_delay - 1}; {p}_n++;')
+        eval_lines.append(f'            }}')
+
+    eval_lines.append(f'        }}')
+    eval_lines.append(f'    }}')
 
 
 def _expr_width(node, sig_w) -> int:
@@ -974,6 +1187,9 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
     lines.append('')
     lines.append('static void _vcd_dump(State* s);')
     lines.append('static int _assert_fail = 0;')
+    lines.append('static int _assert_fail_prop = -1;')
+    lines.append('static uint64_t _assert_fail_cycle = 0;')
+    lines.append('static uint64_t _eval_cycle = 0;')
     lines.append('')
 
     # Pre-compute edge_blocks (needed for coverage metadata and Phase 2)
@@ -1017,6 +1233,14 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
             lines.append(f'static uint64_t _cov_fsm_trans[{max(1, fsm_n_states * fsm_n_states)}];')
         lines.append('')
 
+    # ── Temporal property pending-check statics ───────────────────
+    _temporal_statics, _temporal_eval = _emit_temporal_props_c(
+        ir, lines, sig_w, pack_map, clock_aliases)
+    for s in _temporal_statics:
+        lines.append(s)
+    if _temporal_statics:
+        lines.append('')
+
     # ── create / destroy ─────────────────────────────────────────
     lines.append('void* veripy_create(void) {')
     lines.append('    State* s = calloc(1, sizeof(State));')
@@ -1043,6 +1267,7 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
 
     lines.append('void veripy_eval(void* p) {')
     lines.append('    State* s = (State*)p;')
+    lines.append('    _eval_cycle++;')
 
     # Declare promoted locals as C local variables
     for name in sorted(promoted_locals):
@@ -1173,6 +1398,9 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
         lines.append(f'        _assert_fail = 1;')
         lines.append(f'    }}')
 
+    # ── Phase 4b: Temporal property FSMs ─────────────────────────
+    lines.extend(_temporal_eval)
+
     # ── Phase 5: Update previous values ──────────────────────────
     for clk in sorted(clocks):
         clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
@@ -1218,7 +1446,11 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
     lines.append(f'static uint64_t _vcd_time = 0;')
     lines.append('')
     lines.append('int veripy_assert_failed(void) { return _assert_fail; }')
-    lines.append('void veripy_assert_clear(void) { _assert_fail = 0; }')
+    lines.append('void veripy_assert_clear(void) { _assert_fail = 0; _assert_fail_prop = -1; _assert_fail_cycle = 0; }')
+    lines.append('void veripy_assert_info(int* prop_out, uint64_t* cycle_out) {')
+    lines.append('    if (prop_out) *prop_out = _assert_fail_prop;')
+    lines.append('    if (cycle_out) *cycle_out = _assert_fail_cycle;')
+    lines.append('}')
     lines.append('')
 
     # VCD header writer
@@ -2160,6 +2392,8 @@ class CSimModel:
         self._lib.veripy_trace_enable.argtypes = [ctypes.c_int]
         self._lib.veripy_assert_failed.restype = ctypes.c_int
         self._lib.veripy_assert_clear.argtypes = []
+        self._lib.veripy_assert_info.argtypes = [
+            ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_uint64)]
 
         # Coverage API (only bound when coverage=True and flat path)
         if coverage and registry is None:
@@ -2196,6 +2430,13 @@ class CSimModel:
 
     def assert_clear(self):
         self._lib.veripy_assert_clear()
+
+    def assert_info(self):
+        """Return (prop_index, cycle) of the last assertion failure, or (-1, 0)."""
+        prop = ctypes.c_int(-1)
+        cycle = ctypes.c_uint64(0)
+        self._lib.veripy_assert_info(ctypes.byref(prop), ctypes.byref(cycle))
+        return prop.value, cycle.value
 
     def get_coverage(self):
         """Return coverage data as a dict (only valid when coverage=True, flat path).
