@@ -77,7 +77,88 @@ def _parse_params(raw):
     return params
 
 
+def cmd_init(args):
+    """Scaffold a new VeriPy project with veripy.toml and directory structure."""
+    import textwrap
+    name = args.name
+    dest = os.path.abspath(args.output or name)
+
+    toml_path = os.path.join(dest, "veripy.toml")
+    if os.path.exists(toml_path):
+        sys.exit(f"error: {toml_path} already exists")
+
+    os.makedirs(os.path.join(dest, "src"), exist_ok=True)
+    os.makedirs(os.path.join(dest, "tests"), exist_ok=True)
+    os.makedirs(os.path.join(dest, "rtl"), exist_ok=True)
+
+    with open(toml_path, "w") as f:
+        f.write(textwrap.dedent(f"""\
+            [project]
+            name = "{name}"
+            version = "0.1.0"
+
+            [build]
+            top = "src/top.py"
+            output = "rtl/"
+
+            [test]
+            path = "tests/"
+        """))
+
+    top_py = os.path.join(dest, "src", "top.py")
+    with open(top_py, "w") as f:
+        f.write(textwrap.dedent(f"""\
+            from veripy import module, Input, Output, Register, posedge
+            from veripy.context import comb, always
+
+
+            @module
+            def top(width=8):
+                clock  = Input()
+                reset  = Input()
+                enable = Input()
+                count  = Output(width)
+                cnt    = Register(width)
+
+                @comb
+                def drive():
+                    count = cnt
+
+                @always(posedge(clock))
+                def seq():
+                    if reset:
+                        cnt = 0
+                    elif enable:
+                        cnt = cnt + 1
+        """))
+
+    print(f"Initialized VeriPy project '{name}' in {dest}/")
+    print(f"  {os.path.relpath(toml_path, dest)}")
+    print(f"  src/top.py")
+    print(f"  tests/")
+    print(f"  rtl/")
+    print(f"\nNext: veripy build  (from {dest}/)")
+
+
 def cmd_build(args):
+    # If no file given, try loading from veripy.toml
+    if not args.file:
+        from .config import load_config
+        cfg = load_config()
+        if cfg is None:
+            sys.exit("error: no file given and no veripy.toml found")
+        build = cfg["build"]
+        if not build["top"]:
+            sys.exit("error: [build] top is not set in veripy.toml")
+        # Resolve relative to config dir
+        args.file = os.path.join(cfg["_dir"], build["top"])
+        if not args.output:
+            args.output = os.path.join(cfg["_dir"], build["output"])
+        if not args.module and build["module"]:
+            args.module = build["module"]
+        if not args.param and build["params"]:
+            args.param = [f"{k}={v}" for k, v in build["params"].items()]
+
     params = _parse_params(args.param)
     modules = _load_modules(args.file, module_name=args.module, params=params)
     if not modules:
@@ -126,9 +207,16 @@ def cmd_build(args):
 
 
 def cmd_test(args):
+    test_path = args.path
+    if not test_path:
+        from .config import load_config
+        cfg = load_config()
+        if cfg is not None:
+            test_path = os.path.join(cfg["_dir"], cfg["test"]["path"])
+
     argv = ["python", "-m", "unittest"]
-    if args.path:
-        argv += ["discover", "-s", args.path, "-p", "test_*.py"]
+    if test_path:
+        argv += ["discover", "-s", test_path, "-p", "test_*.py"]
     else:
         argv += ["discover", "-p", "test_*.py"]
     if args.verbose:
@@ -171,6 +259,17 @@ def cmd_import(args):
 
 def cmd_lint(args):
     from .lint import lint
+    if not args.file:
+        from .config import load_config
+        cfg = load_config()
+        if cfg is None:
+            sys.exit("error: no file given and no veripy.toml found")
+        build = cfg["build"]
+        if not build["top"]:
+            sys.exit("error: [build] top is not set in veripy.toml")
+        args.file = os.path.join(cfg["_dir"], build["top"])
+        if not args.module and build["module"]:
+            args.module = build["module"]
     modules = _load_modules(args.file, module_name=args.module)
     if not modules:
         sys.exit(f"error: no modules found in {args.file}")
@@ -398,7 +497,7 @@ def main():
 
     # build
     p_build = sub.add_parser("build", help="Emit and compile-check Verilog from a Python module")
-    p_build.add_argument("file", help="Python file containing Module subclass(es)")
+    p_build.add_argument("file", nargs="?", help="Python file containing Module subclass(es) (default: from veripy.toml)")
     p_build.add_argument("-o", "--output", help="Output directory for .v files (default: stdout)")
     p_build.add_argument("-m", "--module", help="Target a specific Module subclass by name")
     p_build.add_argument("-p", "--param", action="append", help="Module parameter (e.g. -p n=4)")
@@ -415,7 +514,7 @@ def main():
 
     # lint
     p_lint = sub.add_parser("lint", help="Run static checks on a VeriPy module")
-    p_lint.add_argument("file", help="Python file containing Module subclass(es)")
+    p_lint.add_argument("file", nargs="?", help="Python file containing Module subclass(es) (default: from veripy.toml)")
     p_lint.add_argument("-m", "--module", help="Target a specific Module subclass by name")
 
     # formal
@@ -459,10 +558,16 @@ def main():
     p_ip_init.add_argument("name", help="IP package name (e.g. 'axi' creates veripy-axi)")
     p_ip_init.add_argument("-o", "--output", help="Output directory (default: current dir)")
 
+    # init
+    p_init = sub.add_parser("init", help="Scaffold a new VeriPy project with veripy.toml")
+    p_init.add_argument("name", help="Project name")
+    p_init.add_argument("-o", "--output", help="Output directory (default: ./<name>)")
+
     args = parser.parse_args()
     {"build": cmd_build, "test": cmd_test, "import": cmd_import,
      "lint": cmd_lint, "formal": cmd_formal, "profile": cmd_profile,
-     "equiv": cmd_equiv, "doc": cmd_doc, "ip": cmd_ip}[args.command](args)
+     "equiv": cmd_equiv, "doc": cmd_doc, "ip": cmd_ip,
+     "init": cmd_init}[args.command](args)
 
 
 if __name__ == "__main__":
