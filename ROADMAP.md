@@ -447,3 +447,126 @@ Current IP library covers FIFOs, arbiters, edge detectors, clock dividers. Large
 - Debug transport (JTAG TAP BlackBox + debug module)
 
 Priority: Low — build as needed by real designs.
+
+## FPGA build flow
+
+VeriPy currently emits Verilog and generates Tcl scripts, but doesn't drive synthesis or produce bitstreams. A full FPGA build flow would let you go from Python to programmed FPGA in one command.
+
+### Board and platform definitions
+
+Declarative board descriptions: FPGA part, pin maps, clock sources, IO standards. Used by the constraint manager and synthesis drivers.
+
+### Constraint management
+
+Pins, timing, and IO standards as first-class objects (Python or YAML), not loose XDC/SDC files. Constraints travel with the design and are validated against the board definition.
+
+### Synthesis drivers
+
+- Yosys+nextpnr for open-source targets (iCE40, ECP5, Gowin) — high priority, no vendor licenses needed
+- Vivado batch mode driver — medium priority
+- Quartus batch mode driver — medium priority
+
+### CLI
+
+`veripy build --target <board>` selects the board, applies constraints, invokes the appropriate synthesis flow, and produces a bitstream. `veripy program` flashes it via iceprog/openFPGALoader.
+
+### Built-in boards
+
+Ship definitions for common dev boards: iCEBreaker, ULX3S, Arty A7, DE10-Nano.
+
+Priority: High — needed to close the loop from design to hardware.
+
+## Declarative SoC builder
+
+Define SoCs in YAML/JSON. Generate interconnect, address decode, CSRs, C headers, linker scripts, and documentation from one config file.
+
+### SoC YAML schema
+
+```yaml
+cpu:
+  type: rv32i
+  isa: [m, c]
+
+bus: axi4lite
+address_width: 32
+data_width: 32
+
+memory:
+  - name: sram
+    base: 0x00000000
+    size: 64K
+
+peripherals:
+  - name: uart0
+    type: uart
+    base: 0x10000000
+    params: { baud: 115200 }
+  - name: spi0
+    type: spi_controller
+    base: 0x20000000
+    params: { width: 8, fifo_depth: 16 }
+  - name: gpio0
+    type: gpio
+    base: 0x30000000
+    params: { width: 32 }
+
+platform:
+  board: icebreaker
+  clock: 12MHz
+```
+
+### What it generates
+
+- Top-level module: CPU + peripherals + interconnect, fully wired
+- AXI4-Lite crossbar with address decode logic
+- Memory map with overlap detection
+- C headers: register addresses, bitfield macros, peripheral base addresses
+- Linker script from memory map
+- Documentation: memory map table, peripheral summary
+
+### CLI
+
+`veripy soc build <config.yaml>` — emit Verilog for the full SoC.
+
+### Comparison to existing tools
+
+- LiteX: Python-imperative SoC builder (Migen-based). Powerful but steep learning curve, no declarative config.
+- Topwrap (Antmicro): YAML-based block assembly, but wraps existing RTL — doesn't own the IP definitions.
+- VeriPy advantage: owns the IP (VeriPy modules), so it can simulate the full SoC natively, generate interconnect, and build bitstreams from one tool.
+
+Priority: Critical — the centerpiece feature for SoC design.
+
+## Firmware co-simulation
+
+Load firmware ELF into simulated SoC, run on CPU model, interact with peripherals. Boot and debug firmware before silicon exists.
+
+- ELF loader: parse sections, load into simulated memory
+- SoC simulator wrapper: assemble CPU + peripherals + memory into runnable sim
+- UART/console bridge: capture peripheral output during simulation
+- GDB stub: remote debug firmware on simulated CPU
+- CLI: `veripy soc sim <config.yaml> --firmware <firmware.elf>`
+
+Supports csim and Verilator backends for performance.
+
+Priority: High — the payoff of the SoC builder. Depends on soc-builder.
+
+## Bus functional models
+
+Reusable transaction-level bus models for driving and monitoring bus transactions from testbenches.
+
+- AXI4-Lite master/slave BFM
+- AXI4 full master/slave BFM (burst, outstanding transactions)
+- Wishbone and APB BFMs
+- Bus monitor: protocol checker, transaction logger, coverage collector
+
+Priority: Medium — needed for SoC-level verification.
+
+## FPGA-in-the-loop
+
+Synthesize design to FPGA, drive it from the same Python testbench used for simulation. Bridge between host Python and FPGA via UART/JTAG/USB.
+
+- Host-FPGA communication bridge
+- Testbench adapter: same API targeting sim or hardware
+- Signal sampling and stimulus injection
+
+Priority: Low — advanced verification capability. Depends on fpga-build.
