@@ -48,13 +48,14 @@ def _to_snake(name):
 class _Lowerer:
     """Lowers Python AST blocks into IR, with full name resolution."""
 
-    def __init__(self, signals, mems, submodules, interfaces, params, module=None):
+    def __init__(self, signals, mems, submodules, interfaces, params, module=None, port_arrays=None):
         self.signals = signals
         self.mems = mems
         self.submodules = submodules
         self.interfaces = interfaces
         self.params = params
         self._module = module
+        self.port_arrays = port_arrays or {}  # name → [sig_name_0, sig_name_1, ...]
         self._func = None          # current function being lowered
         self._reg_locals = {}      # name → width for Register locals
         self._all_reg_locals = {}  # accumulated across blocks
@@ -245,6 +246,15 @@ class _Lowerer:
                 return Compare(op, self._expr(node.left), self._expr(node.comparators[0]))
 
         if isinstance(node, ast.Subscript):
+            # self.port_array[i] → Sig('port_array_i') when i is a constant
+            if (isinstance(node.value, ast.Attribute) and self._is_self(node.value.value)):
+                attr = node.value.attr
+                if attr in self.port_arrays:
+                    try:
+                        idx = self._const_eval(node.slice)
+                        return Sig(self.port_arrays[attr][idx])
+                    except Exception:
+                        pass
             val = self._expr(node.value)
             sl = node.slice
             if isinstance(sl, ast.Slice):
@@ -317,6 +327,13 @@ class _Lowerer:
             # self.x[slice] = val
             if isinstance(target, ast.Subscript) and self._is_self_target(target):
                 tname = self._target_name(target.value)
+                # Port array assignment: self.port_array[i] = val → Assign('port_array_i', val)
+                if tname in self.port_arrays:
+                    try:
+                        idx = self._const_eval(target.slice)
+                        return [Assign(self.port_arrays[tname][idx], self._expr(stmt.value), blocking)]
+                    except Exception:
+                        pass
                 sl = target.slice
                 if isinstance(sl, ast.Slice):
                     hi = self._expr(sl.lower) if sl.lower else None
@@ -393,6 +410,32 @@ class _Lowerer:
     # ── For loop unrolling ───────────────────────────────────────────
 
     def _lower_for(self, node, blocking):
+        # for var in self.port_array: → unroll over each signal
+        if (isinstance(node.iter, ast.Attribute) and self._is_self(node.iter.value)):
+            attr = node.iter.attr
+            if attr in self.port_arrays:
+                var = node.target.id
+                out = []
+                for sig_name in self.port_arrays[attr]:
+                    # Replace Name(var) with Attribute(self, sig_name) in body
+                    import copy
+                    body = copy.deepcopy(node.body)
+                    for n in ast.walk(ast.Module(body=body, type_ignores=[])):
+                        for field, child in ast.iter_fields(n):
+                            if isinstance(child, ast.Name) and child.id == var:
+                                setattr(n, field, ast.Attribute(
+                                    value=ast.Name(id='self', ctx=ast.Load()),
+                                    attr=sig_name, ctx=ast.Load()))
+                            elif isinstance(child, list):
+                                for i, item in enumerate(child):
+                                    if isinstance(item, ast.Name) and item.id == var:
+                                        child[i] = ast.Attribute(
+                                            value=ast.Name(id='self', ctx=ast.Load()),
+                                            attr=sig_name, ctx=ast.Load())
+                    ast.fix_missing_locations(ast.Module(body=body, type_ignores=[]))
+                    out.extend(self._stmts(body, blocking))
+                return out
+
         if not (isinstance(node.iter, ast.Call) and
                 isinstance(node.iter.func, ast.Name) and
                 node.iter.func.id == 'range'):
@@ -749,12 +792,22 @@ def lower_module(module, module_name=None):
                 signals[f'{k}_{sig_name}'] = sig
         elif isinstance(v, Signal):
             signals[k] = v
+        elif isinstance(v, list) and v and all(isinstance(s, Signal) for s in v):
+            for i, sig in enumerate(v):
+                signals[f'{k}_{i}'] = sig
     for k in dir(module):
         if k.startswith('_'):
             continue
         v = getattr(module, k)
         if isinstance(v, Module) and v is not module:
             submodules[k] = v
+
+    # Collect port arrays (name → list of signal names)
+    port_arrays = {}
+    for k in dir(module):
+        v = getattr(module, k, None)
+        if isinstance(v, list) and v and all(isinstance(s, Signal) for s in v):
+            port_arrays[k] = [f'{k}_{i}' for i in range(len(v))]
 
     params = module._params
 
@@ -801,7 +854,7 @@ def lower_module(module, module_name=None):
             ir.mems.append(MemDecl(mem_name, d, w, style=mem.style))
 
     # Sub-module wires and instances
-    lowerer = _Lowerer(signals, mems, submodules, interfaces, params, module)
+    lowerer = _Lowerer(signals, mems, submodules, interfaces, params, module, port_arrays=port_arrays)
     always_driven = lowerer.collect_always_targets(module._comb_blocks)
 
     for sub_name, sub in sorted(submodules.items()):
