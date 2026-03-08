@@ -316,3 +316,134 @@ def axi_interconnect(NUM_MASTERS=2, DATA_WIDTH=32, ADDR_WIDTH=32):
 ### Priority
 
 Medium — the current workaround (hardcoded `m0_axi`, `m1_axi`, manual address split) works but doesn't scale. Needed for clean N-peripheral SoC designs.
+
+## Project tooling and large-design ergonomics
+
+Features needed to support large-scale designs (CPUs, SoCs, multi-module FPGA projects) from a build/workflow perspective.
+
+### Project file and scaffolding
+
+No declarative project configuration exists. Everything is CLI flags or Python code.
+
+Add `veripy.toml` as the project manifest:
+
+```toml
+[project]
+name = "my_soc"
+top = "src/soc_top.py"
+sources = ["src/", "ip/"]
+
+[build]
+output = "build/rtl"
+parameters = { data_width = 32, addr_width = 16 }
+
+[build.targets.sim]
+parameters = { data_width = 32, debug_bus = true }
+
+[build.targets.synth]
+parameters = { data_width = 32, debug_bus = false }
+
+[test]
+parallel = 4
+seed = "random"
+
+[fpga]
+part = "xc7a35t"
+constraints = ["constraints/pins.xdc", "constraints/timing.xdc"]
+```
+
+Add `veripy init` to scaffold a new project with directory structure and starter `veripy.toml`.
+
+Everything below builds on this — build targets, test config, FPGA targeting all live in the project file.
+
+Priority: Critical — foundation for all other project tooling.
+
+### Watch mode and dependency-aware incremental build
+
+`Project.write(incremental=True)` skips unchanged files, but there is no:
+
+- `veripy build --watch` to rebuild on file change
+- Module dependency graph tracking (if sub-module A changes, rebuild parent B)
+- Hash-based build caching to skip re-lint / re-compile when nothing changed
+
+For a 50+ module design, full rebuild on every save is too slow.
+
+Priority: High.
+
+### Test parallelization and regression
+
+`veripy test` shells out to `python -m unittest discover` serially.
+
+- Run tests in parallel across cores (each test is independent — Python sim + iverilog)
+- Merge coverage across parallel runs, report cumulative numbers
+- Seed management for constrained random — record seeds, replay failures
+- Regression mode: compare pass/fail against a saved baseline, flag new failures
+
+Priority: High.
+
+### Hierarchy visualization and design stats
+
+No way to understand a design's structure without reading the code.
+
+- `veripy graph <file.py>` → DOT/SVG block diagram of module hierarchy, port connections, signal widths
+- `veripy stats <file.py>` → register count, combinational depth estimate, memory usage
+
+Priority: Medium.
+
+### Build targets and configurations
+
+Real projects need multiple build configurations:
+
+- Simulation (debug signals, assertions enabled)
+- Synthesis (assertions stripped, debug removed)
+- Per-board FPGA builds (different parameters)
+
+Driven by `[build.targets.*]` sections in `veripy.toml`. Invoked as `veripy build --target sim`.
+
+Priority: High — depends on project file.
+
+### Cross-module lint
+
+Current lint is per-module only. A full-hierarchy pass should catch:
+
+- Unconnected ports at the top level
+- Width mismatches at module boundaries
+- Clock domain crossing violations across the hierarchy
+- Combinational loops spanning multiple modules
+
+Priority: Medium.
+
+### Filelist and external tool integration
+
+The `Project` class generates Vivado/Quartus/DC Tcl, but is missing:
+
+- `filelist.f` generation (universal EDA format)
+- Makefile generation (`veripy makefile` → targets for build/test/lint/formal)
+- Constraint file management (XDC/SDC tracked alongside the design)
+- Mixed-language support (wrapping VHDL or SystemVerilog IP)
+
+Priority: Medium.
+
+### IP dependency resolution
+
+`veripy ip` is pip-based discovery only. Needed for multi-team projects:
+
+- Version constraints (`veripy-axi >= 0.3, < 1.0`)
+- Lock file for reproducible builds
+- Local path dependencies (monorepo with multiple IP blocks)
+- IP configuration from `veripy.toml`
+
+Priority: Low — matters once multiple teams/repos are involved.
+
+### Library primitives for CPU/SoC designs
+
+Current IP library covers FIFOs, arbiters, edge detectors, clock dividers. Larger designs also need:
+
+- AXI4 full interconnect (not just AXI4-Lite)
+- Bus fabric / crossbar generator
+- Interrupt controller
+- DMA engine template
+- Memory controller interface (DDR PHY BlackBox + controller)
+- Debug transport (JTAG TAP BlackBox + debug module)
+
+Priority: Low — build as needed by real designs.
