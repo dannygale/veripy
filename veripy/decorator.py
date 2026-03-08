@@ -42,7 +42,16 @@ def _analyze_and_rewrite(func):
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
             continue
         target = node.targets[0]
-        if not isinstance(target, ast.Name) or not isinstance(node.value, ast.Call):
+        if not isinstance(target, ast.Name):
+            continue
+        # List comprehension of signals: data_in = [Input(w) for _ in range(n)]
+        if (isinstance(node.value, ast.ListComp) and
+                isinstance(node.value.elt, ast.Call) and
+                isinstance(node.value.elt.func, ast.Name) and
+                node.value.elt.func.id in ('Input', 'Output', 'Register', 'Signal')):
+            signal_names.add(target.id)
+            continue
+        if not isinstance(node.value, ast.Call):
             continue
         fname = None
         if isinstance(node.value.func, ast.Name):
@@ -169,6 +178,10 @@ def module(func):
                 # Flatten interface signals with prefix
                 for sig_name, sig in val._signals().items():
                     sig.name = f'{name}_{sig_name}'
+            elif isinstance(val, list) and val and all(isinstance(s, Signal) for s in val):
+                for i, sig in enumerate(val):
+                    sig.name = f'{name}_{i}'
+                object.__setattr__(instance, name, val)
             elif isinstance(val, DeferredModule):
                 resolved = _resolve_deferred(val, resolved_params)
                 object.__setattr__(instance, name, resolved)

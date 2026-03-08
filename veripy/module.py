@@ -108,6 +108,10 @@ class Module:
             elif isinstance(val, Interface):
                 for sig_name, sig in val._signals().items():
                     sig.name = f'{attr}_{sig_name}'
+            elif isinstance(val, list) and val and all(isinstance(s, Signal) for s in val):
+                for i, sig in enumerate(val):
+                    if not sig.name:
+                        sig.name = f'{attr}_{i}'
 
     def always(self, sensitivity):
         """Decorator: register a method with an explicit sensitivity list.
@@ -333,6 +337,9 @@ class Module:
             elif isinstance(v, Interface):
                 for sig_name, sig in v._signals().items():
                     sigs[f'{k}_{sig_name}'] = sig
+            elif isinstance(v, list) and v and all(isinstance(s, Signal) for s in v):
+                for i, sig in enumerate(v):
+                    sigs[f'{k}_{i}'] = sig
         self._cached_signals = sigs
         return sigs
 
