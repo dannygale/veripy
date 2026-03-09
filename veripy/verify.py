@@ -107,6 +107,37 @@ def _resolve_backends(cls):
     return backends
 
 
+_MODEL_ORDER = ['functional', 'cycle', 'rtl']
+
+
+def _resolve_models(cls, mod):
+    """Resolve which models to run for a TestBench subclass.
+
+    Priority: VERIPY_MODEL env var > class 'model' attribute > auto-detect.
+    The class/env value is a minimum fidelity floor — only models at or above
+    that level in _MODEL_ORDER are included.
+    """
+    floor = os.environ.get('VERIPY_MODEL') or getattr(cls, 'model', None)
+
+    # Auto-detect available models from the module instance
+    available = []
+    if getattr(mod, '_functional', None) is not None or getattr(mod, '_behavioral', None) is not None:
+        available.append('functional')
+    if getattr(mod, '_cycle', None) is not None:
+        available.append('cycle')
+    if getattr(mod, '_always_blocks', None) or getattr(mod, '_comb_blocks', None):
+        available.append('rtl')
+
+    if not available:
+        available = ['rtl']  # fallback: treat as RTL-only
+
+    if floor is not None and floor in _MODEL_ORDER:
+        floor_idx = _MODEL_ORDER.index(floor)
+        available = [m for m in available if _MODEL_ORDER.index(m) >= floor_idx]
+
+    return available if available else ['rtl']
+
+
 class TestBench(unittest.TestCase):
     """Configurable test bench for VeriPy modules.
 
@@ -145,6 +176,7 @@ class TestBench(unittest.TestCase):
     """
 
     backend = 'check'
+    model = None  # minimum fidelity floor: 'functional', 'cycle', or 'rtl' (None = auto)
 
     def create_module(self):
         raise NotImplementedError
@@ -539,53 +571,73 @@ def _wrap_testbench(fn):
         vcd_on_fail = (getattr(self.__class__, 'vcd_on_fail', False)
                        or os.environ.get('VERIPY_VCD_ON_FAIL') == '1')
 
-        # Pass 1: behavioral (Python sim) — always first if requested
         self._begin()
-        if vcd_on_fail:
-            vcd_path = f'{type(self).__name__}_{fn.__name__}.vcd'
-            self._engine = SimEngine(self._mod, vcd=vcd_path)
+        models = _resolve_models(self.__class__, self._mod)
         self._all_outputs = {}
-        self._ran_sim = False
-        try:
-            if 'behavioral' in backends:
-                with self.subTest(backend='behavioral'):
+
+        for i, model_name in enumerate(models):
+            if i > 0:
+                self._begin()
+            self._ran_sim = False
+
+            # Configure which Python model the sim engine uses
+            if model_name == 'cycle':
+                self._mod._functional = self._mod._cycle
+                self._mod._behavioral = None
+            elif model_name == 'rtl':
+                self._mod._functional = None
+                self._mod._behavioral = None
+            # 'functional': BehavioralSim already picks up _functional
+
+            if model_name in ('functional', 'cycle'):
+                with self.subTest(model=model_name):
                     fn(self)
                     if not self._ran_sim:
                         self.run_sim()
-                self._all_outputs['behavioral'] = dict(self._py_outputs)
-                for name, hits in self._mod.coverage_report():
-                    _coverage_db[name] = _coverage_db.get(name, 0) + hits
+                self._all_outputs[model_name] = dict(self._py_outputs)
+                if model_name == 'functional':
+                    for name, hits in self._mod.coverage_report():
+                        _coverage_db[name] = _coverage_db.get(name, 0) + hits
             else:
-                # Still need to run the test to record stimuli for other backends
-                fn(self)
-                if not self._ran_sim:
-                    self.run_sim()
-        except AssertionError:
-            if vcd_on_fail:
-                import sys
-                print(f'\nVCD written to {vcd_path}', file=sys.stderr)
-            raise
+                # RTL pass: behavioral (Python RTL sim) + compiled backends
+                if vcd_on_fail:
+                    vcd_path = f'{type(self).__name__}_{fn.__name__}.vcd'
+                    self._engine = SimEngine(self._mod, vcd=vcd_path)
+                try:
+                    if 'behavioral' in backends:
+                        with self.subTest(backend='behavioral'):
+                            fn(self)
+                            if not self._ran_sim:
+                                self.run_sim()
+                        self._all_outputs['behavioral'] = dict(self._py_outputs)
+                        for name, hits in self._mod.coverage_report():
+                            _coverage_db[name] = _coverage_db.get(name, 0) + hits
+                    else:
+                        # Still need to run to record stimuli for other backends
+                        fn(self)
+                        if not self._ran_sim:
+                            self.run_sim()
+                except AssertionError:
+                    if vcd_on_fail:
+                        import sys
+                        print(f'\nVCD written to {vcd_path}', file=sys.stderr)
+                    raise
 
-        # Pass 2: iverilog
-        if 'iverilog' in backends:
-            try:
-                self._run_iverilog()
-                self._all_outputs['iverilog'] = dict(self._rtl_outputs)
-            except SyntaxError:
-                pass
+                if 'iverilog' in backends:
+                    try:
+                        self._run_iverilog()
+                        self._all_outputs['iverilog'] = dict(self._rtl_outputs)
+                    except SyntaxError:
+                        pass
 
-        # Pass 3: csim
-        skip_csim = getattr(self, 'SKIP_CSIM', False)
-        if not skip_csim and 'csim' in backends:
-            self._run_csim()
-        if not skip_csim and 'csim_hier' in backends:
-            self._run_csim(force_hier=True)
+                skip_csim = getattr(self, 'SKIP_CSIM', False)
+                if not skip_csim and 'csim' in backends:
+                    self._run_csim()
+                if not skip_csim and 'csim_hier' in backends:
+                    self._run_csim(force_hier=True)
+                if 'verilator' in backends:
+                    self._run_verilator()
 
-        # Pass 4: Verilator
-        if 'verilator' in backends:
-            self._run_verilator()
-
-        # Compare all backends that ran
         if len(self._all_outputs) > 1:
             self._assert_all_match()
 

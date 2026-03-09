@@ -295,12 +295,18 @@ def cmd_check(args):
     sys.exit(1 if failures else 0)
 
 
+def cmd_test(args):
+    """Run the VeriPy test suite."""
     test_path = args.path
     if not test_path:
         from .config import load_config
         cfg = load_config()
         if cfg is not None:
             test_path = os.path.join(cfg["_dir"], cfg["test"]["path"])
+
+    model = getattr(args, "model", None)
+    if model:
+        os.environ["VERIPY_MODEL"] = model
 
     jobs = getattr(args, "jobs", None)
     seed = getattr(args, "seed", None)
@@ -817,6 +823,8 @@ def main():
                         help="Run test files in parallel (N workers; default: cpu_count)")
     p_test.add_argument("--seed", type=int, metavar="SEED",
                         help="Fixed random seed for all tests (implies -j)")
+    p_test.add_argument("--model", choices=["functional", "cycle", "rtl"],
+                        help="Run tests against this model only (default: all available)")
     p_test.add_argument("--save-baseline", action="store_true",
                         help="Save pass/fail results as regression baseline")
     p_test.add_argument("--regression", action="store_true",
