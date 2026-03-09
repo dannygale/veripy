@@ -1,534 +1,255 @@
-"""Verilog-to-VeriPy importer: parse the veripy Verilog subset and emit Python."""
+"""Verilog-to-VeriPy importer using PyVerilog."""
 
-import re
+import os
+import tempfile
+
+import pyverilog.vparser.ast as vast
+import pyverilog.vparser.parser as vp
 
 # ---------------------------------------------------------------------------
-# Tokenizer
+# PyVerilog AST → internal IR
 # ---------------------------------------------------------------------------
 
-_KEYWORDS = {
-    'module', 'endmodule', 'input', 'output', 'reg', 'wire', 'parameter',
-    'assign', 'always', 'posedge', 'negedge', 'if', 'else', 'begin', 'end',
-    'case', 'endcase', 'default', 'initial', 'integer', 'for',
+_BIN_OPS = {
+    vast.Plus: '+', vast.Minus: '-', vast.Times: '*', vast.Divide: '//',
+    vast.Mod: '%', vast.And: '&', vast.Or: '|', vast.Xor: '^',
+    vast.Sll: '<<', vast.Srl: '>>', vast.Sra: '>>',
+    vast.Eq: '==', vast.NotEq: '!=', vast.Eql: '==', vast.NotEql: '!=',
+    vast.LessThan: '<', vast.GreaterThan: '>', vast.LessEq: '<=', vast.GreaterEq: '>=',
+    vast.Land: 'and', vast.Lor: 'or',
+    vast.Power: '**', vast.Xnor: '^',
 }
 
-_TOKEN_RE = re.compile(r"""
-    (?P<COMMENT>//[^\n]*)                |
-    (?P<BLOCK_COMMENT>/\*[\s\S]*?\*/)    |
-    (?P<HEX>\d+'h[0-9a-fA-F_]+)         |
-    (?P<BIN>\d+'b[01_]+)                 |
-    (?P<NUM>\d+)                         |
-    (?P<ID>[a-zA-Z_]\w*)                 |
-    (?P<LE><=)                           |
-    (?P<EQ>==)                           |
-    (?P<NE>!=)                           |
-    (?P<LSHIFT><<)                       |
-    (?P<RSHIFT>>>)                       |
-    (?P<GE>>=)                           |
-    (?P<SYM>[(){}\[\];:,@.?~&|^+\-*/<>=!#]) |
-    (?P<WS>\s+)
-""", re.VERBOSE)
+_UNARY_OPS = {
+    vast.Unot: '~', vast.Ulnot: '!', vast.Uminus: 'neg',
+    vast.Uand: '&', vast.Unand: '~&', vast.Uor: '|', vast.Unor: '~|',
+    vast.Uxor: '^', vast.Uxnor: '~^',
+}
 
 
-def tokenize(src):
-    tokens = []
-    for m in _TOKEN_RE.finditer(src):
-        kind = m.lastgroup
-        val = m.group()
-        if kind in ('WS', 'COMMENT', 'BLOCK_COMMENT'):
-            continue
-        if kind == 'ID' and val in _KEYWORDS:
-            kind = 'KW'
-        tokens.append((kind, val))
-    return tokens
+def _pv_expr(node):
+    if node is None:
+        return ('num', 0)
+    if isinstance(node, vast.Rvalue):
+        return _pv_expr(node.var)
+    if isinstance(node, vast.IntConst):
+        v = node.value
+        if "'" in v:
+            _, rest = v.split("'", 1)
+            rest = rest.replace('_', '')
+            if rest[0] in 'hH':
+                return ('num', int(rest[1:], 16))
+            if rest[0] in 'bB':
+                return ('num', int(rest[1:], 2))
+            if rest[0] in 'dD':
+                return ('num', int(rest[1:]))
+            return ('num', int(rest))
+        return ('num', int(v))
+    if isinstance(node, vast.Identifier):
+        return ('id', node.name)
+    if isinstance(node, vast.Partselect):
+        name = node.var.name if isinstance(node.var, vast.Identifier) else _pv_expr(node.var)
+        return ('slice', name, _pv_expr(node.msb), _pv_expr(node.lsb))
+    if isinstance(node, vast.Pointer):
+        name = node.var.name if isinstance(node.var, vast.Identifier) else _pv_expr(node.var)
+        return ('index', name, _pv_expr(node.ptr))
+    if isinstance(node, vast.Concat):
+        return ('concat', [_pv_expr(c) for c in node.list])
+    if isinstance(node, vast.Cond):
+        return ('ternary', _pv_expr(node.cond), _pv_expr(node.true_value), _pv_expr(node.false_value))
+    if isinstance(node, vast.SystemCall):
+        if node.syscall in ('clog2', '$clog2') and node.args:
+            return ('clog2', _pv_expr(node.args[0]))
+        return ('num', 0)
+    op = _BIN_OPS.get(type(node))
+    if op:
+        return (op, _pv_expr(node.left), _pv_expr(node.right))
+    op = _UNARY_OPS.get(type(node))
+    if op:
+        return (op, _pv_expr(node.right))
+    return ('num', 0)
 
 
-# ---------------------------------------------------------------------------
-# Parser — produces a list of module IR dicts
-# ---------------------------------------------------------------------------
-
-class _Parser:
-    def __init__(self, tokens):
-        self.tokens = tokens
-        self.pos = 0
-
-    def peek(self, offset=0):
-        p = self.pos + offset
-        return self.tokens[p] if p < len(self.tokens) else ('EOF', '')
-
-    def eat(self, expected_val=None):
-        t = self.tokens[self.pos]
-        if expected_val and t[1] != expected_val:
-            raise SyntaxError(f"Expected '{expected_val}', got '{t[1]}' at token {self.pos}")
-        self.pos += 1
-        return t
-
-    def at(self, val):
-        return self.pos < len(self.tokens) and self.tokens[self.pos][1] == val
-
-    def at_kind(self, kind):
-        return self.pos < len(self.tokens) and self.tokens[self.pos][0] == kind
-
-    def parse(self):
-        modules = []
-        while self.pos < len(self.tokens):
-            if self.at('module'):
-                modules.append(self._module())
-            else:
-                self.pos += 1  # skip stray tokens
-        return modules
-
-    def _module(self):
-        self.eat('module')
-        name = self.eat()[1]
-        params = []
-        if self.at('#'):
-            self.eat('#')
-            self.eat('(')
-            params = self._param_list()
-            self.eat(')')
-        self.eat('(')
-        ports = self._port_list()
-        self.eat(')')
-        self.eat(';')
-        decls, assigns, always_blocks, instances = [], [], [], []
-        while not self.at('endmodule'):
-            if self.at('reg') or self.at('wire') or self.at('integer'):
-                decls.append(self._declaration())
-            elif self.at('assign'):
-                assigns.append(self._assign())
-            elif self.at('always'):
-                always_blocks.append(self._always())
-            elif self.at('initial'):
-                self._skip_initial()
-            elif self._is_instance():
-                instances.append(self._instance())
-            else:
-                self.pos += 1
-        self.eat('endmodule')
-        return {
-            'name': name, 'params': params, 'ports': ports,
-            'decls': decls, 'assigns': assigns,
-            'always': always_blocks, 'instances': instances,
-        }
-
-    def _param_list(self):
-        params = []
-        while not self.at(')'):
-            if self.at('parameter'):
-                self.eat('parameter')
-            name = self.eat()[1]
-            self.eat('=')
-            val = self._const_expr()
-            params.append((name, val))
-            if self.at(','):
-                self.eat(',')
-        return params
-
-    def _port_list(self):
-        ports = []
-        while not self.at(')'):
-            direction = self.eat()[1]  # input/output
-            is_reg = False
-            if self.at('reg'):
-                self.eat('reg')
-                is_reg = True
-            width = self._opt_width()
-            name = self.eat()[1]
-            ports.append({'dir': direction, 'name': name, 'width': width, 'reg': is_reg})
-            if self.at(','):
-                self.eat(',')
-        return ports
-
-    def _opt_width(self):
-        if self.at('['):
-            self.eat('[')
-            hi = self._expr()
-            self.eat(':')
-            lo = self._expr()
-            self.eat(']')
-            try:
-                hi_val = self._eval_const(hi)
-                lo_val = self._eval_const(lo)
-                return hi_val - lo_val + 1
-            except SyntaxError:
-                # Parametric width — detect [param-1:0] → param
-                lo_val = self._try_eval(lo)
-                if lo_val == 0 and isinstance(hi, tuple) and hi[0] == '-':
-                    one = self._try_eval(hi[2])
-                    if one == 1:
-                        return self._expr_str(hi[1])
-                return self._expr_str(('+'  , ('-', hi, lo), ('num', 1)))
+def _pv_width(node):
+    """Return integer width or parameter name string from a Width node."""
+    if node is None:
         return 1
+    msb, lsb = node.msb, node.lsb
+    # Common parametric pattern: [PARAM-1:0] → width = PARAM
+    if (isinstance(msb, vast.Minus)
+            and isinstance(msb.right, vast.IntConst) and msb.right.value == '1'
+            and isinstance(lsb, vast.IntConst) and lsb.value == '0'):
+        if isinstance(msb.left, vast.Identifier):
+            return msb.left.name
+    try:
+        return int(msb.value) - int(lsb.value) + 1
+    except Exception:
+        return _pv_expr(msb)  # fallback: return expr tuple
 
-    def _try_eval(self, e):
-        try:
-            return self._eval_const(e)
-        except SyntaxError:
-            return None
 
-    def _expr_str(self, e):
-        """Convert expression AST to Python string."""
-        if isinstance(e, int):
-            return str(e)
-        if e[0] == 'num':
-            return str(e[1])
-        if e[0] == 'id':
-            return e[1]
-        if e[0] in ('+', '-', '*'):
-            return f'({self._expr_str(e[1])} {e[0]} {self._expr_str(e[2])})'
-        return str(e)
-
-    def _declaration(self):
-        kind = self.eat()[1]  # reg, wire, integer
-        width = self._opt_width()
-        name = self.eat()[1]
-        # Check for memory: reg [w] name [0:d-1]
-        mem_depth = None
-        if self.at('['):
-            self.eat('[')
-            lo = self._const_expr()
-            self.eat(':')
-            hi = self._const_expr()
-            self.eat(']')
-            mem_depth = hi - lo + 1
-        self.eat(';')
-        return {'kind': kind, 'name': name, 'width': width, 'depth': mem_depth}
-
-    def _assign(self):
-        self.eat('assign')
-        target = self._expr()
-        self.eat('=')
-        value = self._expr()
-        self.eat(';')
-        return {'target': target, 'value': value}
-
-    def _always(self):
-        self.eat('always')
-        self.eat('@')
-        sens = self._sensitivity()
-        body = self._block_or_stmt()
-        return {'sens': sens, 'body': body}
-
-    def _sensitivity(self):
-        self.eat('(')
-        if self.at('*'):
-            self.eat('*')
-            self.eat(')')
+def _pv_sens(senslist):
+    if senslist is None:
+        return 'comb'
+    senses = list(senslist.list) if hasattr(senslist, 'list') else [senslist]
+    result = []
+    for s in senses:
+        if s.type == 'all':
             return 'comb'
-        edges = []
-        while not self.at(')'):
-            edge_type = self.eat()[1]  # posedge/negedge
-            sig = self.eat()[1]
-            edges.append((edge_type, sig))
-            if self.at('or'):
-                self.eat('or')
-        self.eat(')')
-        return edges
+        edge = 'posedge' if s.type == 'posedge' else 'negedge' if s.type == 'negedge' else None
+        if edge is None:
+            return 'comb'
+        result.append((edge, s.sig.name))
+    return result
 
-    def _block_or_stmt(self):
-        if self.at('begin'):
-            self.eat('begin')
-            stmts = []
-            while not self.at('end'):
-                stmts.append(self._stmt())
-            self.eat('end')
-            return stmts
-        return [self._stmt()]
 
-    def _stmt(self):
-        if self.at('if'):
-            return self._if_stmt()
-        if self.at('case'):
-            return self._case_stmt()
-        if self.at('for'):
-            return self._for_stmt()
-        # assignment: target <= expr; or target = expr;
-        target = self._expr()
-        if self.peek()[0] == 'LE':  # <=
-            self.eat()
-            op = '<='
-        else:
-            self.eat('=')
-            op = '='
-        value = self._expr()
-        self.eat(';')
-        return {'type': 'assign', 'op': op, 'target': target, 'value': value}
+def _pv_stmts(node):
+    if node is None:
+        return []
+    r = _pv_stmt(node)
+    if isinstance(r, list):
+        return r
+    return [r] if r is not None else []
 
-    def _if_stmt(self):
-        self.eat('if')
-        self.eat('(')
-        cond = self._expr()
-        self.eat(')')
-        then = self._block_or_stmt()
-        els = None
-        if self.at('else'):
-            self.eat('else')
-            if self.at('if'):
-                els = [self._if_stmt()]
+
+def _pv_stmt(node):
+    if isinstance(node, (vast.BlockingSubstitution, vast.NonblockingSubstitution)):
+        op = '=' if isinstance(node, vast.BlockingSubstitution) else '<='
+        lv = node.left.var if isinstance(node.left, vast.Lvalue) else node.left
+        rv = node.right.var if isinstance(node.right, vast.Rvalue) else node.right
+        return {'type': 'assign', 'op': op, 'target': _pv_expr(lv), 'value': _pv_expr(rv)}
+    if isinstance(node, vast.IfStatement):
+        return {
+            'type': 'if',
+            'cond': _pv_expr(node.cond),
+            'then': _pv_stmts(node.true_statement),
+            'else': _pv_stmts(node.false_statement) if node.false_statement else None,
+        }
+    if isinstance(node, (vast.CaseStatement, vast.CasexStatement, vast.CasezStatement,
+                         vast.UniqueCaseStatement)):
+        branches, default = [], None
+        for case in node.caselist:
+            if case.cond is None:
+                default = _pv_stmts(case.statement)
             else:
-                els = self._block_or_stmt()
-        return {'type': 'if', 'cond': cond, 'then': then, 'else': els}
-
-    def _case_stmt(self):
-        self.eat('case')
-        self.eat('(')
-        expr = self._expr()
-        self.eat(')')
-        branches = []
-        default = None
-        while not self.at('endcase'):
-            if self.at('default'):
-                self.eat('default')
-                self.eat(':')
-                default = self._block_or_stmt()
-            else:
-                label = self._const_expr()
-                self.eat(':')
-                body = self._block_or_stmt()
-                branches.append((label, body))
-        self.eat('endcase')
-        return {'type': 'case', 'expr': expr, 'branches': branches, 'default': default}
-
-    def _for_stmt(self):
-        self.eat('for')
-        self.eat('(')
-        # init: var = expr
-        var = self.eat()[1]
-        self.eat('=')
-        init = self._const_expr()
-        self.eat(';')
-        # cond: var < expr
-        self.eat()  # var
-        self.eat()  # <
-        limit = self._const_expr()
-        self.eat(';')
-        # incr: var = var + step
-        self.eat()  # var
-        self.eat('=')
-        self.eat()  # var
-        self.eat('+')
-        step = self._const_expr()
-        self.eat(')')
-        body = self._block_or_stmt()
-        return {'type': 'for', 'var': var, 'start': init, 'stop': limit, 'step': step, 'body': body}
-
-    def _is_instance(self):
-        """Peek ahead to detect module instantiation: id [#(...)] id (...)"""
-        if not self.at_kind('ID'):
-            return False
-        i = 1
-        if self.peek(i)[1] == '#':
-            # skip #(...)
-            i += 1
-            if self.peek(i)[1] != '(':
-                return False
-            depth = 1
-            i += 1
-            while depth > 0 and self.peek(i)[1] != '':
-                if self.peek(i)[1] == '(':
-                    depth += 1
-                elif self.peek(i)[1] == ')':
-                    depth -= 1
-                i += 1
-        # Next should be an identifier (instance name)
-        if not (self.peek(i)[0] == 'ID'):
-            return False
-        # Then (
-        return self.peek(i + 1)[1] == '('
-
-    def _instance(self):
-        mod_type = self.eat()[1]
-        params = {}
-        if self.at('#'):
-            self.eat('#')
-            self.eat('(')
-            while not self.at(')'):
-                self.eat('.')
-                pname = self.eat()[1]
-                self.eat('(')
-                e = self._expr()
-                try:
-                    pval = self._eval_const(e)
-                except SyntaxError:
-                    pval = self._expr_str(e)
-                self.eat(')')
-                params[pname] = pval
-                if self.at(','):
-                    self.eat(',')
-            self.eat(')')
-        inst_name = self.eat()[1]
-        self.eat('(')
-        port_map = {}
-        while not self.at(')'):
-            self.eat('.')
-            port = self.eat()[1]
-            self.eat('(')
-            wire = self.eat()[1]
-            self.eat(')')
-            port_map[port] = wire
-            if self.at(','):
-                self.eat(',')
-        self.eat(')')
-        self.eat(';')
-        return {'mod_type': mod_type, 'name': inst_name, 'params': params, 'ports': port_map}
-
-    def _skip_initial(self):
-        """Skip initial blocks (mem zero-init etc)."""
-        self.eat('initial')
-        self._block_or_stmt()
-
-    # --- expression parsing (precedence climbing) ---
-
-    def _expr(self):
-        return self._ternary()
-
-    def _ternary(self):
-        e = self._or()
-        if self.at('?'):
-            self.eat('?')
-            then = self._expr()
-            self.eat(':')
-            els = self._expr()
-            return ('ternary', e, then, els)
-        return e
-
-    def _or(self):
-        e = self._xor()
-        while self.at('|'):
-            self.eat('|')
-            e = ('|', e, self._xor())
-        return e
-
-    def _xor(self):
-        e = self._and()
-        while self.at('^'):
-            self.eat('^')
-            e = ('^', e, self._and())
-        return e
-
-    def _and(self):
-        e = self._equality()
-        while self.at('&'):
-            self.eat('&')
-            e = ('&', e, self._equality())
-        return e
-
-    def _equality(self):
-        e = self._comparison()
-        while self.peek()[1] in ('==', '!='):
-            op = self.eat()[1]
-            e = (op, e, self._comparison())
-        return e
-
-    def _comparison(self):
-        e = self._shift()
-        while self.peek()[1] in ('<', '>') or self.peek()[0] == 'GE':
-            op = self.eat()[1]
-            e = (op, e, self._shift())
-        return e
-
-    def _shift(self):
-        e = self._add()
-        while self.peek()[1] in ('<<', '>>'):
-            op = self.eat()[1]
-            e = (op, e, self._add())
-        return e
-
-    def _add(self):
-        e = self._mul()
-        while self.peek()[1] in ('+', '-'):
-            op = self.eat()[1]
-            e = (op, e, self._mul())
-        return e
-
-    def _mul(self):
-        e = self._unary()
-        while self.at('*'):
-            self.eat('*')
-            e = ('*', e, self._unary())
-        return e
-
-    def _unary(self):
-        if self.at('~'):
-            self.eat('~')
-            return ('~', self._unary())
-        if self.at('!'):
-            self.eat('!')
-            return ('!', self._unary())
-        if self.at('-') and self.peek(1)[0] in ('NUM', 'HEX', 'BIN'):
-            self.eat('-')
-            return ('neg', self._primary())
-        return self._primary()
-
-    def _primary(self):
-        t = self.peek()
-        if t[0] == 'NUM':
-            self.eat()
-            return ('num', int(t[1]))
-        if t[0] == 'HEX':
-            self.eat()
-            return ('num', int(t[1].split("'h")[1].replace('_', ''), 16))
-        if t[0] == 'BIN':
-            self.eat()
-            return ('num', int(t[1].split("'b")[1].replace('_', ''), 2))
-        if t[1] == '(':
-            self.eat('(')
-            e = self._expr()
-            self.eat(')')
-            return e
-        if t[1] == '{':
-            return self._concat()
-        if t[0] in ('ID', 'KW'):
-            name = self.eat()[1]
-            if self.at('['):
-                self.eat('[')
-                hi = self._expr()
-                if self.at(':'):
-                    self.eat(':')
-                    lo = self._expr()
-                    self.eat(']')
-                    return ('slice', name, hi, lo)
-                self.eat(']')
-                return ('index', name, hi)
-            return ('id', name)
-        raise SyntaxError(f"Unexpected token: {t} at pos {self.pos}")
-
-    def _concat(self):
-        self.eat('{')
-        parts = [self._expr()]
-        while self.at(','):
-            self.eat(',')
-            parts.append(self._expr())
-        self.eat('}')
-        return ('concat', parts)
-
-    def _const_expr(self):
-        """Parse a constant expression and evaluate to int."""
-        e = self._expr()
-        return self._eval_const(e)
-
-    def _eval_const(self, e):
-        if isinstance(e, int):
-            return e
-        if e[0] == 'num':
-            return e[1]
-        if e[0] == '+':
-            return self._eval_const(e[1]) + self._eval_const(e[2])
-        if e[0] == '-':
-            return self._eval_const(e[1]) - self._eval_const(e[2])
-        if e[0] == '*':
-            return self._eval_const(e[1]) * self._eval_const(e[2])
-        raise SyntaxError(f"Cannot evaluate constant: {e}")
+                for c in case.cond:
+                    branches.append((_pv_expr(c), _pv_stmts(case.statement)))
+        return {'type': 'case', 'expr': _pv_expr(node.comp), 'branches': branches, 'default': default}
+    if isinstance(node, vast.ForStatement):
+        try:
+            var = node.pre.left.var.name
+            start = int(node.pre.right.var.value)
+            limit = int(node.cond.right.value)
+            step = int(node.post.right.right.value)
+            return {'type': 'for', 'var': var, 'start': start, 'stop': limit, 'step': step,
+                    'body': _pv_stmts(node.statement)}
+        except Exception:
+            return None
+    if isinstance(node, vast.Block):
+        stmts = []
+        for s in (node.statements or []):
+            stmts.extend(_pv_stmts(s))
+        return stmts
+    return None
 
 
-def parse(src):
-    """Parse Verilog source into a list of module IR dicts."""
-    return _Parser(tokenize(src)).parse()
+def _pv_to_ir(source):
+    """Walk PyVerilog Source → list of module IR dicts consumed by generate()."""
+    modules = []
+    for moddef in source.description.definitions:
+        if not isinstance(moddef, vast.ModuleDef):
+            continue
+
+        params = []
+        if moddef.paramlist:
+            for decl in moddef.paramlist.params:
+                for item in (decl.list if hasattr(decl, 'list') else [decl]):
+                    if isinstance(item, (vast.Parameter, vast.Localparam)):
+                        try:
+                            val = int(item.value.var.value if isinstance(item.value, vast.Rvalue)
+                                      else item.value.value)
+                        except Exception:
+                            val = str(item.value)
+                        params.append((item.name, val))
+
+        ports = []
+        if moddef.portlist:
+            for ioport in moddef.portlist.ports:
+                io = ioport.first if isinstance(ioport, vast.Ioport) else ioport
+                if isinstance(io, (vast.Input, vast.Output)):
+                    direction = 'input' if isinstance(io, vast.Input) else 'output'
+                    ports.append({'name': io.name, 'dir': direction, 'width': _pv_width(io.width)})
+
+        decls, assigns, always_blocks, instances = [], [], [], []
+
+        for item in (moddef.items or []):
+            if isinstance(item, vast.Decl):
+                for d in (item.list or []):
+                    if isinstance(d, (vast.Reg, vast.Wire)):
+                        kind = 'reg' if isinstance(d, vast.Reg) else 'wire'
+                        depth = None
+                        if hasattr(d, 'dimensions') and d.dimensions:
+                            try:
+                                depth = int(d.dimensions.lengths[0].msb.value) + 1
+                            except Exception:
+                                pass
+                        decls.append({'name': d.name, 'kind': kind,
+                                      'width': _pv_width(d.width), 'depth': depth})
+                    elif isinstance(d, vast.Integer):
+                        decls.append({'name': d.name, 'kind': 'integer', 'width': 32, 'depth': None})
+
+            elif isinstance(item, vast.Assign):
+                lv = item.left.var if isinstance(item.left, vast.Lvalue) else item.left
+                rv = item.right.var if isinstance(item.right, vast.Rvalue) else item.right
+                assigns.append({'type': 'assign', 'op': '=', 'target': _pv_expr(lv), 'value': _pv_expr(rv)})
+
+            elif isinstance(item, (vast.Always, vast.AlwaysComb, vast.AlwaysFF, vast.AlwaysLatch)):
+                if isinstance(item, (vast.AlwaysComb, vast.AlwaysLatch)):
+                    sens = 'comb'
+                elif isinstance(item, vast.AlwaysFF):
+                    sens = _pv_sens(item.sens_list)
+                else:
+                    sens = _pv_sens(item.sens_list)
+                always_blocks.append({'sens': sens, 'body': _pv_stmts(item.statement)})
+
+            elif isinstance(item, vast.InstanceList):
+                for inst in item.instances:
+                    p = {}
+                    for pa in (inst.parameterlist or []):
+                        if isinstance(pa, vast.ParamArg) and pa.paramname:
+                            try:
+                                p[pa.paramname] = int(pa.argname.value)
+                            except Exception:
+                                p[pa.paramname] = str(pa.argname)
+                    port_map = {}
+                    for pa in (inst.portlist or []):
+                        if isinstance(pa, vast.PortArg) and pa.portname and pa.argname:
+                            argname = (pa.argname.name if isinstance(pa.argname, vast.Identifier)
+                                       else str(pa.argname))
+                            port_map[pa.portname] = argname
+                    instances.append({'mod_type': item.module, 'name': inst.name,
+                                      'params': p, 'ports': port_map})
+
+        modules.append({
+            'name': moddef.name, 'params': params, 'ports': ports,
+            'decls': decls, 'assigns': assigns, 'always': always_blocks, 'instances': instances,
+        })
+    return modules
+
+
+def _parse_pv(src):
+    """Parse Verilog/SV source via PyVerilog, return module IR list."""
+    with tempfile.NamedTemporaryFile(suffix='.v', mode='w', delete=False) as f:
+        f.write(src)
+        fname = f.name
+    try:
+        ast, _ = vp.parse([fname])
+    finally:
+        os.unlink(fname)
+    return _pv_to_ir(ast)
 
 
 # ---------------------------------------------------------------------------
-# Code generator — IR → VeriPy Python source
+# IR → Python emitter (unchanged from original)
 # ---------------------------------------------------------------------------
 
 def _to_pascal(name):
@@ -547,7 +268,6 @@ def _expr_to_py(e, self_signals):
         return str(v)
     if e[0] == 'id':
         name = e[1]
-        # Dotted names like alu.result → self.alu.result
         root = name.split('.')[0]
         if root in self_signals:
             return f'self.{name}'
@@ -568,6 +288,8 @@ def _expr_to_py(e, self_signals):
     if e[0] == 'concat':
         parts = ', '.join(_expr_to_py(p, self_signals) for p in e[1])
         return f'[{parts}]'
+    if e[0] == 'clog2':
+        return f'clog2({_expr_to_py(e[1], self_signals)})'
     if e[0] == '~':
         return f'~{_expr_to_py(e[1], self_signals)}'
     if e[0] == '!':
@@ -582,7 +304,6 @@ def _expr_to_py(e, self_signals):
 
 
 def _target_to_py(e, self_signals):
-    """Convert an assignment target to Python."""
     return _expr_to_py(e, self_signals)
 
 
@@ -600,27 +321,27 @@ def _stmts_to_py(stmts, self_signals, indent):
             lines.append(f'{pad}if {cond}:')
             lines += _stmts_to_py(s['then'], self_signals, indent + 1)
             if s['else']:
-                if len(s['else']) == 1 and s['else'][0]['type'] == 'if':
-                    lines.append(f'{pad}elif {_expr_to_py(s["else"][0]["cond"], self_signals)}:')
-                    lines += _stmts_to_py(s['else'][0]['then'], self_signals, indent + 1)
-                    if s['else'][0]['else']:
-                        # Recurse for further elif/else
-                        rest = s['else'][0]
-                        while rest.get('else') and len(rest['else']) == 1 and rest['else'][0]['type'] == 'if':
-                            rest = rest['else'][0]
-                            lines.append(f'{pad}elif {_expr_to_py(rest["cond"], self_signals)}:')
-                            lines += _stmts_to_py(rest['then'], self_signals, indent + 1)
-                        if rest.get('else') and not (len(rest['else']) == 1 and rest['else'][0]['type'] == 'if'):
+                rest = s['else']
+                if len(rest) == 1 and rest[0]['type'] == 'if':
+                    lines.append(f'{pad}elif {_expr_to_py(rest[0]["cond"], self_signals)}:')
+                    lines += _stmts_to_py(rest[0]['then'], self_signals, indent + 1)
+                    if rest[0]['else']:
+                        inner = rest[0]['else']
+                        while len(inner) == 1 and inner[0]['type'] == 'if':
+                            lines.append(f'{pad}elif {_expr_to_py(inner[0]["cond"], self_signals)}:')
+                            lines += _stmts_to_py(inner[0]['then'], self_signals, indent + 1)
+                            inner = inner[0]['else'] or []
+                        if inner:
                             lines.append(f'{pad}else:')
-                            lines += _stmts_to_py(rest['else'], self_signals, indent + 1)
+                            lines += _stmts_to_py(inner, self_signals, indent + 1)
                 else:
                     lines.append(f'{pad}else:')
-                    lines += _stmts_to_py(s['else'], self_signals, indent + 1)
+                    lines += _stmts_to_py(rest, self_signals, indent + 1)
         elif s['type'] == 'case':
             expr = _expr_to_py(s['expr'], self_signals)
             for i, (label, body) in enumerate(s['branches']):
                 kw = 'if' if i == 0 else 'elif'
-                lines.append(f'{pad}{kw} {expr} == {label}:')
+                lines.append(f'{pad}{kw} {expr} == {_expr_to_py(label, self_signals)}:')
                 lines += _stmts_to_py(body, self_signals, indent + 1)
             if s['default']:
                 lines.append(f'{pad}else:')
@@ -638,11 +359,14 @@ def generate(modules, external=None):
               for modules defined in other files.
     """
     external = external or {}
-    # Build a set of known module types for instance detection
     mod_types = {m['name'] for m in modules} | set(external)
 
     lines = ['from veripy import Module, Input, Output, Register, Signal, Mem, posedge, negedge']
-    # Cross-file imports for externally defined modules
+    if any(any(('clog2', ) == (e[0],) if isinstance(e, tuple) else False
+               for ab in m['always'] for s in ab['body']
+               for e in [s.get('value', ('num', 0))])
+           for m in modules):
+        lines[0] += '\nfrom veripy.parameter import clog2'
     for mod_name, (imp_path, cls_name) in sorted(external.items()):
         lines.append(f'from {imp_path} import {cls_name}')
     lines.append('')
@@ -650,28 +374,24 @@ def generate(modules, external=None):
     for mod in modules:
         class_name = _to_pascal(mod['name'])
 
-        # Collect all signal names for self. prefixing
         self_signals = set()
         for p in mod['ports']:
             self_signals.add(p['name'])
         for d in mod['decls']:
             if d['kind'] != 'integer':
                 self_signals.add(d['name'])
-        # Instance wires: sub_port → sub.port
-        inst_wires = {}  # wire_name → (inst_name, port_name)
+        inst_wires = {}
         for inst in mod['instances']:
             for port, wire in inst['ports'].items():
                 inst_wires[wire] = (inst['name'], port)
             self_signals.add(inst['name'])
 
-        # Constructor params
         param_args = ', '.join(f'{n}={v}' for n, v in mod['params'])
         ctor_sig = f'self, {param_args}' if param_args else 'self'
 
         lines.append(f'class {class_name}(Module):')
         lines.append(f'    def __init__({ctor_sig}):')
 
-        # Ports
         for p in mod['ports']:
             w = p['width']
             w_arg = '' if w == 1 else str(w)
@@ -680,18 +400,10 @@ def generate(modules, external=None):
             else:
                 lines.append(f'        self.{p["name"]} = Output({w_arg})')
 
-        # Internal declarations
-        # Internal declarations (skip wires that are instance port wiring)
-        inst_wire_names = set()
-        for inst in mod['instances']:
-            for port, wire in inst['ports'].items():
-                inst_wire_names.add(wire)
-
+        inst_wire_names = {wire for inst in mod['instances'] for wire in inst['ports'].values()}
         for d in mod['decls']:
-            if d['kind'] == 'integer':
+            if d['kind'] == 'integer' or d['name'] in inst_wire_names:
                 continue
-            if d['name'] in inst_wire_names:
-                continue  # skip instance wiring artifacts
             w = d['width']
             w_arg = '' if w == 1 else str(w)
             if d['depth'] is not None:
@@ -701,7 +413,6 @@ def generate(modules, external=None):
             else:
                 lines.append(f'        self.{d["name"]} = Signal({w_arg})')
 
-        # Sub-module instances
         for inst in mod['instances']:
             cls = _to_pascal(inst['mod_type'])
             if inst['params']:
@@ -712,9 +423,7 @@ def generate(modules, external=None):
 
         lines.append('        super().__init__()')
 
-        # Rewrite assigns that wire to sub-module ports
         def _rewrite_wire(expr):
-            """Replace inst_port wire references with self.inst.port."""
             if isinstance(expr, tuple):
                 if expr[0] == 'id' and expr[1] in inst_wires:
                     inst_name, port = inst_wires[expr[1]]
@@ -722,31 +431,23 @@ def generate(modules, external=None):
                 return tuple(_rewrite_wire(x) if isinstance(x, tuple) else x for x in expr)
             return expr
 
-        # Generate direct port wiring for sub-module connections
-        # e.g. .a(x) where x is a top-level port → self.inst.a = self.x
         port_names = {p['name'] for p in mod['ports']}
-        direct_wires = []
-        for inst in mod['instances']:
-            for port, wire in inst['ports'].items():
-                if wire in port_names:
-                    direct_wires.append((inst['name'], port, wire))
+        direct_wires = [(inst['name'], port, wire)
+                        for inst in mod['instances']
+                        for port, wire in inst['ports'].items()
+                        if wire in port_names]
 
-        # Group assigns into comb blocks
-        has_assigns = mod['assigns'] or direct_wires
-        if has_assigns:
+        if mod['assigns'] or direct_wires:
             lines.append('')
             lines.append('        @self.comb')
             lines.append('        def _assign():')
             for a in mod['assigns']:
                 t = _rewrite_wire(a['target'])
                 v = _rewrite_wire(a['value'])
-                ts = _target_to_py(t, self_signals)
-                vs = _expr_to_py(v, self_signals)
-                lines.append(f'            {ts} = {vs}')
+                lines.append(f'            {_target_to_py(t, self_signals)} = {_expr_to_py(v, self_signals)}')
             for inst_name, port, wire in direct_wires:
                 lines.append(f'            self.{inst_name}.{port} = self.{wire}')
 
-        # Always blocks
         for i, ab in enumerate(mod['always']):
             lines.append('')
             sens = ab['sens']
@@ -762,12 +463,8 @@ def generate(modules, external=None):
                 lines.append(f'        @self.always({parts})')
                 lines.append(f'        def _always_{i}():')
 
-            # Rewrite body
-            body = []
-            for s in ab['body']:
-                body.append(_rewrite_stmt(s, inst_wires))
-            body_lines = _stmts_to_py(body, self_signals, 3)
-            lines += body_lines
+            body = [_rewrite_stmt(s, inst_wires) for s in ab['body']]
+            lines += _stmts_to_py(body, self_signals, 3)
 
         lines.append('')
         lines.append('')
@@ -776,7 +473,6 @@ def generate(modules, external=None):
 
 
 def _rewrite_stmt(stmt, inst_wires):
-    """Recursively rewrite wire references in statements."""
     if stmt['type'] == 'assign':
         return {
             'type': 'assign', 'op': stmt['op'],
@@ -801,7 +497,6 @@ def _rewrite_stmt(stmt, inst_wires):
 
 
 def _rewrite_expr(expr, inst_wires):
-    """Replace inst_port wire references with inst.port paths."""
     if not isinstance(expr, tuple):
         return expr
     if expr[0] == 'id' and expr[1] in inst_wires:
@@ -810,9 +505,13 @@ def _rewrite_expr(expr, inst_wires):
     return tuple(_rewrite_expr(x, inst_wires) if isinstance(x, tuple) else x for x in expr)
 
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
 def import_verilog(src):
-    """Parse Verilog source and return equivalent VeriPy Python source."""
-    return generate(parse(src))
+    """Parse Verilog/SV source and return equivalent VeriPy Python source."""
+    return generate(_parse_pv(src))
 
 
 def import_project(src_dir):
@@ -820,41 +519,33 @@ def import_project(src_dir):
 
     Returns dict of {relative_py_path: python_source}.
     """
-    import os
-
-    # 1. Discover and parse all .v files
-    file_modules = {}  # rel_path → [parsed modules]
+    file_modules = {}
     for root, _dirs, files in os.walk(src_dir):
         for f in sorted(files):
-            if not f.endswith('.v'):
+            if not f.endswith(('.v', '.sv')):
                 continue
             full = os.path.join(root, f)
             rel = os.path.relpath(full, src_dir)
             with open(full) as fh:
-                file_modules[rel] = parse(fh.read())
+                file_modules[rel] = _parse_pv(fh.read())
 
-    # 2. Build global registry: module_name → (v_rel_path, class_name)
     registry = {}
     for rel, mods in file_modules.items():
         for m in mods:
             registry[m['name']] = (rel, _to_pascal(m['name']))
 
-    # 3. Generate Python for each file with cross-file imports
     result = {}
     for rel, mods in sorted(file_modules.items()):
-        py_rel = rel.replace('.v', '.py')
+        py_rel = rel.replace('.sv', '.py').replace('.v', '.py')
         local_names = {m['name'] for m in mods}
-
-        # Find external modules referenced by instances in this file
         external = {}
         for m in mods:
             for inst in m['instances']:
                 mt = inst['mod_type']
                 if mt not in local_names and mt in registry:
                     v_path, cls = registry[mt]
-                    mod_path = '.' + v_path.replace('.v', '').replace(os.sep, '.')
+                    mod_path = '.' + v_path.replace('.sv', '').replace('.v', '').replace(os.sep, '.')
                     external[mt] = (mod_path, cls)
-
         result[py_rel] = generate(mods, external)
 
     return result

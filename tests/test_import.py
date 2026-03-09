@@ -3,7 +3,7 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
-from veripy.import_verilog import import_verilog, import_project, parse, tokenize
+from veripy.import_verilog import import_verilog, import_project, _parse_pv as parse
 from veripy.sim import SimEngine
 
 T = 10
@@ -102,16 +102,6 @@ endmodule
 """
 
 
-class TestTokenizer(unittest.TestCase):
-    def test_basic_tokens(self):
-        tokens = tokenize('input [3:0] count;')
-        kinds = [t[0] for t in tokens]
-        self.assertIn('KW', kinds)
-        self.assertIn('NUM', kinds)
-
-    def test_nba_token(self):
-        tokens = tokenize('counter <= 0;')
-        self.assertIn(('LE', '<='), tokens)
 
 
 class TestParser(unittest.TestCase):

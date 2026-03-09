@@ -69,8 +69,8 @@ veripy/
 ## How to build and test
 
 ```bash
-# Run full test suite
-python -m unittest discover -s tests
+# Run full test suite (slow — run once, not repeatedly)
+python -m unittest discover -s tests -v 2>&1 | grep -E "^(FAIL|ERROR|OK|Ran )|^(FAIL|ERROR): "
 
 # Build Verilog from a module
 veripy build <file.py>
