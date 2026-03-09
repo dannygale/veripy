@@ -29,7 +29,11 @@ class ALU(Module):
         self.zero   = Output()
         self.carry  = Output()
         self.sign   = Output()
+        self._width = width
         super().__init__(params={'WIDTH': width})
+
+    def rtl(self):
+        width = self._width
 
         @self.comb
         def compute():

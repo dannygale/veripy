@@ -12,16 +12,17 @@ class RegFile(Module):
 
     def __init__(self, width=8, depth=4):
         self.clock = Input()
-        self.we    = Input()           # write enable
-        self.waddr = Input(2)          # write address
-        self.wdata = Input(width)      # write data
-        self.raddr1 = Input(2)         # read port 1 address
-        self.raddr2 = Input(2)         # read port 2 address
-        self.rdata1 = Output(width)    # read port 1 data
-        self.rdata2 = Output(width)    # read port 2 data
+        self.we    = Input()
+        self.waddr = Input(2)
+        self.wdata = Input(width)
+        self.raddr1 = Input(2)
+        self.raddr2 = Input(2)
+        self.rdata1 = Output(width)
+        self.rdata2 = Output(width)
         self.regs   = Mem(depth, width)
         super().__init__()
 
+    def rtl(self):
         @self.comb
         def read_ports():
             self.rdata1 = self.regs[self.raddr1]
@@ -29,5 +30,5 @@ class RegFile(Module):
 
         @self.posedge(self.clock)
         def write_port():
-            if self.we and self.waddr:  # skip writes to r0
+            if self.we and self.waddr:
                 self.regs.write(self.waddr, self.wdata)

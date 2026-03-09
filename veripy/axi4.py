@@ -103,19 +103,18 @@ class Axi4Sub(Module):
         self.bus   = Axi4Bus(data_width, addr_width, id_width)
 
         strb_width = data_width // 8
-        shift      = strb_width.bit_length() - 1   # byte→word address shift
-        mask       = depth - 1
+        self._strb_width = strb_width
+        self._shift      = strb_width.bit_length() - 1
+        self._mask       = depth - 1
 
         self.mem = Mem(depth, data_width)
 
-        # Write FSM registers  (0=IDLE, 1=WDATA, 2=WRESP)
         self.wstate  = Register(2)
         self.waddr_r = Register(addr_width)
         self.wid_r   = Register(id_width)
         self.wlen_r  = Register(8)
         self.wbeat   = Register(9)
 
-        # Read FSM registers  (0=IDLE, 1=RDATA)
         self.rstate  = Register(2)
         self.raddr_r = Register(addr_width)
         self.rid_r   = Register(id_width)
@@ -124,11 +123,15 @@ class Axi4Sub(Module):
 
         super().__init__()
 
+    def rtl(self):
         W_IDLE  = 0
         W_WDATA = 1
         W_WRESP = 2
         R_IDLE  = 0
         R_RDATA = 1
+        shift      = self._shift
+        mask       = self._mask
+        strb_width = self._strb_width
 
         @self.posedge(self.clock)
         def write_fsm():
@@ -174,17 +177,12 @@ class Axi4Sub(Module):
 
         @self.comb
         def outputs():
-            # Write address channel
             self.bus.awready = 1 if self.wstate == W_IDLE else 0
-            # Write data channel
             self.bus.wready  = 1 if self.wstate == W_WDATA else 0
-            # Write response channel
             self.bus.bid     = self.wid_r
             self.bus.bresp   = 0
             self.bus.bvalid  = 1 if self.wstate == W_WRESP else 0
-            # Read address channel
             self.bus.arready = 1 if self.rstate == R_IDLE else 0
-            # Read data channel
             self.bus.rid     = self.rid_r
             self.bus.rdata   = self.mem[(self.raddr_r >> shift) & mask]
             self.bus.rresp   = 0

@@ -180,16 +180,18 @@ def _build_sub(reg_map, data_width, addr_width):
             for _off, name, width, _acc in reg_map:
                 object.__setattr__(self, name, Register(width))
 
+            self._read_fn  = read_fn
+            self._hs_fn    = hs_fn
+            self._write_fn = write_fn
             super().__init__()
 
-            # Bind generated functions as methods
+        def rtl(self):
             import types
-            self._comb_blocks.append(types.MethodType(read_fn, self))
-            self._comb_blocks.append(types.MethodType(hs_fn, self))
-
-            bound_write = types.MethodType(write_fn, self)
+            self._comb_blocks.append(types.MethodType(self._read_fn, self))
+            self._comb_blocks.append(types.MethodType(self._hs_fn, self))
             from .signal import posedge as _posedge
-            self._always_blocks.append(([_posedge(self.clock)], bound_write))
+            self._always_blocks.append(([_posedge(self.clock)],
+                                        types.MethodType(self._write_fn, self)))
 
     _Axi4LiteSub.__name__ = 'Axi4LiteSub'
     _Axi4LiteSub.__qualname__ = 'Axi4LiteSub'

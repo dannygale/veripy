@@ -84,17 +84,14 @@ class CPU(Module):
         self.reset  = Input()
         self.halted = Output()
 
-        # Memories
-        self.imem    = Mem(MEM_DEPTH, DATA_W)   # instruction memory
-        self.dmem    = Mem(MEM_DEPTH, DATA_W)   # data memory
-        self.regfile = Mem(REG_DEPTH, DATA_W)   # register file
+        self.imem    = Mem(MEM_DEPTH, DATA_W)
+        self.dmem    = Mem(MEM_DEPTH, DATA_W)
+        self.regfile = Mem(REG_DEPTH, DATA_W)
 
-        # ── IF/ID pipeline register ───────────────────────────────
         self.if_id_instr = Register(DATA_W)
         self.if_id_valid = Register()
         self.if_id_pc    = Register(DATA_W)
 
-        # ── ID/EX pipeline register ───────────────────────────────
         self.ex_rs1_data = Register(DATA_W)
         self.ex_rs2_data = Register(DATA_W)
         self.ex_imm      = Register(DATA_W)
@@ -113,7 +110,6 @@ class CPU(Module):
         self.ex_valid    = Register()
         self.ex_pc       = Register(DATA_W)
 
-        # ── EX/WB pipeline register ───────────────────────────────
         self.wb_result   = Register(DATA_W)
         self.wb_rs2_data = Register(DATA_W)
         self.wb_mem_addr = Register(DATA_W)
@@ -124,11 +120,8 @@ class CPU(Module):
         self.wb_valid    = Register()
         self.wb_is_halt  = Register()
 
-        # ── PC ────────────────────────────────────────────────────
         self.pc = Register(DATA_W)
 
-        # ── Intermediate combinational signals ────────────────────
-        # Declared explicitly to avoid Signal aliasing in simulation.
         from veripy import Signal
         self.id_rs1_addr   = Signal(REG_AW)
         self.id_rs2_addr   = Signal(REG_AW)
@@ -156,7 +149,8 @@ class CPU(Module):
 
         super().__init__()
 
-        # ── Decode (reads if_id_instr — sequential) ───────────────
+    def rtl(self):
+        # ── Decode ────────────────────────────────────────────────
         @self.comb
         def decode():
             instr  = self.if_id_instr

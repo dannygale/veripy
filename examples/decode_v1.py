@@ -37,9 +37,9 @@ class ControlUnit(Module):
         self.alu_op    = Output(4)
         super().__init__()
 
+    def rtl(self):
         @self.comb
         def decode():
-            # Defaults
             self.reg_we = 0;    self.mem_re = 0;    self.mem_we = 0
             self.use_imm = 0;   self.mem_to_reg = 0
             self.is_jump = 0;   self.is_brcc = 0;   self.is_call = 0
@@ -120,6 +120,7 @@ class Decode(Module):
         self.ctrl          = ControlUnit()
         super().__init__()
 
+    def rtl(self):
         @self.comb
         def wire_ctrl():
             self.ctrl.opcode = self.instr[15:11]
@@ -145,17 +146,14 @@ class Decode(Module):
             self.rd_addr     = self.instr[10:8]
             self.branch_cond = self.instr[10:8]
             self.immediate   = self.instr[7:0]
-            # Sign-extend for branch offset
             self.branch_offset = self.instr[7:0] | (0xFF00 if self.instr[7] else 0)
 
         @self.comb
         def remap():
-            # rs1 reads from rd field for ADDI/SUBI/JMP/CALL
             opcode = self.instr[15:11]
             rs1_from_rd = (opcode == OP_ADDI or opcode == OP_SUBI or
                            opcode == OP_JMP or opcode == OP_CALL)
             self.rs1_addr = self.instr[10:8] if rs1_from_rd else self.instr[7:5]
-            # rs2 reads from rd field for STORE
             self.rs2_addr = self.instr[10:8] if opcode == OP_STORE else self.instr[4:2]
 
 

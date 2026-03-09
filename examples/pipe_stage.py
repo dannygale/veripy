@@ -26,6 +26,7 @@ class PipeReg(Module):
         self.data    = Register(width)
         super().__init__()
 
+    def rtl(self):
         @self.comb
         def drive():
             self.q = self.data
@@ -43,25 +44,21 @@ class ForwardMux(Module):
 
     def __init__(self, width=16):
         self.clock       = Input()
-        # Source addresses (for match detection)
         self.rs_addr     = Input(3)
         self.ex_rd_addr  = Input(3)
         self.mem_rd_addr = Input(3)
-        # Write-enable signals (only forward if destination is being written)
         self.ex_we       = Input()
         self.mem_we      = Input()
-        # Data sources
         self.reg_val     = Input(width)
         self.ex_val      = Input(width)
         self.mem_val     = Input(width)
-        # Output
         self.out         = Output(width)
-        self.fwd_sel     = Output(2)   # 0=reg, 1=EX, 2=MEM (debug)
+        self.fwd_sel     = Output(2)
         super().__init__()
 
+    def rtl(self):
         @self.comb
         def forward():
-            # EX has priority over MEM (more recent instruction)
             if self.ex_we and self.rs_addr == self.ex_rd_addr:
                 self.out = self.ex_val
                 self.fwd_sel = 1

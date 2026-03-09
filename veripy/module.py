@@ -77,7 +77,10 @@ class Module:
         self._assumes = []         # [(clock_signal, func), ...]
         self._timing = []          # [(constraint_type, kwargs), ...]
         self._clock_domains = {}   # {domain_name: clock_signal_name}
-        self._behavioral = None    # optional behavioral model function
+        self._functional = None    # optional functional (no-timing) model
+        self._cycle = None         # optional cycle-accurate model
+        self._iss = None           # optional ISS model (ISA-aware functional)
+        self._behavioral = self._functional  # migration alias
         if params is not None:
             self._params = params
             for name, val in params.items():
@@ -112,6 +115,9 @@ class Module:
                 for i, sig in enumerate(val):
                     if not sig.name:
                         sig.name = f'{attr}_{i}'
+        # Call rtl() if subclass defines it — collects @self.comb/@self.posedge blocks
+        if type(self).rtl is not Module.rtl:
+            self.rtl()
 
     def always(self, sensitivity):
         """Decorator: register a method with an explicit sensitivity list.
@@ -242,19 +248,74 @@ class Module:
         self._pipelines.append(p)
         return p
 
-    def behavioral(self, func):
-        """Decorator: register a behavioral model for fast emulation.
-
-        The behavioral function replaces all comb/posedge blocks during
-        tick() when mode='behavioral'. It is never emitted as Verilog.
+    def functional(self, func=None):
+        """Decorator: register a functional (no-timing) model for Python sim.
 
         Usage:
-            @self.behavioral
-            def fast_model():
-                self.out = self.a * self.b
+            @self.functional
+            def model(self):
+                self.out = self.a + self.b
+
+        Or override as a method in a subclass (no decorator needed).
         """
-        self._behavioral = func
+        if func is None:
+            return  # called as plain method override — no-op
+        self._functional = func
         return func
+
+    def cycle(self, func=None):
+        """Decorator: register a cycle-accurate model for Python sim.
+
+        Usage:
+            @self.cycle
+            def model(self):
+                ...
+
+        Or override as a method in a subclass (no decorator needed).
+        """
+        if func is None:
+            return
+        self._cycle = func
+        return func
+
+    def iss(self, func=None):
+        """Decorator: mark the functional model as an ISA interpreter.
+
+        Usage:
+            @self.iss
+            def model(self):
+                ...
+
+        Or override as a method in a subclass (no decorator needed).
+        """
+        if func is None:
+            return
+        self._functional = func
+        self._iss = func
+        return func
+
+    def rtl(self):
+        """Override point for RTL logic blocks.
+
+        Put @self.comb and @self.posedge blocks here instead of __init__.
+        Called automatically by Module.__init__ after signal setup.
+
+        Usage::
+
+            def rtl(self):
+                @self.comb
+                def output_logic():
+                    self.out = self.a + self.b
+
+                @self.posedge(self.clock)
+                def seq():
+                    ...
+        """
+        pass
+
+    def behavioral(self, func):
+        """Alias for functional(). Deprecated — use @self.functional instead."""
+        return self.functional(func)
 
     def fsm(self, clock, reset, states):
         """Decorator: define an FSM with states and transitions.

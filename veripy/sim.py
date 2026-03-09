@@ -391,10 +391,11 @@ class BehavioralSim:
         self.mod = module
 
     def step(self):
-        """Advance one step: call behavioral model or fall back to sim."""
+        """Advance one step: call functional model or fall back to sim."""
         mod = self.mod
-        if mod._behavioral is not None:
-            mod._behavioral()
+        fn = mod._functional if mod._functional is not None else mod._behavioral
+        if fn is not None:
+            fn()
         else:
             mod._settle_comb()
             triggered = mod._check_edges()

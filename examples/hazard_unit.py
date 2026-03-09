@@ -9,13 +9,10 @@ from veripy import Module, Input, Output
 
 class HazardUnit(Module):
     def __init__(self, reg_addr_w=3):
-        # ID stage
         self.id_rs1_addr    = Input(reg_addr_w)
         self.id_rs2_addr    = Input(reg_addr_w)
         self.id_branch_reg  = Input()
         self.id_branch_flag = Input()
-
-        # EX stage (ID/EX pipe reg outputs)
         self.id_ex_reg_we   = Input()
         self.id_ex_mem_re   = Input()
         self.id_ex_cmp      = Input()
@@ -23,22 +20,14 @@ class HazardUnit(Module):
         self.id_ex_valid    = Input()
         self.id_ex_rs1_addr = Input(reg_addr_w)
         self.id_ex_rs2_addr = Input(reg_addr_w)
-
-        # EX/MEM forwarding source
         self.ex_mem_reg_we  = Input()
         self.ex_mem_mem_re  = Input()
         self.ex_mem_rd_addr = Input(reg_addr_w)
         self.ex_mem_valid   = Input()
-
-        # MEM/WB forwarding source
         self.mem_wb_reg_we  = Input()
         self.mem_wb_rd_addr = Input(reg_addr_w)
         self.mem_wb_valid   = Input()
-
-        # Branch taken
         self.branch_taken   = Input()
-
-        # Outputs
         self.fwd_a       = Output(2)
         self.fwd_b       = Output(2)
         self.id_fwd_rs1  = Output(2)
@@ -47,7 +36,7 @@ class HazardUnit(Module):
         self.flush_id_ex = Output()
         super().__init__()
 
-        # --- EX-stage forwarding ---
+    def rtl(self):
         @self.comb
         def ex_fwd_a():
             if self.ex_mem_valid and self.ex_mem_reg_we and self.ex_mem_rd_addr == self.id_ex_rs1_addr:
@@ -66,7 +55,6 @@ class HazardUnit(Module):
             else:
                 self.fwd_b = 0
 
-        # --- ID-stage forwarding (branch operand) ---
         @self.comb
         def id_fwd():
             if self.ex_mem_valid and self.ex_mem_reg_we and not self.ex_mem_mem_re and self.ex_mem_rd_addr == self.id_rs1_addr:
@@ -76,7 +64,6 @@ class HazardUnit(Module):
             else:
                 self.id_fwd_rs1 = 0
 
-        # --- Stall ---
         @self.comb
         def stall_logic():
             if self.id_ex_valid and self.id_ex_mem_re and (self.id_ex_rd_addr == self.id_rs1_addr or self.id_ex_rd_addr == self.id_rs2_addr):
@@ -88,7 +75,6 @@ class HazardUnit(Module):
             else:
                 self.stall = 0
 
-        # --- Flush ---
         @self.comb
         def flush():
             self.flush_if_id = self.branch_taken

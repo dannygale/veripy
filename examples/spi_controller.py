@@ -72,37 +72,36 @@ class SpiController(Module):
     """SPI master with TX FIFO. Shifts MSB-first, CPOL=0 CPHA=0."""
 
     def __init__(self, width=8, fifo_depth=4, clk_div=4):
-        # System
         self.clock = Input()
         self.reset = Input()
 
-        # Host interface
         self.tx_data  = Input(width)
         self.tx_valid = Input()
         self.tx_ready = Output()
         self.rx_data  = Output(width)
         self.rx_valid = Output()
 
-        # SPI bus
         self.spi = SpiBus()
 
-        # Sub-module: TX FIFO
         self.fifo = sync_fifo(width=width, depth=fifo_depth)
 
-        # Internal
         self.shift_out = Register(width)
         self.shift_in  = Register(width)
         self.bit_cnt   = Register(4)
         self.clk_cnt   = Register(8)
         self.sclk_reg  = Register()
 
+        self._width   = width
+        self._clk_div = clk_div
         super().__init__()
 
-        # ── Timing constraints ───────────────────────────────────
         self.create_clock(self.clock, period_ns=10)
         self.max_delay(self.tx_data, self.spi.mosi, ns=8)
 
-        # ── FIFO wiring ──────────────────────────────────────────
+    def rtl(self):
+        width   = self._width
+        clk_div = self._clk_div
+
         @self.comb
         def fifo_wiring():
             self.fifo.clock = self.clock
@@ -111,7 +110,6 @@ class SpiController(Module):
             self.fifo.push  = self.tx_valid and not self.fifo.full
             self.tx_ready   = 1 if not self.fifo.full else 0
 
-        # ── FSM ──────────────────────────────────────────────────
         @self.fsm(self.clock, self.reset,
                   states=['IDLE', 'LOAD', 'SHIFT', 'DONE'])
         def ctrl(state):
@@ -125,23 +123,19 @@ class SpiController(Module):
                 if not self.fifo.empty:
                     self.fifo.pop = 1
                     return LOAD
-
             elif state == LOAD:
                 self.spi.cs_n = 0
                 return SHIFT
-
             elif state == SHIFT:
                 self.spi.cs_n = 0
                 self.spi.sclk = self.sclk_reg
                 self.spi.mosi = self.shift_out[width - 1]
                 if self.bit_cnt == width and self.clk_cnt == 0:
                     return DONE
-
             elif state == DONE:
                 self.rx_valid = 1
                 return IDLE
 
-        # ── Shift register + clock divider ────────────────────────
         @self.posedge(self.clock)
         def shift_logic():
             if self.reset:
@@ -150,39 +144,35 @@ class SpiController(Module):
                 self.bit_cnt   = 0
                 self.clk_cnt   = 0
                 self.sclk_reg  = 0
-            elif self._fsm_state == 1:       # LOAD
+            elif self._fsm_state == 1:
                 self.shift_out = self.fifo.dout
                 self.shift_in  = 0
                 self.bit_cnt   = 0
                 self.clk_cnt   = 0
                 self.sclk_reg  = 0
-            elif self._fsm_state == 2:       # SHIFT
+            elif self._fsm_state == 2:
                 if self.clk_cnt == clk_div - 1:
                     self.clk_cnt  = 0
                     self.sclk_reg = not self.sclk_reg
-                    if self.sclk_reg:        # falling edge of sclk
+                    if self.sclk_reg:
                         self.shift_out = self.shift_out << 1
                         self.shift_in  = (self.shift_in << 1) | self.spi.miso
                         self.bit_cnt   = self.bit_cnt + 1
                 else:
                     self.clk_cnt = self.clk_cnt + 1
 
-        # ── RX output ────────────────────────────────────────────
         @self.comb
         def rx_out():
             self.rx_data = self.shift_in
 
-        # ── Formal properties ────────────────────────────────────
         @self.assert_always(self.clock)
         def cs_during_shift():
-            """CS must be low during SHIFT state."""
-            if int(self._fsm_state) == 2:    # SHIFT
+            if int(self._fsm_state) == 2:
                 return int(self.spi.cs_n) == 0
             return True
 
         @self.cover(self.clock)
         def full_fifo_transfer():
-            """Cover: FIFO was full at some point."""
             return int(self.fifo.full) == 1
 
 

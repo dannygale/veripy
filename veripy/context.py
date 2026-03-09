@@ -28,8 +28,9 @@ class ModuleContext:
         self.assumes = []
         self.timing = []
         self.clock_domains = {}  # {domain_name: clock_signal_name}
-        self.behavioral_fn = None
-        self.behavioral_fn = None
+        self.functional_fn = None
+        self.cycle_fn = None
+        self.iss_fn = None
 
 
 # --- Logic block decorators ---
@@ -44,14 +45,58 @@ def comb(fn):
     return fn
 
 
-def behavioral(fn):
-    """Register a behavioral model that replaces comb/seq during Python sim."""
+def functional(fn):
+    """Register a functional model (no timing) that replaces RTL during Python sim."""
     ctx = _get_context()
     if ctx is not None:
-        ctx.behavioral_fn = fn
+        ctx.functional_fn = fn
     else:
-        fn._veripy_behavioral = True
+        fn._veripy_functional = True
     return fn
+
+
+def cycle(fn):
+    """Register a cycle-accurate model that replaces RTL during Python sim."""
+    ctx = _get_context()
+    if ctx is not None:
+        ctx.cycle_fn = fn
+    else:
+        fn._veripy_cycle = True
+    return fn
+
+
+def iss(fn):
+    """Mark the functional model as an ISA interpreter (CPU/coprocessor modules).
+
+    Implies @functional. Enables automatic compliance testing infrastructure
+    and ISS<->cycle / ISS<->RTL diffing.
+    """
+    ctx = _get_context()
+    if ctx is not None:
+        ctx.functional_fn = fn
+        ctx.iss_fn = fn
+    else:
+        fn._veripy_functional = True
+        fn._veripy_iss = True
+    return fn
+
+
+def rtl(fn):
+    """Wrap RTL logic blocks (@comb/@always) in an explicit RTL layer container.
+
+    The wrapped function is called immediately so that @comb/@always inside it
+    register on the current module context.
+    """
+    ctx = _get_context()
+    if ctx is not None:
+        fn()
+    return fn
+
+
+# Alias for migration compatibility
+def behavioral(fn):
+    """Alias for @functional. Deprecated — use @functional instead."""
+    return functional(fn)
 
 
 def always(sensitivity):

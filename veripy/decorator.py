@@ -160,6 +160,10 @@ def module(func):
         instance._assumes = []
         instance._timing = []
         instance._params = resolved_params
+        instance._functional = None
+        instance._cycle = None
+        instance._iss = None
+        instance._behavioral = None  # migration alias
 
         # Attach signals, mems, submodules
         for name, val in local_vars.items():
@@ -217,8 +221,14 @@ def module(func):
         instance._assertions = list(ctx.assertions)
         instance._covers = list(ctx.covers)
         instance._assumes = list(ctx.assumes)
-        if ctx.behavioral_fn is not None:
-            instance._behavioral = ctx.behavioral_fn
+        if ctx.functional_fn is not None:
+            instance._functional = ctx.functional_fn
+        if ctx.cycle_fn is not None:
+            instance._cycle = ctx.cycle_fn
+        if ctx.iss_fn is not None:
+            instance._iss = ctx.iss_fn
+        # migration alias
+        instance._behavioral = instance._functional
         for clock, fn in instance._assertions:
             src = emitter_sources.get(fn.__name__)
             if src:

@@ -6,17 +6,7 @@ from .blackbox import BlackBox
 
 
 class SyncFifo(Module):
-    """Synchronous FIFO with configurable depth and width.
-
-    Ports:
-        clock, reset       — system signals
-        push, din, full    — write side
-        pop, dout, empty   — read side
-        count              — current occupancy
-
-    Usage:
-        fifo = SyncFifo(width=8, depth=16)
-    """
+    """Synchronous FIFO with configurable depth and width."""
 
     def __init__(self, width=8, depth=4):
         self.clock = Input()
@@ -36,9 +26,13 @@ class SyncFifo(Module):
         self.wptr = Register(ptr_bits)
         self.rptr = Register(ptr_bits)
         self.cnt  = Register(cnt_bits)
+        self._depth = depth
+        self._mask  = depth - 1
         super().__init__()
 
-        mask = depth - 1
+    def rtl(self):
+        depth = self._depth
+        mask  = self._mask
 
         @self.comb
         def flags():
@@ -64,20 +58,7 @@ class SyncFifo(Module):
 
 
 class EdgeDetector(Module):
-    """Rising/falling/both edge detector.
-
-    Ports:
-        clock, reset  — system signals
-        d             — input signal
-        rise          — high for one cycle on rising edge
-        fall          — high for one cycle on falling edge
-        toggle        — high for one cycle on any edge
-
-    All outputs are registered (one cycle latency).
-
-    Usage:
-        ed = EdgeDetector()
-    """
+    """Rising/falling/both edge detector."""
 
     def __init__(self):
         self.clock  = Input()
@@ -92,6 +73,7 @@ class EdgeDetector(Module):
         self.tog_r  = Register()
         super().__init__()
 
+    def rtl(self):
         @self.posedge(self.clock)
         def sample():
             if self.reset:
@@ -113,18 +95,7 @@ class EdgeDetector(Module):
 
 
 class Debouncer(Module):
-    """Button/signal debouncer with configurable threshold.
-
-    Holds output stable until input is steady for `threshold` clock cycles.
-
-    Ports:
-        clock, reset  — system signals
-        d             — noisy input
-        q             — debounced output
-
-    Usage:
-        db = Debouncer(threshold=1000)
-    """
+    """Button/signal debouncer with configurable threshold."""
 
     def __init__(self, threshold=1000):
         self.clock = Input()
@@ -135,7 +106,11 @@ class Debouncer(Module):
         cnt_bits = (threshold).bit_length() + 1
         self.cnt = Register(cnt_bits)
         self.qr  = Register()
+        self._threshold = threshold
         super().__init__()
+
+    def rtl(self):
+        threshold = self._threshold
 
         @self.posedge(self.clock)
         def logic():
@@ -157,20 +132,7 @@ class Debouncer(Module):
 
 
 class RoundRobinArbiter(Module):
-    """Round-robin arbiter for N requestors.
-
-    Grants one request per cycle in round-robin order. If no requests
-    are active, grant is 0. The arbiter is fair: it rotates priority
-    after each grant.
-
-    Ports:
-        clock, reset  — system signals
-        req           — N-bit request vector (one-hot or multi-hot)
-        grant         — N-bit grant vector (one-hot, at most one bit set)
-
-    Usage:
-        arb = RoundRobinArbiter(n=4)
-    """
+    """Round-robin arbiter for N requestors."""
 
     def __init__(self, n=4):
         self.clock = Input()
@@ -179,7 +141,11 @@ class RoundRobinArbiter(Module):
         self.grant = Output(n)
         self.ptr   = Register(n.bit_length())
         self.grnt  = Register(n)
+        self._n = n
         super().__init__()
+
+    def rtl(self):
+        n = self._n
 
         @self.posedge(self.clock)
         def update():
@@ -205,18 +171,7 @@ class RoundRobinArbiter(Module):
 
 
 class PriorityArbiter(Module):
-    """Fixed-priority arbiter for N requestors.
-
-    Lowest index = highest priority. Grant is one-hot.
-
-    Ports:
-        clock, reset  — system signals
-        req           — N-bit request vector
-        grant         — N-bit grant vector (one-hot)
-
-    Usage:
-        arb = PriorityArbiter(n=4)
-    """
+    """Fixed-priority arbiter for N requestors."""
 
     def __init__(self, n=4):
         self.clock = Input()
@@ -224,7 +179,11 @@ class PriorityArbiter(Module):
         self.req   = Input(n)
         self.grant = Output(n)
         self.grnt  = Register(n)
+        self._n = n
         super().__init__()
+
+    def rtl(self):
+        n = self._n
 
         @self.posedge(self.clock)
         def update():
@@ -245,18 +204,7 @@ class PriorityArbiter(Module):
 
 
 class ClockDivider(Module):
-    """Parameterized clock divider.
-
-    Output toggles every ``divisor`` input clock cycles, producing
-    a clock with period = 2 * divisor * input period.
-
-    Ports:
-        clock, reset  — system signals
-        clk_out       — divided clock output
-
-    Usage:
-        div = ClockDivider(divisor=4)
-    """
+    """Parameterized clock divider."""
 
     def __init__(self, divisor=2):
         self.clock   = Input()
@@ -264,9 +212,13 @@ class ClockDivider(Module):
         self.clk_out = Output()
 
         cnt_bits = max(1, (divisor - 1).bit_length())
-        self.cnt  = Register(cnt_bits)
+        self.cnt   = Register(cnt_bits)
         self.out_r = Register()
+        self._divisor = divisor
         super().__init__()
+
+    def rtl(self):
+        divisor = self._divisor
 
         @self.posedge(self.clock)
         def divide():
@@ -285,21 +237,7 @@ class ClockDivider(Module):
 
 
 class CreditFlowControl(Module):
-    """Credit-based flow control.
-
-    Sender may send when credits > 0. Each send consumes a credit;
-    each recv returns a credit.
-
-    Ports:
-        clock, reset   — system signals
-        send_valid     — input: sender has data
-        send_ready     — output: credits available (sender may send)
-        recv_valid     — input: receiver consumed data (returns credit)
-        recv_ready     — output: receiver can accept (always 1 when credits < max)
-
-    Usage:
-        fc = CreditFlowControl(credits=4)
-    """
+    """Credit-based flow control."""
 
     def __init__(self, credits=4):
         self.clock      = Input()
@@ -311,7 +249,11 @@ class CreditFlowControl(Module):
 
         cnt_bits = credits.bit_length() + 1
         self.cnt = Register(cnt_bits)
+        self._credits = credits
         super().__init__()
+
+    def rtl(self):
+        credits = self._credits
 
         @self.posedge(self.clock)
         def update():
@@ -332,40 +274,7 @@ class CreditFlowControl(Module):
 
 
 class DmaEngine(Module):
-    """Simple memory-to-memory DMA engine template.
-
-    Transfers *length* words from *src_addr* to *dst_addr* using a
-    generic read/write memory interface.  Assert ``start`` for one cycle
-    to begin a transfer; ``done`` pulses for one cycle on completion.
-
-    The read and write interfaces use a simple valid/ready handshake:
-
-    * **Read**: assert ``rd_en`` with ``rd_addr``; data arrives on
-      ``rd_data`` when ``rd_valid`` is high.
-    * **Write**: assert ``wr_en`` with ``wr_addr`` and ``wr_data``;
-      accepted when ``wr_ready`` is high.
-
-    Ports:
-        clock, reset   — system signals
-        start          — pulse to begin transfer
-        src_addr       — source start address
-        dst_addr       — destination start address
-        length         — number of words to transfer
-        done           — pulses for one cycle when transfer completes
-        busy           — high while transfer is in progress
-        rd_addr        — read address output
-        rd_en          — read enable output
-        rd_data        — read data input
-        rd_valid       — read data valid input
-        wr_addr        — write address output
-        wr_en          — write enable output
-        wr_data        — write data output
-        wr_ready       — write accepted input
-
-    Usage::
-
-        dma = DmaEngine(addr_width=32, data_width=32)
-    """
+    """Simple memory-to-memory DMA engine template."""
 
     def __init__(self, addr_width=32, data_width=32):
         self.clock    = Input()
@@ -377,38 +286,37 @@ class DmaEngine(Module):
         self.done     = Output()
         self.busy     = Output()
 
-        # Read interface
         self.rd_addr  = Output(addr_width)
         self.rd_en    = Output()
         self.rd_data  = Input(data_width)
         self.rd_valid = Input()
 
-        # Write interface
         self.wr_addr  = Output(addr_width)
         self.wr_en    = Output()
         self.wr_data  = Output(data_width)
         self.wr_ready = Input()
 
-        strb_width = data_width // 8
+        self._strb_width = data_width // 8
 
-        # State: 0=IDLE, 1=READ, 2=WRITE, 3=DONE
-        self.state    = Register(2)
-        self.cur_src  = Register(addr_width)
-        self.cur_dst  = Register(addr_width)
-        self.remain   = Register(addr_width)
-        self.rdbuf    = Register(data_width)   # read data buffer
+        self.state   = Register(2)
+        self.cur_src = Register(addr_width)
+        self.cur_dst = Register(addr_width)
+        self.remain  = Register(addr_width)
+        self.rdbuf   = Register(data_width)
         super().__init__()
 
+    def rtl(self):
         S_IDLE  = 0
         S_READ  = 1
         S_WRITE = 2
         S_DONE  = 3
+        strb_width = self._strb_width
 
         @self.posedge(self.clock)
         def fsm():
             if self.reset:
-                self.state   = S_IDLE
-                self.remain  = 0
+                self.state  = S_IDLE
+                self.remain = 0
             elif self.state == S_IDLE:
                 if self.start:
                     self.cur_src = self.src_addr
@@ -417,8 +325,8 @@ class DmaEngine(Module):
                     self.state   = S_READ
             elif self.state == S_READ:
                 if self.rd_valid:
-                    self.rdbuf  = self.rd_data
-                    self.state  = S_WRITE
+                    self.rdbuf = self.rd_data
+                    self.state = S_WRITE
             elif self.state == S_WRITE:
                 if self.wr_ready:
                     self.cur_src = self.cur_src + strb_width
@@ -443,28 +351,7 @@ class DmaEngine(Module):
 
 
 class IntController(Module):
-    """Edge-triggered interrupt controller for N interrupt sources.
-
-    Each interrupt source has an enable bit (``ier``) and a pending bit
-    (``ipr``).  A rising edge on ``irq[i]`` sets ``ipr[i]``.  Software
-    clears pending bits by asserting the corresponding bit in ``ipr_clr``
-    for one cycle.  ``irq_out`` is asserted whenever any enabled interrupt
-    is pending.
-
-    Ports:
-        clock, reset   — system signals
-        irq            — N-bit interrupt request inputs (level, edge-detected)
-        irq_out        — 1-bit interrupt output to CPU
-        ier            — N-bit interrupt enable register (current value)
-        ier_we         — write enable for ier
-        ier_wdata      — write data for ier
-        ipr            — N-bit interrupt pending register (read-only)
-        ipr_clr        — N-bit write-1-to-clear for ipr
-
-    Usage::
-
-        ic = IntController(n=8)
-    """
+    """Edge-triggered interrupt controller for N interrupt sources."""
 
     def __init__(self, n=8):
         self.clock     = Input()
@@ -477,11 +364,12 @@ class IntController(Module):
         self.ipr       = Output(n)
         self.ipr_clr   = Input(n)
 
-        self.ier_r  = Register(n)
-        self.ipr_r  = Register(n)
-        self.irq_d  = Register(n)   # previous irq for edge detection
+        self.ier_r = Register(n)
+        self.ipr_r = Register(n)
+        self.irq_d = Register(n)
         super().__init__()
 
+    def rtl(self):
         @self.posedge(self.clock)
         def update():
             if self.reset:
@@ -489,7 +377,6 @@ class IntController(Module):
                 self.ipr_r = 0
                 self.irq_d = 0
             else:
-                # Rising-edge detect: set pending bits; clear via ipr_clr
                 self.ipr_r = (self.ipr_r | (self.irq & ~self.irq_d)) & ~self.ipr_clr
                 self.irq_d = self.irq
                 if self.ier_we:
@@ -502,52 +389,11 @@ class IntController(Module):
             self.irq_out = 1 if (self.ipr_r & self.ier_r) else 0
 
 
-# ── DDR memory controller ─────────────────────────────────────────────
-
 class DdrPhy(BlackBox):
-    """BlackBox wrapper for a vendor DDR PHY.
-
-    Provides the standard DDR3/DDR4 physical interface signals.  The
-    ``verilog_module_name`` defaults to ``ddr_phy`` — override it with
-    the actual vendor primitive name (e.g. ``MIG_7SERIES``, ``ddr4``).
-
-    Ports (PHY side — connect directly to FPGA/ASIC I/O):
-        ck_p / ck_n    — differential clock
-        cke            — clock enable
-        cs_n           — chip select (active low)
-        ras_n          — row address strobe (active low)
-        cas_n          — column address strobe (active low)
-        we_n           — write enable (active low)
-        ba             — bank address
-        addr           — row/column address
-        dq             — data bus (bidirectional, modelled as in+out)
-        dqs_p / dqs_n  — data strobe (differential)
-        dm             — data mask
-        odt            — on-die termination
-
-    Ports (controller side):
-        sys_clk        — system clock input
-        sys_reset      — system reset input
-        init_done      — PHY initialisation complete
-        app_addr       — application address
-        app_cmd        — command (0=write, 1=read)
-        app_en         — command enable
-        app_rdy        — command accepted
-        app_wdf_data   — write data
-        app_wdf_wren   — write data enable
-        app_wdf_rdy    — write data accepted
-        app_rd_data    — read data
-        app_rd_valid   — read data valid
-
-    Usage::
-
-        phy = DdrPhy(data_width=16, addr_width=15, bank_width=3,
-                     verilog_module_name='MIG_7SERIES')
-    """
+    """BlackBox wrapper for a vendor DDR PHY."""
 
     def __init__(self, data_width=16, addr_width=15, bank_width=3,
                  verilog_module_name='ddr_phy'):
-        # PHY I/O
         self.ck_p    = Output()
         self.ck_n    = Output()
         self.cke     = Output()
@@ -563,7 +409,6 @@ class DdrPhy(BlackBox):
         self.dqs_n   = Output(data_width // 8)
         self.dm      = Output(data_width // 8)
         self.odt     = Output()
-        # Controller interface
         self.sys_clk      = Input()
         self.sys_reset    = Input()
         self.init_done    = Output()
@@ -580,26 +425,7 @@ class DdrPhy(BlackBox):
 
 
 class DdrController(Module):
-    """Simple DDR controller wrapper around :class:`DdrPhy`.
-
-    Provides a word-addressed read/write interface on top of the DDR PHY
-    application port.  Handles the init_done gate and basic command
-    sequencing.
-
-    Ports:
-        clock, reset   — system signals (forwarded to PHY as sys_clk/sys_reset)
-        ready          — high when PHY init is done and controller is idle
-        addr           — word address for read/write
-        we             — write enable
-        wdata          — write data
-        re             — read enable
-        rdata          — read data
-        rvalid         — read data valid
-
-    Usage::
-
-        ctrl = DdrController(data_width=16, addr_width=15)
-    """
+    """Simple DDR controller wrapper around DdrPhy."""
 
     def __init__(self, data_width=16, addr_width=15, bank_width=3,
                  verilog_module_name='ddr_phy'):
@@ -619,6 +445,7 @@ class DdrController(Module):
         self.rdata_r  = Register(data_width * 4)
         super().__init__()
 
+    def rtl(self):
         @self.posedge(self.clock)
         def capture():
             if self.reset:
@@ -642,33 +469,8 @@ class DdrController(Module):
             self.rvalid           = self.rvalid_r
 
 
-# ── JTAG debug transport ──────────────────────────────────────────────
-
 class JtagTap(BlackBox):
-    """BlackBox wrapper for a vendor JTAG TAP controller.
-
-    Provides the standard JTAG interface plus a debug register bus.
-    Override ``verilog_module_name`` with the actual vendor primitive.
-
-    Ports (JTAG I/O):
-        tck    — test clock
-        tms    — test mode select
-        tdi    — test data in
-        tdo    — test data out
-
-    Ports (debug bus):
-        dbg_clk    — debug clock output (typically = tck)
-        dbg_addr   — debug register address
-        dbg_we     — debug write enable
-        dbg_wdata  — debug write data
-        dbg_rdata  — debug read data
-        dbg_valid  — transaction valid
-
-    Usage::
-
-        tap = JtagTap(data_width=32, addr_width=7,
-                      verilog_module_name='jtag_tap')
-    """
+    """BlackBox wrapper for a vendor JTAG TAP controller."""
 
     def __init__(self, data_width=32, addr_width=7,
                  verilog_module_name='jtag_tap'):
@@ -686,24 +488,7 @@ class JtagTap(BlackBox):
 
 
 class DebugModule(Module):
-    """JTAG debug module wrapping :class:`JtagTap`.
-
-    Exposes a simple register file accessible over JTAG.  The debug
-    registers are readable and writable from both the JTAG side and the
-    system side.
-
-    Ports:
-        tck, tms, tdi, tdo  — JTAG signals (pass-through to JtagTap)
-        clock, reset        — system clock/reset
-        dbg_addr            — system-side debug register address
-        dbg_we              — system-side write enable
-        dbg_wdata           — system-side write data
-        dbg_rdata           — system-side read data
-
-    Usage::
-
-        dm = DebugModule(data_width=32, addr_width=7, n_regs=128)
-    """
+    """JTAG debug module wrapping JtagTap."""
 
     def __init__(self, data_width=32, addr_width=7, n_regs=128,
                  verilog_module_name='jtag_tap'):
@@ -724,6 +509,7 @@ class DebugModule(Module):
         self.rdata_r = Register(data_width)
         super().__init__()
 
+    def rtl(self):
         @self.posedge(self.clock)
         def sys_access():
             if self.reset:

@@ -631,8 +631,9 @@ class BehavioralTestCase(unittest.TestCase):
         for name, val in kwargs.items():
             getattr(self._mod, name)._val = val
         self._mod._settle_comb()
-        if getattr(self._mod, '_behavioral', None) is not None:
-            self._mod._behavioral()
+        fn = getattr(self._mod, '_functional', None) or getattr(self._mod, '_behavioral', None)
+        if fn is not None:
+            fn()
 
     def out(self, name):
         """Read an output signal value."""

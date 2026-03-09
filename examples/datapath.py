@@ -20,6 +20,7 @@ class ALU(Module):
         self.result = Output(width)
         super().__init__()
 
+    def rtl(self):
         @self.comb
         def compute():
             if self.op == 0:
@@ -42,6 +43,7 @@ class Datapath(Module):
         self.alu    = ALU(width)
         super().__init__()
 
+    def rtl(self):
         @self.comb
         def wire_alu():
             self.alu.a  = self.a
