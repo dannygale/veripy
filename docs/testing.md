@@ -125,6 +125,51 @@ compared cycle-by-cycle. Any mismatch is a test failure.
 $ veripy test tests/ -v
 ```
 
+### Multi-Model Dispatch
+
+When a module defines multiple simulation layers (`@functional`, `@cycle`, RTL),
+`TestBench` automatically runs the test against each available layer and
+cross-checks outputs at every `set()`/`out()` boundary.
+
+**Model fidelity order:** `functional` < `cycle` < `rtl`
+
+#### Default (no `model` attribute)
+
+All layers the module defines are exercised:
+
+```python
+class TestMyModule(TestBench):
+    def create_module(self):
+        return my_module()   # defines @functional + RTL → runs both
+```
+
+#### Pinned floor (`model` attribute)
+
+Set a minimum fidelity floor — the test requires at least this layer:
+
+```python
+class TestPipelineStall(TestBench):
+    model = 'cycle'   # skips functional; runs cycle and rtl
+```
+
+The CLI can raise the floor but not lower it below the class value.
+
+#### CLI override
+
+```
+veripy test                          # all available models per module
+veripy test --model functional       # functional only; skip pinned tests requiring more
+veripy test --model cycle            # cycle and above
+veripy test --model rtl              # RTL only
+```
+
+Or via environment variable: `VERIPY_MODEL=rtl veripy test`.
+
+#### Cross-check
+
+When multiple models run, outputs recorded via `self.out()` are compared across
+all models. A mismatch fails the test with a diff showing which model diverged.
+
 ---
 
 ## BehavioralTestCase — Combinational / Intent Testing

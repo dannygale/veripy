@@ -23,3 +23,18 @@
 
 ### What is next
 - #206: Update docs/testing.md and migrate existing TestBench usages to use `model` attribute where appropriate.
+
+## 2026-03-09 — multi-model-testing: docs + tests (task #206)
+
+**Done:**
+- Updated `docs/testing.md` with a new "Multi-Model Dispatch" section covering default auto-dispatch, `model` floor pinning, CLI/env override, and cross-check behavior.
+- Added `tests/test_multi_model.py` with 12 tests covering:
+  - `_resolve_models` unit tests: RTL-only, functional+RTL, cycle+RTL, floor pinning, env override
+  - Integration: `TestMultiModelDispatch` verifies multi-model dispatch runs without error
+  - `TestCrossCheckDetectsDivergence`: direct unit tests of `_assert_all_match` for divergence detection and edge cases
+
+**Notes:**
+- `SimEngine` does not invoke `_functional`/`_cycle` models directly; those are used by `BehavioralSim`. The functional/cycle passes in `TestBench` run the RTL sim with the module configured accordingly. Cross-check divergence tests were written against `_assert_all_match` directly.
+- All 1020 tests pass.
+
+**Next:** No remaining open tasks for this feature.
