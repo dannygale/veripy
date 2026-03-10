@@ -323,11 +323,14 @@ def cmd_test(args):
             regression=regression,
         ))
 
-    argv = ["python", "-m", "unittest"]
-    if test_path:
-        argv += ["discover", "-s", test_path, "-p", "test_*.py"]
+    if test_path and test_path.endswith(".py"):
+        # Single file: load as module directly
+        mod_path = test_path.replace("/", ".").replace("\\", ".").removesuffix(".py")
+        argv = ["python", "-m", "unittest", mod_path]
+    elif test_path:
+        argv = ["python", "-m", "unittest", "discover", "-s", test_path, "-p", "*.py"]
     else:
-        argv += ["discover", "-p", "test_*.py"]
+        argv = ["python", "-m", "unittest", "discover", "-p", "test_*.py"]
     if args.verbose:
         argv.append("-v")
     sys.exit(subprocess.run(argv).returncode)
