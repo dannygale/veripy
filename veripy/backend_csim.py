@@ -2870,8 +2870,9 @@ def _extract_state_struct(model_c_src: str) -> str:
 def emit_c_header(ir: IRModule, model_c_src: str) -> str:
     """Emit a C header for the model: State struct + extern function declarations.
 
-    Used by compile_tb() so the testbench can access the State struct directly
-    and call model functions without recompiling the model source.
+    Used by compile_tb() and the Cython CySim wrapper so they can access the
+    State struct directly and call model functions without recompiling the
+    model source.
     """
     lines = [
         '#pragma once',
@@ -2879,16 +2880,427 @@ def emit_c_header(ir: IRModule, model_c_src: str) -> str:
         '',
         _extract_state_struct(model_c_src),
         '',
-        'extern void* veripy_create(void);',
-        'extern void  veripy_destroy(void* p);',
-        'extern void  veripy_eval(void* p);',
+        'extern void*    veripy_create(void);',
+        'extern void     veripy_destroy(void* p);',
+        'extern void     veripy_eval(void* p);',
+        'extern int      veripy_assert_failed(void);',
+        'extern void     veripy_assert_clear(void);',
+        'extern void     veripy_assert_info(int* prop_out, uint64_t* cycle_out);',
+        'extern void     veripy_trace_open(const char* path);',
+        'extern void     veripy_trace_close(void);',
+        'extern void     veripy_trace_enable(int en);',
     ]
     for p in ir.ports:
         if p.direction == 'input':
             lines.append(f'extern void     veripy_set_{p.name}(void* p, uint64_t v);')
         lines.append(f'extern uint64_t veripy_get_{p.name}(void* p);')
+    for r in ir.regs:
+        if any(p.name == r.name for p in ir.ports):
+            continue
+        lines.append(f'extern uint64_t veripy_get_{r.name}(void* p);')
+    for m in ir.mems:
+        lines.append(f'extern uint64_t veripy_get_{m.name}(void* p, uint64_t idx);')
+        lines.append(f'extern void     veripy_set_{m.name}(void* p, uint64_t idx, uint64_t v);')
     lines.append('')
     return '\n'.join(lines) + '\n'
+
+
+def emit_cysim_pyx(ir: IRModule) -> str:
+    """Generate a Cython .pyx wrapper for the compiled csim model.
+
+    Produces a CySimModel class with direct C function calls — no ctypes
+    overhead. set()/get() dispatch via integer index for speed.
+    """
+    # Collect signal info
+    inputs = [(p.name, _resolve_width(p.width, ir.params))
+              for p in ir.ports if p.direction == 'input']
+    all_getters = []  # (name, width)
+    for p in ir.ports:
+        all_getters.append((p.name, _resolve_width(p.width, ir.params)))
+    seen = {p.name for p in ir.ports}
+    for r in ir.regs:
+        if r.name not in seen:
+            all_getters.append((r.name, _resolve_width(r.width, ir.params)))
+            seen.add(r.name)
+
+    lines = [
+        '# cython: language_level=3',
+        'from libc.stdint cimport uint64_t',
+        '',
+        'cdef extern from "model.h":',
+        '    void* veripy_create()',
+        '    void  veripy_destroy(void* p)',
+        '    void  veripy_eval(void* p)',
+        '    int   veripy_assert_failed()',
+        '    void  veripy_assert_clear()',
+    ]
+    for name, _ in inputs:
+        lines.append(f'    void     veripy_set_{name}(void* p, uint64_t v)')
+    for name, _ in all_getters:
+        lines.append(f'    uint64_t veripy_get_{name}(void* p)')
+    for m in ir.mems:
+        lines.append(f'    uint64_t veripy_get_{m.name}(void* p, uint64_t idx)')
+        lines.append(f'    void     veripy_set_{m.name}(void* p, uint64_t idx, uint64_t v)')
+    lines.append('')
+
+    # Build dispatch maps
+    set_map = {name: i for i, (name, _) in enumerate(inputs)}
+    get_map = {name: i for i, (name, _) in enumerate(all_getters)}
+
+    lines += [
+        f'_SET_MAP = {set_map!r}',
+        f'_GET_MAP = {get_map!r}',
+        '',
+        'cdef class CySimModel:',
+        '    cdef void* _ptr',
+        '',
+        '    def __cinit__(self):',
+        '        self._ptr = veripy_create()',
+        '',
+        '    def __dealloc__(self):',
+        '        if self._ptr != NULL:',
+        '            veripy_destroy(self._ptr)',
+        '            self._ptr = NULL',
+        '',
+        '    def __enter__(self): return self',
+        '    def __exit__(self, *a): self.close()',
+        '',
+        '    def close(self):',
+        '        if self._ptr != NULL:',
+        '            veripy_destroy(self._ptr)',
+        '            self._ptr = NULL',
+        '',
+        '    cpdef void eval(self):',
+        '        veripy_eval(self._ptr)',
+        '',
+    ]
+
+    # set() with generated dispatch
+    lines += [
+        '    cpdef void set(self, str name, uint64_t val, idx=None):',
+        '        cdef int _i = _SET_MAP.get(name, -1)',
+    ]
+    for i, (name, _) in enumerate(inputs):
+        kw = 'if' if i == 0 else 'elif'
+        lines.append(f'        {kw} _i == {i}: veripy_set_{name}(self._ptr, val)')
+    lines.append('')
+
+    # get() with generated dispatch
+    lines += [
+        '    cpdef uint64_t get(self, str name, idx=None):',
+        '        cdef int _i = _GET_MAP.get(name, -1)',
+    ]
+    for i, (name, _) in enumerate(all_getters):
+        kw = 'if' if i == 0 else 'elif'
+        lines.append(f'        {kw} _i == {i}: return veripy_get_{name}(self._ptr)')
+    lines.append('        return 0')
+    lines.append('')
+
+    # mem access
+    if ir.mems:
+        lines += [
+            '    def load_mem(self, str name, data, int offset=0):',
+            '        cdef int i',
+            '        for i, v in enumerate(data):',
+        ]
+        for m in ir.mems:
+            lines.append(f'            if name == {m.name!r}: veripy_set_{m.name}(self._ptr, offset + i, v)')
+        lines.append('')
+
+    # step() convenience
+    lines += [
+        '    def step(self, str clock_name, int n=1):',
+        '        cdef int i',
+        '        for i in range(n):',
+        '            self.set(clock_name, 0)',
+        '            self.eval()',
+        '            self.set(clock_name, 1)',
+        '            self.eval()',
+        '',
+        '    def assert_failed(self): return veripy_assert_failed()',
+        '    def assert_clear(self): veripy_assert_clear()',
+    ]
+
+    # ── CySimEngine: Cython-compiled event loop ─────────────────
+    lines += [
+        '',
+        'import heapq',
+        'from veripy.sim import Until',
+        '',
+        'cdef class CySimEngine:',
+        '    cdef CySimModel _model',
+        '    cdef list _queue',
+        '    cdef list _waiting',
+        '    cdef public long long time',
+        '    cdef int _seq',
+        '    cdef bint _finished',
+        '    cdef int _initial_count',
+        '    cdef str _clk_name',
+        '    cdef int _clk_half',
+        '    cdef int _clk_val',
+        '    cdef long long _clk_next',
+        '',
+        '    def __init__(self, CySimModel model):',
+        '        self._model = model',
+        '        self._queue = []',
+        '        self._waiting = []',
+        '        self.time = 0',
+        '        self._seq = 0',
+        '        self._finished = False',
+        '        self._initial_count = 0',
+        '        self._clk_name = ""',
+        '        self._clk_half = 0',
+        '',
+        '    def initial(self, fn):',
+        '        cdef object gen = fn()',
+        '        self._initial_count += 1',
+        '        self._schedule(0, gen, None)',
+        '        return fn',
+        '',
+        '    def always(self, fn):',
+        '        cdef object gen = fn()',
+        '        self._schedule(0, gen, fn)',
+        '        return fn',
+        '',
+        '    def clock(self, sig, int period=10):',
+        '        self._clk_name = sig if isinstance(sig, str) else getattr(sig, \"_name\", sig.name)',
+        '        self._clk_half = period // 2',
+        '        self._clk_val = 0',
+        '        self._clk_next = 0',
+        '',
+        '    def finish(self):',
+        '        self._finished = True',
+        '',
+        '    def run_cycles(self, int n):',
+        '        cdef int i',
+        '        cdef CySimModel model = self._model',
+        '        cdef str cn = self._clk_name',
+        '        cdef int half = self._clk_half',
+        '        if half <= 0:',
+        '            return',
+        '        for i in range(n):',
+        '            model.set(cn, 0)',
+        '            model.eval()',
+        '            model.set(cn, 1)',
+        '            model.eval()',
+        '        self.time += n * half * 2',
+        '        self._clk_next = self.time',
+        '',
+        '    def fork(self, *fns):',
+        '        done = set()',
+        '        cdef int n = len(fns)',
+        '        for i, fn in enumerate(fns):',
+        '            def _cb(idx=i):',
+        '                done.add(idx)',
+        '            self._schedule(self.time, fn(), _cb)',
+        '        return Until(lambda: len(done) == n)',
+        '',
+        '    def fork_any(self, *fns):',
+        '        done = set()',
+        '        for i, fn in enumerate(fns):',
+        '            def _cb(idx=i):',
+        '                done.add(idx)',
+        '            self._schedule(self.time, fn(), _cb)',
+        '        return Until(lambda: len(done) > 0)',
+        '',
+        '    cdef inline void _schedule(self, long long t, object gen, object restart_fn):',
+        '        heapq.heappush(self._queue, (t, self._seq, gen, restart_fn))',
+        '        self._seq += 1',
+        '',
+        '    cdef void _resume(self, object gen, object restart_fn):',
+        '        cdef object result',
+        '        try:',
+        '            result = next(gen)',
+        '            if isinstance(result, int):',
+        '                self._schedule(self.time + result, gen, restart_fn)',
+        '            elif isinstance(result, Until):',
+        '                deadline = self.time + result.timeout if result.timeout is not None else None',
+        '                self._waiting.append((gen, restart_fn, result.cond, deadline))',
+        '            else:',
+        '                self._schedule(self.time + <long long>result, gen, restart_fn)',
+        '        except StopIteration:',
+        '            if restart_fn is not None:',
+        '                new_gen = restart_fn()',
+        '                if new_gen is not None:',
+        '                    self._schedule(self.time, new_gen, restart_fn)',
+        '            else:',
+        '                self._initial_count -= 1',
+        '                if self._initial_count <= 0:',
+        '                    self._finished = True',
+        '',
+        '    cdef void _check_waiting(self):',
+        '        cdef list still = []',
+        '        for gen, restart_fn, cond, deadline in self._waiting:',
+        '            if cond():',
+        '                self._resume(gen, restart_fn)',
+        '            elif deadline is not None and self.time >= deadline:',
+        '                try:',
+        '                    gen.throw(TimeoutError, TimeoutError(f"until() timed out at time {self.time}"))',
+        '                except StopIteration:',
+        '                    pass',
+        '            else:',
+        '                still.append((gen, restart_fn, cond, deadline))',
+        '        self._waiting = still',
+        '',
+        '    cpdef void run(self):',
+        '        cdef long long t, next_gen_t',
+        '        cdef object gen, restart_fn, entry',
+        '        cdef CySimModel model = self._model',
+        '        cdef int clk_val = self._clk_val',
+        '        cdef int clk_half = self._clk_half',
+        '        cdef long long clk_next = self._clk_next',
+        '        cdef str clk_name = self._clk_name',
+        '        cdef bint has_clk = clk_half > 0',
+        '',
+        '        model.eval()',
+        '        while (self._queue or self._waiting) and not self._finished:',
+        '            if not self._queue:',
+        '                deadlines = [d for _, _, _, d in self._waiting if d is not None]',
+        '                if not deadlines:',
+        '                    raise RuntimeError("Deadlock")',
+        '                self.time = min(deadlines)',
+        '                self._check_waiting()',
+        '                continue',
+        '',
+        '            next_gen_t = <long long>self._queue[0][0]',
+        '',
+        '            # Fast-path: run clock toggles in C until next generator event',
+        '            if has_clk:',
+        '                while clk_next < next_gen_t:',
+        '                    self.time = clk_next',
+        '                    model.set(clk_name, clk_val)',
+        '                    model.eval()',
+        '                    clk_val ^= 1',
+        '                    clk_next += clk_half',
+        '',
+        '            entry = heapq.heappop(self._queue)',
+        '            t = entry[0]',
+        '            gen = entry[2]',
+        '            restart_fn = entry[3]',
+        '            self.time = t',
+        '',
+        '            # Toggle clock at this time if due',
+        '            if has_clk and clk_next == t:',
+        '                model.set(clk_name, clk_val)',
+        '                clk_val ^= 1',
+        '                clk_next += clk_half',
+        '',
+        '            self._resume(gen, restart_fn)',
+        '            model.eval()',
+        '            self._check_waiting()',
+    ]
+
+    return '\n'.join(lines) + '\n'
+
+
+_cysim_cache: dict = {}  # (module_type, name) → (so_path, cache_dir)
+
+
+def compile_cysim(module, module_name=None):
+    """Compile a module to a Cython-wrapped CySimModel.
+
+    Returns a context manager yielding a CySimModel instance with direct
+    C function calls (no ctypes overhead). Compiled .so is cached by
+    content hash for reuse across test methods.
+    """
+    import hashlib
+
+    if module_name is None:
+        module_name = type(module).__name__.lower()
+
+    lib_path, flat_ir, model_c_src, header_src = compile_model(
+        module, module_name)
+
+    pyx_src = emit_cysim_pyx(flat_ir)
+
+    # Cache key: hash of model C + pyx sources
+    content = (model_c_src + pyx_src).encode()
+    content_hash = hashlib.sha256(content).hexdigest()[:16]
+    cache_key = (module_name, content_hash)
+
+    if cache_key in _cysim_cache:
+        so_path, cache_dir = _cysim_cache[cache_key]
+        if os.path.exists(so_path):
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                'cysim_wrapper', so_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return _CySimContext(mod.CySimModel(), mod)
+
+    cache_dir = os.path.join(_default_model_cache_dir(), 'cysim')
+    os.makedirs(cache_dir, exist_ok=True)
+
+    import sysconfig
+    ext_suffix = sysconfig.get_config_var('EXT_SUFFIX') or '.so'
+    so_path = os.path.join(cache_dir, f'cysim_{module_name}_{content_hash}{ext_suffix}')
+
+    if not os.path.exists(so_path):
+        build_dir = tempfile.mkdtemp(prefix='veripy_cysim_')
+        try:
+            c_path = os.path.join(build_dir, f'{module_name}.c')
+            h_path = os.path.join(build_dir, 'model.h')
+            pyx_path = os.path.join(build_dir, 'cysim_wrapper.pyx')
+
+            with open(c_path, 'w') as f:
+                f.write(model_c_src)
+            with open(h_path, 'w') as f:
+                f.write(header_src)
+            with open(pyx_path, 'w') as f:
+                f.write(pyx_src)
+
+            # Cythonize
+            from Cython.Compiler.Main import compile as cy_compile
+            from Cython.Compiler.Options import CompilationOptions
+            opts = CompilationOptions(
+                language_level=3,
+                include_path=[build_dir],
+            )
+            result = cy_compile(pyx_path, opts)
+            if result.num_errors > 0:
+                raise RuntimeError(
+                    f'Cython compilation failed with {result.num_errors} errors')
+
+            cy_c_path = pyx_path.replace('.pyx', '.c')
+
+            py_inc = sysconfig.get_path('include')
+
+            cc = os.environ.get('CC', 'cc')
+            flag = '-dynamiclib' if os.uname().sysname == 'Darwin' else '-shared'
+            cmd = [cc, '-O3', '-march=native', '-fPIC', flag,
+                   '-I', build_dir, '-I', py_inc,
+                   '-o', so_path, cy_c_path, c_path,
+                   '-undefined', 'dynamic_lookup']
+
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode != 0:
+                raise RuntimeError(f'CySim compilation failed:\n{r.stderr}')
+        finally:
+            import shutil
+            shutil.rmtree(build_dir, ignore_errors=True)
+
+    _cysim_cache[cache_key] = (so_path, cache_dir)
+
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'cysim_wrapper', so_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return _CySimContext(mod.CySimModel(), mod)
+
+
+class _CySimContext:
+    """Context manager for CySimModel + CySimEngine."""
+    def __init__(self, model, pymod):
+        self._model = model
+        self._pymod = pymod  # the imported Python module containing CySimEngine
+    def __enter__(self):
+        return self._model
+    def __exit__(self, *exc):
+        self._model.close()
+    def engine(self):
+        """Create a CySimEngine backed by this model."""
+        return self._pymod.CySimEngine(self._model)
 
 
 def _default_model_cache_dir() -> str:

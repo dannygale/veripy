@@ -64,7 +64,53 @@ def _collect_locals(stmts, declared, regs):
             _collect_locals(stmt.body, declared, regs)
 
 
-_VALID_BACKENDS = {'behavioral', 'iverilog', 'csim', 'csim_hier', 'verilator'}
+class _CySignalProxy:
+    """Proxy that routes signal set/read through a CySimModel."""
+    __slots__ = ('_name', '_cm', '_kind', 'width', '_mask')
+
+    def __init__(self, name, cmodel, sig):
+        self._name = name
+        self._cm = cmodel
+        self._kind = sig._kind
+        self.width = sig.width
+        self._mask = sig._mask
+
+    @property
+    def name(self):
+        return self._name
+
+    def set(self, value):
+        self._cm.set(self._name, int(value))
+
+    def __int__(self):
+        return self._cm.get(self._name)
+
+    def __bool__(self):
+        return self._cm.get(self._name) != 0
+
+    @property
+    def _val(self):
+        return self._cm.get(self._name)
+
+    @_val.setter
+    def _val(self, v):
+        if self._kind == 'input':
+            self._cm.set(self._name, int(v) & self._mask)
+
+
+def _patch_signals_for_cysim(mod, cmodel):
+    """Replace module signals with proxies that route through CySimModel.
+
+    This makes Driver subclasses (which call m.signal.set() and int(m.signal)
+    directly) work transparently with the compiled model.
+    """
+    for name in list(dir(mod)):
+        sig = getattr(mod, name, None)
+        if isinstance(sig, Signal):
+            object.__setattr__(mod, name, _CySignalProxy(name, cmodel, sig))
+
+
+_VALID_BACKENDS = {'behavioral', 'iverilog', 'csim', 'csim_hier', 'verilator', 'cysim'}
 _BACKEND_ALIASES = {
     'check': ['behavioral', 'csim'],
     'all':   ['behavioral', 'iverilog', 'csim', 'csim_hier'],
@@ -201,6 +247,11 @@ class TestBench(unittest.TestCase):
             for name, val in kwargs.items():
                 self._replay_model.set(name, val)
             return
+        cm = getattr(self, '_cysim_model', None)
+        if cm is not None:
+            for name, val in kwargs.items():
+                cm.set(name, val)
+            return
         for name, val in kwargs.items():
             getattr(self._mod, name)._val = val
         self._trace_sets.append((self._engine.time, dict(kwargs)))
@@ -209,11 +260,18 @@ class TestBench(unittest.TestCase):
         """Read a signal value from the current active model."""
         if self._replay_model is not None:
             return self._replay_model.get(name)
+        cm = getattr(self, '_cysim_model', None)
+        if cm is not None:
+            return cm.get(name)
         return int(getattr(self._mod, name))
 
     def out(self, name):
         """Read an output signal's current value and record for comparison."""
-        val = int(getattr(self._mod, name))
+        cm = getattr(self, '_cysim_model', None)
+        if cm is not None:
+            val = cm.get(name)
+        else:
+            val = int(getattr(self._mod, name))
         t = self._engine.time
         if t not in self._py_outputs:
             self._py_outputs[t] = {}
@@ -231,6 +289,44 @@ class TestBench(unittest.TestCase):
         self._clock_period = period
         sig = getattr(self._mod, name)
         self._engine.clock(sig, period)
+
+    def run_cycles(self, n):
+        """Run *n* clock cycles entirely in C (cysim) or Python.
+
+        Use inside ``@self.initial`` when you don't need per-cycle Python
+        between yields.  Much faster than ``for _ in range(n): yield period``.
+
+        On behavioral/csim backends, falls back to stepping the sim engine.
+        """
+        engine = self._engine
+        if hasattr(engine, 'run_cycles'):
+            engine.run_cycles(n)
+        else:
+            # Fallback: step through Python sim
+            period = self._clock_period or 10
+            half = period // 2
+            mod = self._mod
+            sig = getattr(mod, self._clock_name)
+            for _ in range(n):
+                sig._val = 0
+                mod._settle_comb()
+                triggered = mod._check_edges()
+                if triggered:
+                    for _e, m in triggered:
+                        m()
+                    mod._apply_nba()
+                    mod._settle_comb()
+                mod._snapshot_prev()
+                sig._val = 1
+                mod._settle_comb()
+                triggered = mod._check_edges()
+                if triggered:
+                    for _e, m in triggered:
+                        m()
+                    mod._apply_nba()
+                    mod._settle_comb()
+                mod._snapshot_prev()
+            self._engine.time += n * period
 
     def peripheral(self, fn):
         """Register a combinational callback fired every time unit.
@@ -312,6 +408,7 @@ class TestBench(unittest.TestCase):
         self._clock_period = None  # clock period
         self._peripherals = []     # peripheral callback functions
         self._replay_model = None  # set during RTL replay to redirect set()/get()
+        self._cysim_model = None   # set during cysim direct execution
         self._output_names = sorted(
             k for k in dir(self._mod)
             if isinstance(getattr(self._mod, k), Signal)
@@ -563,6 +660,53 @@ class TestBench(unittest.TestCase):
         self._rtl_outputs = out
         return True
 
+    def _run_cysim(self, fn):
+        """Run test directly against Cython-compiled model (no replay).
+
+        The test generators drive the compiled model live via CySimEngine —
+        the entire event loop (scheduling, eval, time advance) runs in
+        Cython-compiled C. No trace recording, no replay.
+
+        Signal objects on the module are replaced with proxies so that Driver
+        subclasses (which call m.signal.set() directly) also route through
+        the compiled model.
+        """
+        from .backend_csim import compile_cysim
+        mod = self._mod
+        module_name = type(mod).__name__.lower()
+        try:
+            ctx = compile_cysim(mod, module_name)
+            cm = ctx.__enter__()
+
+            self._mod = self.create_module()
+            self._engine = ctx.engine()
+            self._cysim_model = cm
+            self._trace_sets = []
+            self._py_outputs = {}
+            self._tb_always = []
+            self._tb_initial = []
+            self._clock_name = None
+            self._clock_period = None
+            self._peripherals = []
+            self._replay_model = None
+            self._ran_sim = False
+
+            _patch_signals_for_cysim(self._mod, cm)
+
+            fn(self)
+            if not self._ran_sim:
+                self.run_sim()
+            ctx.__exit__(None, None, None)
+        except ImportError:
+            return False
+        except Exception:
+            return False
+        finally:
+            self._cysim_model = None
+        if hasattr(self, '_all_outputs'):
+            self._all_outputs['cysim'] = dict(self._py_outputs)
+        return True
+
 
 def _wrap_testbench(fn):
     """Wrap a test method to run configured backends, then compare outputs."""
@@ -617,10 +761,12 @@ def _wrap_testbench(fn):
                         for name, hits in self._mod.coverage_report():
                             _coverage_db[name] = _coverage_db.get(name, 0) + hits
                     else:
-                        # Still need to run to record stimuli for other backends
-                        fn(self)
-                        if not self._ran_sim:
-                            self.run_sim()
+                        # Replay backends (csim, iverilog, verilator) need stimuli
+                        replay_backends = {'csim', 'csim_hier', 'iverilog', 'verilator'}
+                        if replay_backends & set(backends):
+                            fn(self)
+                            if not self._ran_sim:
+                                self.run_sim()
                 except AssertionError:
                     if vcd_on_fail:
                         import sys
@@ -641,6 +787,11 @@ def _wrap_testbench(fn):
                     self._run_csim(force_hier=True)
                 if 'verilator' in backends:
                     self._run_verilator()
+
+                # cysim: direct execution against Cython-compiled model
+                if not skip_csim and 'cysim' in backends:
+                    with self.subTest(backend='cysim'):
+                        self._run_cysim(fn)
 
         if len(self._all_outputs) > 1:
             self._assert_all_match()

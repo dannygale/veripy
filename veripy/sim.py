@@ -95,8 +95,9 @@ class SimEngine:
     active (comb/blocking) → NBA (non-blocking) → re-settle.
     """
 
-    def __init__(self, module, vcd=None):
+    def __init__(self, module, vcd=None, cmodel=None):
         self.mod = module
+        self._cmodel = cmodel  # compiled model (CySimModel) for direct execution
         self.time = 0
         self._queue = []       # min-heap of (time, seq, gen, restart_fn)
         self._seq = 0          # tie-breaker for heap ordering
@@ -241,9 +242,12 @@ class SimEngine:
             self._vcd = VCDWriter(self._vcd_file, self.mod)
 
         try:
-            self.mod._init_sim_cache()
-            self.mod._snapshot_prev()
-            self.mod._settle_comb()
+            if self._cmodel is None:
+                self.mod._init_sim_cache()
+                self.mod._snapshot_prev()
+                self.mod._settle_comb()
+            else:
+                self._cmodel.eval()  # initial settle
 
             while (self._queue or self._waiting) and not self._finished:
                 # If only waiting generators remain, advance to earliest deadline
@@ -305,6 +309,10 @@ class SimEngine:
 
     def _process(self):
         """Verilog scheduling: active → detect edges → fire blocks → NBA → re-settle."""
+        if self._cmodel is not None:
+            self._cmodel.eval()
+            return
+
         mod = self.mod
         sig_list = mod._sig_list
         mem_list = mod._mem_list
