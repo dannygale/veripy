@@ -6,3 +6,5 @@ dist/
 build/
 *.vcd
 .kiro
+parser.out
+parsetab.py
