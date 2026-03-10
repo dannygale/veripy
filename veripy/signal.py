@@ -104,6 +104,8 @@ class _Expr:
     def __radd__(self, o):      return _Expr(lambda: (_iv(o) + self._fn()) & self._mask, self._width, '+', (o, self))
     def __sub__(self, o):       return _Expr(lambda: (self._fn() - _iv(o)) & self._mask, self._width, '-', (self, o))
     def __rsub__(self, o):      return _Expr(lambda: (_iv(o) - self._fn()) & self._mask, self._width, '-', (o, self))
+    def __mul__(self, o):       return _Expr(lambda: self._fn() * _iv(o), self._width + _w(o), '*', (self, o))
+    def __rmul__(self, o):      return _Expr(lambda: _iv(o) * self._fn(), _w(o) + self._width, '*', (o, self))
     def __and__(self, o):       return _Expr(lambda: self._fn() & _iv(o), max(self._width, _w(o)), '&', (self, o))
     def __rand__(self, o):      return _Expr(lambda: _iv(o) & self._fn(), max(self._width, _w(o)), '&', (o, self))
     def __or__(self, o):        return _Expr(lambda: self._fn() | _iv(o), max(self._width, _w(o)), '|', (self, o))
@@ -168,6 +170,8 @@ class Signal:
     def __radd__(self, o):      return _Expr(lambda: (_iv(o) + self._val) & self._mask, self.width, '+', (o, self))
     def __sub__(self, o):       return _Expr(lambda: (self._val - _iv(o)) & self._mask, self.width, '-', (self, o))
     def __rsub__(self, o):      return _Expr(lambda: (_iv(o) - self._val) & self._mask, self.width, '-', (o, self))
+    def __mul__(self, o):       return _Expr(lambda: self._val * _iv(o), self.width + _w(o), '*', (self, o))
+    def __rmul__(self, o):      return _Expr(lambda: _iv(o) * self._val, _w(o) + self.width, '*', (o, self))
     def __and__(self, o):       return _Expr(lambda: self._val & _iv(o), max(self.width, _w(o)), '&', (self, o))
     def __rand__(self, o):      return _Expr(lambda: _iv(o) & self._val, max(self.width, _w(o)), '&', (o, self))
     def __or__(self, o):        return _Expr(lambda: self._val | _iv(o), max(self.width, _w(o)), '|', (self, o))
@@ -307,6 +311,10 @@ def Output(width=1):
 
 def Register(width=1, reset=0):
     return Signal(width, reset=reset, _kind='reg')
+
+def OutputReg(width=1, reset=0):
+    """Output port declared as 'output reg' — driven from @always blocks."""
+    return Signal(width, reset=reset, _kind='output_reg')
 
 
 class Interface:

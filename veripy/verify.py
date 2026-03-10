@@ -582,7 +582,11 @@ def _wrap_testbench(fn):
 
             # Configure which Python model the sim engine uses
             if model_name == 'cycle':
-                self._mod._functional = self._mod._cycle
+                if isinstance(self._mod._cycle, tuple):
+                    cycle_edges, cycle_fn = self._mod._cycle
+                    self._mod._always_blocks.append((cycle_edges, cycle_fn))
+                else:
+                    self._mod._functional = self._mod._cycle
                 self._mod._behavioral = None
             elif model_name == 'rtl':
                 self._mod._functional = None

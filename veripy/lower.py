@@ -431,6 +431,21 @@ class _Lowerer:
 
     # ── For loop unrolling ───────────────────────────────────────────
 
+    def _resolve_iterable(self, node):
+        """Try to resolve an AST node to a Python list/tuple at lowering time."""
+        # self.attr
+        if isinstance(node, ast.Attribute) and self._is_self(node.value):
+            if self._module is not None:
+                val = getattr(self._module, node.attr, None)
+                if isinstance(val, (list, tuple)):
+                    return val
+        # bare name from closure/globals
+        if isinstance(node, ast.Name):
+            val = self._resolve_closure(node.id)
+            if isinstance(val, (list, tuple)):
+                return val
+        return None
+
     def _lower_for(self, node, blocking):
         # for var in self.port_array: → unroll over each signal
         if (isinstance(node.iter, ast.Attribute) and self._is_self(node.iter.value)):
@@ -461,7 +476,16 @@ class _Lowerer:
         if not (isinstance(node.iter, ast.Call) and
                 isinstance(node.iter.func, ast.Name) and
                 node.iter.func.id == 'range'):
-            raise SyntaxError('Only for ... in range(...) is supported')
+            # Try to resolve iterable to a Python list/tuple and unroll
+            iterable = self._resolve_iterable(node.iter)
+            if iterable is None:
+                raise SyntaxError('Only for ... in range(...) or a resolvable iterable is supported')
+            var = node.target.id
+            out = []
+            for elem in iterable:
+                body = self._subst_var_obj(node.body, var, elem)
+                out.extend(self._stmts(body, blocking))
+            return out
         args = [self._const_eval(a) for a in node.iter.args]
         if len(args) == 1:
             start, stop, step = 0, args[0], 1
@@ -509,6 +533,53 @@ class _Lowerer:
                     return self._stmts(sub, blocking) + result
                 result = stmts
         return result
+
+    def _subst_var_obj(self, stmts, var_name, obj):
+        """AST-level substitution of *var_name* with a Python object.
+
+        Handles ``var.attr`` (attribute access on the loop variable) and bare
+        ``var`` references.  Signals become ``self.sig_name`` AST nodes;
+        ints become ``ast.Constant``.
+        """
+        import copy
+        stmts = copy.deepcopy(stmts)
+
+        def _replacement(val):
+            if isinstance(val, Signal):
+                return ast.Attribute(
+                    value=ast.Name(id='self', ctx=ast.Load()),
+                    attr=val.name, ctx=ast.Load())
+            if isinstance(val, (int, float)):
+                return ast.Constant(value=val)
+            return None
+
+        for node in ast.walk(ast.Module(body=stmts, type_ignores=[])):
+            for field, child in ast.iter_fields(node):
+                if isinstance(child, list):
+                    for i, item in enumerate(child):
+                        if (isinstance(item, ast.Attribute)
+                                and isinstance(item.value, ast.Name)
+                                and item.value.id == var_name):
+                            r = _replacement(getattr(obj, item.attr, None))
+                            if r is not None:
+                                child[i] = r
+                        elif isinstance(item, ast.Name) and item.id == var_name:
+                            r = _replacement(obj)
+                            if r is not None:
+                                child[i] = r
+                elif (isinstance(child, ast.Attribute)
+                      and isinstance(child.value, ast.Name)
+                      and child.value.id == var_name):
+                    r = _replacement(getattr(obj, child.attr, None))
+                    if r is not None:
+                        setattr(node, field, r)
+                elif isinstance(child, ast.Name) and child.id == var_name:
+                    r = _replacement(obj)
+                    if r is not None:
+                        setattr(node, field, r)
+
+        ast.fix_missing_locations(ast.Module(body=stmts, type_ignores=[]))
+        return stmts
 
     def _subst_var(self, stmts, var_name, val):
         import copy
@@ -869,6 +940,22 @@ class _Lowerer:
                 self._func = None
         return targets
 
+    def collect_block_targets(self, blocks):
+        """Return set of signal names assigned in any of the given blocks."""
+        targets = set()
+        for item in blocks:
+            method = item[1] if isinstance(item, tuple) else item
+            self._func = method
+            tree = self._get_func_ast(method)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign):
+                    for t in node.targets:
+                        name = self._target_name(t)
+                        if name:
+                            targets.add(name)
+            self._func = None
+        return targets
+
 
 def lower_module(module, module_name=None):
     """Lower a Module to IRModule."""
@@ -919,14 +1006,15 @@ def lower_module(module, module_name=None):
 
     # Ports
     for sig_name, sig in sorted(signals.items()):
-        if sig._kind in ('input', 'output'):
+        if sig._kind in ('input', 'output', 'output_reg'):
             w = _width_str(sig)
-            is_reg = False
-            ir.ports.append(Port(sig_name, sig._kind, w, is_reg))
+            direction = 'output' if sig._kind == 'output_reg' else sig._kind
+            is_reg = sig._kind == 'output_reg'
+            ir.ports.append(Port(sig_name, direction, w, is_reg))
 
     # Internal regs
     for sig_name, sig in sorted(signals.items()):
-        if sig._kind not in ('input', 'output'):
+        if sig._kind not in ('input', 'output', 'output_reg'):
             w = _width_str(sig)
             ir.regs.append(RegDecl(sig_name, w))
 
@@ -955,6 +1043,17 @@ def lower_module(module, module_name=None):
     # Sub-module wires and instances
     lowerer = _Lowerer(signals, mems, submodules, interfaces, params, module, port_arrays=port_arrays)
     always_driven = lowerer.collect_always_targets(module._comb_blocks)
+
+    # Dual-assignment check: error if any signal is assigned in both @comb and @always
+    comb_targets = lowerer.collect_block_targets(module._comb_blocks)
+    seq_targets_pre = lowerer.collect_block_targets(
+        [(e, m) for e, m in module._always_blocks if not getattr(m, '_veripy_cycle', False)]
+    )
+    dual_driven = comb_targets & seq_targets_pre
+    if dual_driven:
+        raise ValueError(
+            f"Signal(s) assigned in both @comb and @always blocks: {sorted(dual_driven)}"
+        )
 
     for sub_name, sub in sorted(submodules.items()):
         for port_name, sig in sorted(sub._signals().items()):
@@ -986,9 +1085,11 @@ def lower_module(module, module_name=None):
             elif isinstance(item, CombBlock):
                 ir.comb_blocks.append(item)
 
-    # Lower always blocks (skip auto-generated mem blocks)
+    # Lower always blocks (skip auto-generated mem blocks and cycle-tier blocks)
     for edges, method in module._always_blocks:
         if getattr(method, '_veripy_mem_block', False):
+            continue
+        if getattr(method, '_veripy_cycle', False):
             continue
         ir.seq_blocks.append(lowerer.lower_always(edges, method))
 

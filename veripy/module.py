@@ -3,6 +3,7 @@
 import ast as _ast
 from .signal import Signal, Mem, DualPortMem, TrueDualPortMem, Edge, SensitivityList, Interface, Register, posedge as _posedge, _Expr, _SliceProxy
 from .parameter import Parameter, ParamExpr, is_param
+from .context import _wrap_cycle_fn
 
 
 class DeferredModule:
@@ -263,20 +264,28 @@ class Module:
         self._functional = func
         return func
 
-    def cycle(self, func=None):
-        """Decorator: register a cycle-accurate model for Python sim.
+    def cycle(self, sensitivity, init=None):
+        """Decorator: register a cycle-accurate model, fires on clock edge.
+
+        Not emitted to Verilog. Only active in the cycle simulation tier.
 
         Usage:
-            @self.cycle
-            def model(self):
+            @self.cycle(posedge(self.clock))
+            def cycle_model(self):
                 ...
-
-        Or override as a method in a subclass (no decorator needed).
         """
-        if func is None:
-            return
-        self._cycle = func
-        return func
+        if isinstance(sensitivity, Edge):
+            edges = [sensitivity]
+        elif isinstance(sensitivity, SensitivityList):
+            edges = sensitivity.edges
+        else:
+            raise TypeError(f"Expected Edge or SensitivityList, got {type(sensitivity)}")
+        state = init() if callable(init) else (init or {})
+        def decorator(fn):
+            fn._veripy_cycle = True
+            self._cycle = (edges, _wrap_cycle_fn(fn, state))
+            return fn
+        return decorator
 
     def iss(self, func=None):
         """Decorator: mark the functional model as an ISA interpreter.

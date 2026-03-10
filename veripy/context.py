@@ -55,14 +55,44 @@ def functional(fn):
     return fn
 
 
-def cycle(fn):
-    """Register a cycle-accurate model that replaces RTL during Python sim."""
-    ctx = _get_context()
-    if ctx is not None:
-        ctx.cycle_fn = fn
+def cycle(sensitivity, init=None):
+    """@cycle(posedge(clock)) — cycle-accurate model, fires on clock edge.
+
+    Not emitted to Verilog. Only active in the cycle simulation tier.
+
+    Usage:
+        @cycle(posedge(clock))
+        def cycle_model():
+            _pipe.appendleft(int(a * b))
+            result = _pipe[-1]
+    """
+    if isinstance(sensitivity, Edge):
+        edges = [sensitivity]
+    elif isinstance(sensitivity, SensitivityList):
+        edges = sensitivity.edges
     else:
+        raise TypeError(f"Expected Edge or SensitivityList, got {type(sensitivity)}")
+
+    state = init() if callable(init) else (init or {})
+
+    def decorator(fn):
         fn._veripy_cycle = True
-    return fn
+        wrapped = _wrap_cycle_fn(fn, state)
+        ctx = _get_context()
+        if ctx is not None:
+            ctx.cycle_fn = (edges, wrapped)
+        return fn
+    return decorator
+
+
+def _wrap_cycle_fn(fn, state):
+    """Wrap a cycle model fn with its init state so it's always a 0-arg callable."""
+    if not state:
+        return fn
+    def _wrapped():
+        fn(**state)
+    _wrapped._veripy_cycle = True
+    return _wrapped
 
 
 def iss(fn):

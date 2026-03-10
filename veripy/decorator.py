@@ -56,7 +56,7 @@ def _analyze_and_rewrite(func):
         fname = None
         if isinstance(node.value.func, ast.Name):
             fname = node.value.func.id
-        if fname in ('Input', 'Output', 'Register', 'Signal', 'Mem',
+        if fname in ('Input', 'Output', 'OutputReg', 'Register', 'Signal', 'Mem',
                      'DualPortMem', 'TrueDualPortMem'):
             signal_names.add(target.id)
         elif fname and fname not in ('Parameter', 'pipeline',

@@ -1,6 +1,6 @@
 """veripy — Python HDL that simulates and generates Verilog from the same source."""
 
-from .signal import Signal, Input, Output, Register, Mem, DualPortMem, TrueDualPortMem
+from .signal import Signal, Input, Output, OutputReg, Register, Mem, DualPortMem, TrueDualPortMem
 from .signal import Edge, SensitivityList, Interface, posedge, negedge
 from .signal import clz, ctz, popcount, sext
 from .module import Module
