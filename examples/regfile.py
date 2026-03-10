@@ -32,3 +32,56 @@ class RegFile(Module):
         def write_port():
             if self.we and self.waddr:
                 self.regs.write(self.waddr, self.wdata)
+
+
+# ── Inline TestBench ─────────────────────────────────────────────────
+
+from veripy.verify import TestBench
+
+
+class RegFileTestBench(TestBench):
+
+    def create_module(self):
+        return RegFile(width=8, depth=4)
+
+    def test_write_then_read(self):
+        self.clock('clock', 10)
+
+        @self.initial
+        def stim():
+            self.set(we=1, waddr=1, wdata=42)
+            yield 10
+            self.set(we=0, raddr1=1)
+            yield 10
+            self.assertEqual(self.out('rdata1'), 42)
+
+        self.run_sim()
+
+    def test_r0_hardwired_zero(self):
+        self.clock('clock', 10)
+
+        @self.initial
+        def stim():
+            self.set(we=1, waddr=0, wdata=99)
+            yield 10
+            self.set(we=0, raddr1=0)
+            yield 10
+            self.assertEqual(self.out('rdata1'), 0)
+
+        self.run_sim()
+
+    def test_two_read_ports(self):
+        self.clock('clock', 10)
+
+        @self.initial
+        def stim():
+            self.set(we=1, waddr=1, wdata=10)
+            yield 10
+            self.set(waddr=2, wdata=20)
+            yield 10
+            self.set(we=0, raddr1=1, raddr2=2)
+            yield 10
+            self.assertEqual(self.out('rdata1'), 10)
+            self.assertEqual(self.out('rdata2'), 20)
+
+        self.run_sim()

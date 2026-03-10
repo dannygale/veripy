@@ -10,7 +10,7 @@ Stress-tests the veripy syntax with a realistic datapath component:
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from veripy import Module, Input, Output, Register
+from veripy import Module, Input, Output, OutputReg, posedge
 
 
 class PipeReg(Module):
@@ -22,21 +22,26 @@ class PipeReg(Module):
         self.flush   = Input()
         self.stall   = Input()
         self.d       = Input(width)
-        self.q       = Output(width)
-        self.data    = Register(width)
+        self.q       = OutputReg(width)
         super().__init__()
 
     def rtl(self):
-        @self.comb
-        def drive():
-            self.q = self.data
-
-        @self.posedge(self.clock)
-        def capture():
+        @self.cycle(posedge(self.clock), init=dict(reg=[0]))
+        def cycle_model(reg):
+            # Tier 2: cycle-accurate — models flush/stall behavior
+            self.q._val = reg[0]
             if self.reset or self.flush:
-                self.data = 0
+                reg[0] = 0
             elif not self.stall:
-                self.data = self.d
+                reg[0] = int(self.d)
+
+        @self.always(posedge(self.clock))
+        def capture():
+            # Tier 3: RTL
+            if self.reset or self.flush:
+                self.q = 0
+            elif not self.stall:
+                self.q = self.d
 
 
 class ForwardMux(Module):
@@ -57,6 +62,19 @@ class ForwardMux(Module):
         super().__init__()
 
     def rtl(self):
+        @self.functional
+        def model():
+            # Tier 1: combinational — immediate forwarding decision
+            if self.ex_we and self.rs_addr == self.ex_rd_addr:
+                self.out._val = int(self.ex_val)
+                self.fwd_sel._val = 1
+            elif self.mem_we and self.rs_addr == self.mem_rd_addr:
+                self.out._val = int(self.mem_val)
+                self.fwd_sel._val = 2
+            else:
+                self.out._val = int(self.reg_val)
+                self.fwd_sel._val = 0
+
         @self.comb
         def forward():
             if self.ex_we and self.rs_addr == self.ex_rd_addr:
@@ -68,6 +86,105 @@ class ForwardMux(Module):
             else:
                 self.out = self.reg_val
                 self.fwd_sel = 0
+
+
+# ── Inline TestBench ─────────────────────────────────────────────────
+
+from veripy.verify import TestBench
+
+
+class PipeRegTestBench(TestBench):
+
+    def create_module(self):
+        return PipeReg(width=8)
+
+    def test_captures_data(self):
+        self.clock('clock', 10)
+
+        @self.initial
+        def stim():
+            self.set(reset=1, stall=0, flush=0)
+            yield 10
+            self.set(reset=0, d=0xAB)
+            yield 10
+            self.assertEqual(self.out('q'), 0xAB)
+
+        self.run_sim()
+
+    def test_stall_holds(self):
+        self.clock('clock', 10)
+
+        @self.initial
+        def stim():
+            self.set(reset=1, stall=0, flush=0)
+            yield 10
+            self.set(reset=0, d=0x42)
+            yield 10
+            self.set(stall=1, d=0xFF)
+            yield 10
+            self.assertEqual(self.out('q'), 0x42)
+
+        self.run_sim()
+
+    def test_flush_clears(self):
+        self.clock('clock', 10)
+
+        @self.initial
+        def stim():
+            self.set(reset=1, stall=0, flush=0)
+            yield 10
+            self.set(reset=0, d=0x42)
+            yield 10
+            self.set(flush=1)
+            yield 10
+            self.assertEqual(self.out('q'), 0)
+
+        self.run_sim()
+
+
+class ForwardMuxTestBench(TestBench):
+    def create_module(self):
+        return ForwardMux(width=8)
+
+    def test_no_forward(self):
+        @self.initial
+        def stim():
+            self.set(rs_addr=3, ex_rd_addr=5, mem_rd_addr=5,
+                     ex_we=0, mem_we=0, reg_val=0x10, ex_val=0xEE, mem_val=0xDD)
+            yield 1
+            self.assertEqual(self.out('out'), 0x10)
+            self.assertEqual(self.out('fwd_sel'), 0)
+        self.run_sim()
+
+    def test_ex_forward(self):
+        @self.initial
+        def stim():
+            self.set(rs_addr=3, ex_rd_addr=3, mem_rd_addr=5,
+                     ex_we=1, mem_we=0, reg_val=0x10, ex_val=0xEE, mem_val=0xDD)
+            yield 1
+            self.assertEqual(self.out('out'), 0xEE)
+            self.assertEqual(self.out('fwd_sel'), 1)
+        self.run_sim()
+
+    def test_mem_forward(self):
+        @self.initial
+        def stim():
+            self.set(rs_addr=3, ex_rd_addr=5, mem_rd_addr=3,
+                     ex_we=0, mem_we=1, reg_val=0x10, ex_val=0xEE, mem_val=0xDD)
+            yield 1
+            self.assertEqual(self.out('out'), 0xDD)
+            self.assertEqual(self.out('fwd_sel'), 2)
+        self.run_sim()
+
+    def test_ex_priority(self):
+        @self.initial
+        def stim():
+            self.set(rs_addr=3, ex_rd_addr=3, mem_rd_addr=3,
+                     ex_we=1, mem_we=1, reg_val=0x10, ex_val=0xEE, mem_val=0xDD)
+            yield 1
+            self.assertEqual(self.out('out'), 0xEE)
+            self.assertEqual(self.out('fwd_sel'), 1)
+        self.run_sim()
 
 
 if __name__ == '__main__':

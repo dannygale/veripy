@@ -104,6 +104,45 @@ class SpiControllerDriver(Driver):
         return int(m.rx_data)
 
 
+# ── Inline TestBench ─────────────────────────────────────────────────
+
+from veripy.verify import TestBench
+
+
+class SpiDriverTestBench(TestBench):
+
+    def create_module(self):
+        return spi_shift_reg(width=8)
+
+    def test_shift_byte(self):
+        self.clock('clock', 10)
+
+        @self.initial
+        def stim():
+            m = self.module
+            drv = SpiDriver(self._engine, m, half_period=10)
+            m.cs_n.set(1)
+            yield 10
+            yield from drv.send(0xA5)
+            self.assertEqual(self.out('shreg'), 0xA5)
+
+        self.run_sim()
+
+    def test_shift_zero(self):
+        self.clock('clock', 10)
+
+        @self.initial
+        def stim():
+            m = self.module
+            drv = SpiDriver(self._engine, m, half_period=10)
+            m.cs_n.set(1)
+            yield 10
+            yield from drv.send(0x00)
+            self.assertEqual(self.out('shreg'), 0x00)
+
+        self.run_sim()
+
+
 # ── Quick demo ───────────────────────────────────────────────────────
 
 if __name__ == '__main__':

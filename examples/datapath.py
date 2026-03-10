@@ -4,12 +4,17 @@
 Demonstrates module instantiation — the ALU is a child module whose
 ports are driven by the parent's comb blocks. The ALU result is
 captured into a pipeline register on each posedge.
+
+Three simulation tiers:
+  functional — immediate result, no pipeline latency
+  cycle      — 1-cycle latency (models the register stage)
+  rtl        — structural: ALU + pipeline register
 """
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from veripy import Module, Input, Output, Register
+from veripy import Module, Input, Output, OutputReg, Register, posedge
 
 
 class ALU(Module):
@@ -38,10 +43,14 @@ class Datapath(Module):
         self.a      = Input(width)
         self.b      = Input(width)
         self.op     = Input(4)
-        self.result = Output(width)
-        self.piped  = Register(width)
+        self.result = OutputReg(width)
         self.alu    = ALU(width)
         super().__init__()
+
+        @self.functional
+        def model():
+            # Tier 1: immediate result, no pipeline
+            self.result._val = int(self.alu.result)
 
     def rtl(self):
         @self.comb
@@ -50,16 +59,69 @@ class Datapath(Module):
             self.alu.b  = self.b
             self.alu.op = self.op
 
-        @self.posedge(self.clock)
-        def pipeline():
-            if self.reset:
-                self.piped = 0
-            else:
-                self.piped = self.alu.result
+        @self.cycle(posedge(self.clock), init=dict(pipe=[0]))
+        def cycle_model(pipe):
+            # Tier 2: 1-cycle latency
+            self.result._val = pipe[0]
+            pipe[0] = int(self.alu.result)
 
-        @self.comb
-        def output():
-            self.result = self.piped
+        @self.always(posedge(self.clock))
+        def pipeline():
+            # Tier 3: structural pipeline register
+            if self.reset:
+                self.result = 0
+            else:
+                self.result = self.alu.result
+
+
+# ── Inline TestBench ─────────────────────────────────────────────────
+
+from veripy.verify import TestBench
+
+
+class DatapathTestBench(TestBench):
+
+    def create_module(self):
+        return Datapath(width=8)
+
+    def test_alu_add(self):
+        self.clock('clock', 10)
+
+        @self.initial
+        def stim():
+            self.set(reset=1)
+            yield 10
+            self.set(reset=0, a=10, b=5, op=0)
+            yield 10
+            self.assertEqual(self.out('result'), 15)
+
+        self.run_sim()
+
+    def test_alu_sub(self):
+        self.clock('clock', 10)
+
+        @self.initial
+        def stim():
+            self.set(reset=1)
+            yield 10
+            self.set(reset=0, a=20, b=7, op=1)
+            yield 10
+            self.assertEqual(self.out('result'), 13)
+
+        self.run_sim()
+
+    def test_reset_clears(self):
+        self.clock('clock', 10)
+
+        @self.initial
+        def stim():
+            self.set(reset=0, a=10, b=5, op=0)
+            yield 10
+            self.set(reset=1)
+            yield 10
+            self.assertEqual(self.out('result'), 0)
+
+        self.run_sim()
 
 
 if __name__ == '__main__':
@@ -77,7 +139,7 @@ if __name__ == '__main__':
             d.a.set((i + 1) * 10); d.b.set(i + 1); d.op.set(i % 2)
             yield 10
             print(f"  cycle {i}: a={int(d.a):3d} b={int(d.b)} op={'ADD' if int(d.op)==0 else 'SUB'} "
-                  f"alu={int(d.alu.result):3d} piped={int(d.piped):3d}")
+                  f"alu={int(d.alu.result):3d} result={int(d.result):3d}")
 
     sim.run()
 

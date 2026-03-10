@@ -81,6 +81,74 @@ class HazardUnit(Module):
             self.flush_id_ex = self.stall
 
 
+# ── Inline TestBench ─────────────────────────────────────────────────
+
+from veripy.verify import TestBench
+
+
+class HazardUnitTestBench(TestBench):
+    def create_module(self):
+        return HazardUnit()
+
+    def _defaults(self):
+        self.set(
+            id_rs1_addr=0, id_rs2_addr=0, id_branch_reg=0, id_branch_flag=0,
+            id_ex_reg_we=0, id_ex_mem_re=0, id_ex_cmp=0, id_ex_rd_addr=0,
+            id_ex_valid=0, id_ex_rs1_addr=0, id_ex_rs2_addr=0,
+            ex_mem_reg_we=0, ex_mem_mem_re=0, ex_mem_rd_addr=0, ex_mem_valid=0,
+            mem_wb_reg_we=0, mem_wb_rd_addr=0, mem_wb_valid=0, branch_taken=0,
+        )
+
+    def test_no_hazard(self):
+        @self.initial
+        def stim():
+            self._defaults()
+            yield 1
+            self.assertEqual(self.out('stall'), 0)
+            self.assertEqual(self.out('fwd_a'), 0)
+            self.assertEqual(self.out('fwd_b'), 0)
+        self.run_sim()
+
+    def test_ex_mem_forward_a(self):
+        @self.initial
+        def stim():
+            self._defaults()
+            self.set(ex_mem_valid=1, ex_mem_reg_we=1, ex_mem_rd_addr=3,
+                     id_ex_rs1_addr=3)
+            yield 1
+            self.assertEqual(self.out('fwd_a'), 1)
+        self.run_sim()
+
+    def test_mem_wb_forward_b(self):
+        @self.initial
+        def stim():
+            self._defaults()
+            self.set(mem_wb_valid=1, mem_wb_reg_we=1, mem_wb_rd_addr=5,
+                     id_ex_rs2_addr=5)
+            yield 1
+            self.assertEqual(self.out('fwd_b'), 2)
+        self.run_sim()
+
+    def test_load_use_stall(self):
+        @self.initial
+        def stim():
+            self._defaults()
+            self.set(id_ex_valid=1, id_ex_mem_re=1, id_ex_rd_addr=2,
+                     id_rs1_addr=2)
+            yield 1
+            self.assertEqual(self.out('stall'), 1)
+        self.run_sim()
+
+    def test_branch_taken_flush(self):
+        @self.initial
+        def stim():
+            self._defaults()
+            self.set(branch_taken=1)
+            yield 1
+            self.assertEqual(self.out('flush_if_id'), 1)
+        self.run_sim()
+
+
 if __name__ == '__main__':
     h = HazardUnit()
     print(h.to_verilog(module_name='hazard_unit'))

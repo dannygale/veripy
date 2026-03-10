@@ -72,6 +72,59 @@ class ALU(Module):
             self.sign = self.result[width - 1]
 
 
+# ── Inline TestBench ─────────────────────────────────────────────────
+
+from veripy.verify import TestBench
+
+
+class ALUTestBench(TestBench):
+    def create_module(self):
+        return ALU(16)
+
+    def test_add(self):
+        @self.initial
+        def stim():
+            self.set(a=100, b=50, op=ALU_ADD)
+            yield 1
+            self.assertEqual(self.out('result'), 150)
+            self.assertEqual(self.out('zero'), 0)
+        self.run_sim()
+
+    def test_sub(self):
+        @self.initial
+        def stim():
+            self.set(a=100, b=100, op=ALU_SUB)
+            yield 1
+            self.assertEqual(self.out('result'), 0)
+            self.assertEqual(self.out('zero'), 1)
+        self.run_sim()
+
+    def test_and(self):
+        @self.initial
+        def stim():
+            self.set(a=0xFF0F, b=0x0FF0, op=ALU_AND)
+            yield 1
+            self.assertEqual(self.out('result'), 0x0F00)
+        self.run_sim()
+
+    def test_shl(self):
+        @self.initial
+        def stim():
+            self.set(a=0x8001, b=0, op=ALU_SHL)
+            yield 1
+            self.assertEqual(self.out('result'), 0x0002)
+            self.assertEqual(self.out('carry'), 1)
+        self.run_sim()
+
+    def test_pass(self):
+        @self.initial
+        def stim():
+            self.set(a=0, b=42, op=ALU_PASS)
+            yield 1
+            self.assertEqual(self.out('result'), 42)
+        self.run_sim()
+
+
 if __name__ == '__main__':
     alu = ALU(16)
     print(alu.to_verilog(module_name='alu'))

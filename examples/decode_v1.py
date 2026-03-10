@@ -157,6 +157,64 @@ class Decode(Module):
             self.rs2_addr = self.instr[10:8] if opcode == OP_STORE else self.instr[4:2]
 
 
+# ── Inline TestBench ─────────────────────────────────────────────────
+
+from veripy.verify import TestBench
+
+
+class DecodeTestBench(TestBench):
+    def create_module(self):
+        return Decode()
+
+    def _encode(self, opcode, rd=0, rs1=0, rs2=0, imm=0):
+        return (opcode << 11) | (rd << 8) | (imm & 0xFF)
+
+    def test_li(self):
+        @self.initial
+        def stim():
+            self.set(instr=self._encode(OP_LI, rd=2, imm=42))
+            yield 1
+            self.assertEqual(self.out('reg_we'), 1)
+            self.assertEqual(self.out('use_imm'), 1)
+            self.assertEqual(self.out('rd_addr'), 2)
+            self.assertEqual(self.out('immediate'), 42)
+        self.run_sim()
+
+    def test_add(self):
+        @self.initial
+        def stim():
+            self.set(instr=self._encode(OP_ADD, rd=1))
+            yield 1
+            self.assertEqual(self.out('reg_we'), 1)
+            self.assertEqual(self.out('alu_op'), ALU_ADD)
+        self.run_sim()
+
+    def test_store(self):
+        @self.initial
+        def stim():
+            self.set(instr=self._encode(OP_STORE, rd=3, imm=10))
+            yield 1
+            self.assertEqual(self.out('mem_we'), 1)
+            self.assertEqual(self.out('reg_we'), 0)
+        self.run_sim()
+
+    def test_jmp(self):
+        @self.initial
+        def stim():
+            self.set(instr=self._encode(OP_JMP, rd=0, imm=0x20))
+            yield 1
+            self.assertEqual(self.out('is_jump'), 1)
+        self.run_sim()
+
+    def test_halt(self):
+        @self.initial
+        def stim():
+            self.set(instr=self._encode(OP_HLT))
+            yield 1
+            self.assertEqual(self.out('is_halt'), 1)
+        self.run_sim()
+
+
 if __name__ == '__main__':
     d = Decode()
     print(d.ctrl.to_verilog('control_unit'))

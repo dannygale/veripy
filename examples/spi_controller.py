@@ -176,6 +176,54 @@ class SpiController(Module):
             return int(self.fifo.full) == 1
 
 
+# ── Inline TestBench ─────────────────────────────────────────────────
+
+from veripy.verify import TestBench
+
+
+class SpiControllerTestBench(TestBench):
+
+    def create_module(self):
+        return SpiController(width=8, fifo_depth=4, clk_div=2)
+
+    def test_tx_ready_when_idle(self):
+        self.clock('clock', 10)
+
+        @self.initial
+        def stim():
+            self.set(reset=1)
+            yield 10
+            self.set(reset=0)
+            yield 10
+            self.assertEqual(self.out('tx_ready'), 1)
+
+        self.run_sim()
+
+    def test_single_transfer(self):
+        self.clock('clock', 10)
+
+        @self.initial
+        def stim():
+            self.set(reset=1, tx_valid=0, tx_data=0)
+            yield 20
+            self.set(reset=0)
+            yield 10
+            # Push 0xA5 into FIFO
+            self.set(tx_data=0xA5, tx_valid=1)
+            yield 10
+            self.set(tx_valid=0)
+            # Wait for rx_valid (FSM: IDLE→LOAD→SHIFT→DONE)
+            saw_rx = False
+            for _ in range(300):
+                yield 10
+                if self.out('rx_valid'):
+                    saw_rx = True
+                    break
+            self.assertTrue(saw_rx, "rx_valid never asserted")
+
+        self.run_sim()
+
+
 # ── Main: emit Verilog + run quick sim ───────────────────────────────
 
 if __name__ == '__main__':
