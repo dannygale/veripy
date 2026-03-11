@@ -220,6 +220,8 @@ class Signal:
         if isinstance(key, slice):
             hi = key.start if key.start is not None else self.width - 1
             lo = key.stop if key.stop is not None else 0
+            if hasattr(hi, '__index__'): hi = int(hi)
+            if hasattr(lo, '__index__'): lo = int(lo)
             return _SliceProxy(self, hi, lo)
         return _SliceProxy(self, key, key)
 
