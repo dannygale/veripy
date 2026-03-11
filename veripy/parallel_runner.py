@@ -1,4 +1,32 @@
-"""Parallel test runner: discover test files and run them concurrently."""
+"""Parallel test runner: discover test files and run them concurrently.
+
+Granularity
+-----------
+Work is split by *file*, not by individual test class or method.  All
+test cases inside a single file run sequentially in the same worker
+process.
+
+Why not per-method?  Three reasons:
+
+1. **Build artifact races** — cysim compilation writes to
+   ``build/csim/cysim/``.  Two workers compiling the same module
+   simultaneously would race on the ``.so`` file.  The content-hash
+   cache avoids redundant compiles but doesn't lock the first build.
+
+2. **Process overhead** — spawning a process per test method means each
+   worker re-imports the module, re-loads the ``.so``, and
+   re-initializes.  For tests that finish in < 50 ms the startup cost
+   dominates.
+
+3. **Shared state** — ``_cysim_cache`` is a process-local dict; each
+   worker would cold-start its own cache.
+
+A middle ground (not yet implemented) would be to split by *test class*
+rather than file.  This would help files that contain multiple
+``TestBench`` subclasses while keeping the per-class setup cost
+amortised across its methods.  The main prerequisite is per-worker temp
+dirs or a file lock around the cysim compile step.
+"""
 
 import json
 import os
