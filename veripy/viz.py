@@ -75,6 +75,21 @@ def module_stats(module, name=None):
 
     _accumulate(module, is_top=True)
 
+    # Flatten to count wire/comb signals
+    from .flatten import flatten_ir
+    from .backend_csim import _collect_submodule_registry, _build_sig_widths, _collect_nba_signals
+    registry, patch_fn = _collect_submodule_registry(module)
+    top_ir = lower_module(module, mod_name)
+    patch_fn(top_ir)
+    flat = flatten_ir(top_ir, registry) if top_ir.instances else top_ir
+    sig_w = _build_sig_widths(flat)
+    nba_sigs, _ = _collect_nba_signals(flat)
+    _ports = {p.name for p in flat.ports}
+    _regs = {r.name for r in flat.regs}
+    _mems = {m.name for m in flat.mems}
+    wire_sigs = {n for n in sig_w if n not in _ports and n not in _regs and n not in _mems and n not in nba_sigs}
+    wire_bits = sum(sig_w[n] for n in wire_sigs)
+
     # Estimate comb depth on top-level IR only
     ir = lower_module(module, mod_name)
     nodes = []
@@ -98,5 +113,7 @@ def module_stats(module, name=None):
     return {
         'name': mod_name,
         **totals,
+        'wires': len(wire_sigs),
+        'wire_bits': wire_bits,
         'comb_depth_est': comb_depth,
     }

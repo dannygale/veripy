@@ -794,6 +794,7 @@ def cmd_stats(args):
         print(f"  Ports:       {s['inputs']} inputs, {s['outputs']} outputs")
         print(f"  Registers:   {s['registers']} ({s['reg_bits']} bits)")
         print(f"  Memories:    {s['memories']} ({s['mem_bits']} bits)")
+        print(f"  Wires:       {s['wires']} ({s['wire_bits']} bits)")
         print(f"  Instances:   {s['instances']}")
         print(f"  Comb blocks: {s['comb_blocks']}  Seq blocks: {s['seq_blocks']}")
         print(f"  Comb depth:  ~{s['comb_depth_est']} (estimated)")
