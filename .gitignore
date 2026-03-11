@@ -8,3 +8,4 @@ build/
 .kiro
 parser.out
 parsetab.py
+.hypothesis
