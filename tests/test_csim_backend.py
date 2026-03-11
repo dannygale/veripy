@@ -149,22 +149,16 @@ class TestEmitC(unittest.TestCase):
         self.assertIn('_nba_cnt', c)
 
     def test_eval_contains_all_logic(self):
-        """veripy_eval contains all comb+seq logic inline (monolithic)."""
+        """veripy_eval_seq contains seq logic; veripy_eval_comb contains comb logic."""
         c = emit_c(self._counter_ir())
-        start = c.index('void veripy_eval(')
-        depth = 0
-        for i, ch in enumerate(c[start:], start):
-            if ch == '{': depth += 1
-            elif ch == '}':
-                depth -= 1
-                if depth == 0:
-                    eval_body = c[start:i + 1]
-                    break
-        # Seq logic is inline (NBA commit)
-        self.assertIn('s->cnt = s->_nba_cnt', eval_body)
-        # No function calls to _seq or _cont_assigns
-        self.assertNotIn('_seq_0(s)', eval_body)
-        self.assertNotIn('_cont_assigns(s)', eval_body)
+        # Seq logic is in veripy_eval_seq
+        seq_start = c.index('void veripy_eval_seq(')
+        self.assertIn('s->cnt = s->_nba_cnt', c[seq_start:])
+        # veripy_eval is a thin dispatcher
+        eval_start = c.rindex('void veripy_eval(')
+        eval_body = c[eval_start:c.index('}', eval_start) + 1]
+        self.assertIn('veripy_eval_comb', eval_body)
+        self.assertIn('veripy_eval_seq', eval_body)
 
     def test_monolithic_no_separate_functions(self):
         """Monolithic eval emits no separate _comb/_seq/_cont functions."""
