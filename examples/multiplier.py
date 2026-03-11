@@ -3,7 +3,7 @@
 
   functional — instant: result = a * b, no latency
   cycle      — 2-cycle pipeline latency, no structural detail
-  rtl        — 2-stage pipeline with partial-product registers
+  rtl        — 2-stage pipeline registers
 """
 
 import sys, os
@@ -23,16 +23,17 @@ def pipelined_multiplier(width=16):
     result = Output(width * 2)
     done   = Output()
 
-    # Pipeline registers
-    s1_lo    = Register(width * 2)
-    s1_hi    = Register(width * 2)
+    # Stage 1 registers: capture inputs
+    s1_a     = Register(width)
+    s1_b     = Register(width)
     s1_valid = Register()
-    s2_valid = Register()
+
+    # Stage 2 registers: capture product
+    s2_result = Register(width * 2)
+    s2_valid  = Register()
 
     w = int(width)
     mask = (1 << (w * 2)) - 1
-    half = w // 2
-    hmask = (1 << half) - 1
 
     # ── Tier 1: functional — instant result ──────────────────────
     @functional
@@ -52,35 +53,35 @@ def pipelined_multiplier(width=16):
         pipe[1] = pipe[0]
         pipe[0] = ((a._val * b._val) & mask, 1) if valid._val else (0, 0)
 
-    # ── Tier 3: RTL — structural pipeline ────────────────────────
+    # ── Tier 3: RTL — 2-stage pipeline ───────────────────────────
     @comb
     def output():
-        result = s1_lo + s1_hi
+        result = s2_result
         done = s2_valid
 
     @always(posedge(clock))
     def stage1():
+        """Register inputs."""
         if reset:
-            s1_lo = 0
-            s1_hi = 0
+            s1_a = 0
+            s1_b = 0
             s1_valid = 0
-        elif valid:
-            al = a & hmask
-            ah = a >> half
-            bl = b & hmask
-            bh = b >> half
-            s1_lo = (al * bl) + ((al * bh + ah * bl) << half)
-            s1_hi = (ah * bh) << (half * 2)
-            s1_valid = 1
         else:
-            s1_valid = 0
+            s1_a = a
+            s1_b = b
+            s1_valid = valid
 
     @always(posedge(clock))
     def stage2():
+        """Compute product from registered inputs."""
         if reset:
+            s2_result = 0
             s2_valid = 0
+        elif s1_valid:
+            s2_result = s1_a * s1_b
+            s2_valid = 1
         else:
-            s2_valid = s1_valid
+            s2_valid = 0
 
 
 # ── TestBench ────────────────────────────────────────────────────────
@@ -119,19 +120,21 @@ class MultiplierTestBench(TestBench):
             yield 10
             dut.reset = 0
 
-            # First multiply
+            # Two multiplies on consecutive cycles
             dut.a = 100; dut.b = 200; dut.valid = 1
             yield 10
-            dut.valid = 0
+            dut.a = 0xFF; dut.b = 0xFF
             yield 10
-            assert dut.result == 20000
+            dut.valid = 0
 
-            # Second multiply
-            dut.a = 0xFF; dut.b = 0xFF; dut.valid = 1
-            yield 10
-            dut.valid = 0
+            # First result emerges (100 × 200)
+            assert dut.result == 20000
+            assert dut.done == 1
+
+            # Second result emerges (255 × 255)
             yield 10
             assert dut.result == 0xFE01
+            assert dut.done == 1
 
     def test_zero(self):
         dut = self.dut
@@ -165,5 +168,5 @@ class MultiplierTestBench(TestBench):
 
 
 if __name__ == '__main__':
-    m = pipelined_multiplier(16)
+    m = pipelined_multiplier(width=16)
     print(m.to_verilog(module_name='pipelined_multiplier'))
