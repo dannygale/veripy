@@ -144,11 +144,10 @@ def _collect_submodule_registry(module):
 
 
 def _ctype(width):
-    """Return narrowest C unsigned type for *width* bits."""
-    if width <= 8:
-        return 'uint8_t'
-    if width <= 16:
-        return 'uint16_t'
+    """Return C unsigned type for *width* bits.
+    Locals use uint32_t for <=32 bits — native register width on ARM64/x86-64,
+    avoids zero-extension overhead from uint8_t/uint16_t.
+    """
     if width <= 32:
         return 'uint32_t'
     return 'uint64_t'
@@ -1234,6 +1233,7 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
     lines.append('} State;')
     lines.append('')
     lines.append('static void _vcd_dump(State* s);')
+    lines.append('static int _vcd_enabled;  /* defined below, default 0 */')
     lines.append('static int _assert_fail = 0;')
     lines.append('static int _assert_fail_prop = -1;')
     lines.append('static uint64_t _assert_fail_cycle = 0;')
@@ -1356,9 +1356,9 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
     for _seq_gi, ((edge_kind, clk), block_ids) in enumerate(sorted(edge_blocks.items())):
         clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
         if edge_kind == 'posedge':
-            cond = f'{clk_expr} && !s->_prev_{clk}'
+            cond = f'__builtin_expect({clk_expr} && !s->_prev_{clk}, 0)'
         else:
-            cond = f'!{clk_expr} && s->_prev_{clk}'
+            cond = f'__builtin_expect(!{clk_expr} && s->_prev_{clk}, 0)'
         lines.append(f'    if ({cond}) {{')
         if coverage:
             lines.append(f'        _cov_line[{len(merge_groups) + _seq_gi}]++;')
@@ -1462,7 +1462,7 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
             lines.append(f'      _cov_tog_ones[{ci}] |= _cv & {mask};')
             lines.append(f'      _cov_tog_zeros[{ci}] |= (~_cv) & {mask}; }}')
 
-    lines.append('    _vcd_dump(s);')
+    lines.append('    if (_vcd_enabled) _vcd_dump(s);')
     lines.append('}')
     lines.append('')
 
@@ -1489,7 +1489,7 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
 
     n_trace = len(trace_sigs)
     lines.append(f'static FILE* _vcd_fp = 0;')
-    lines.append(f'static int _vcd_enabled = 1;')
+    lines.append(f'static int _vcd_enabled = 0;')
     lines.append(f'static uint64_t _vcd_prev[{n_trace}];')
     lines.append(f'static uint64_t _vcd_time = 0;')
     lines.append('#ifdef VERIPY_FST')
@@ -2297,9 +2297,9 @@ def _emit_hier_module(ir, mod_type, registry, lines, leaf_types=None):
     for (edge_kind, clk), block_ids in sorted(edge_blocks.items()):
         clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
         if edge_kind == 'posedge':
-            cond = f'{clk_expr} && !s->_prev_{clk}'
+            cond = f'__builtin_expect({clk_expr} && !s->_prev_{clk}, 0)'
         else:
-            cond = f'!{clk_expr} && s->_prev_{clk}'
+            cond = f'__builtin_expect(!{clk_expr} && s->_prev_{clk}, 0)'
         lines.append(f'    if ({cond}) {{')
 
         # NBA snapshot
@@ -3301,6 +3301,24 @@ class _CySimContext:
     def engine(self):
         """Create a CySimEngine backed by this model."""
         return self._pymod.CySimEngine(self._model)
+
+
+def compile_cysim_bench(module, tb_ir, module_name=None):
+    """Compile a TB against the cached CySim model .so — all-C execution.
+
+    The model is compiled once and cached (same as compile_cysim). The TB
+    is compiled as a thin C shim linked against the model .so. No Python
+    in the hot path.
+
+    Returns (run_fn, compile_time, cleanup_fn) — same interface as compile_bench.
+    """
+    if module_name is None:
+        module_name = type(module).__name__.lower()
+
+    lib_path, flat_ir, model_c_src, header_src = compile_model(module, module_name)
+
+    hp = _extract_half_period(tb_ir.always_blocks[0].stmts) if tb_ir.always_blocks else 10
+    return compile_tb(tb_ir, lib_path, model_c_src, flat_ir, hp)
 
 
 def _default_model_cache_dir() -> str:
