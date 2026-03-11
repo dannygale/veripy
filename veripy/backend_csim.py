@@ -1393,7 +1393,7 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
         w = all_sigs[name]
         lines.append(f'    {_ctype(w)} {name} = 0;')
 
-    # Phase 2: call per-block seq functions
+    # Phase 2: call per-edge-group seq functions
     for fn_name in seq_group_fns:
         lines.append(f'    {fn_name}(s);')
 
@@ -3507,18 +3507,18 @@ def compile_model_hier(module, module_name=None, cache_dir=None):
 
 
 def compile_tb(tb_ir, model_lib_path, model_c_src, flat_ir, half_period=10):
-    """Compile a testbench .so that links against a pre-compiled model .so.
+    """Compile a self-contained testbench .so with model source inlined.
 
-    Uses emit_tb_c() with just the model header (State struct + extern decls)
-    instead of the full model source, then links against model_lib_path.
+    Passes the full model C source to emit_tb_c so the model functions
+    (veripy_eval_comb, veripy_eval_seq, etc.) are compiled into the same
+    translation unit as run_bench — no DYLD stubs, no cross-dylib calls.
 
     Returns:
         (run_fn, compile_time, cleanup_fn)
     """
     t0 = time.perf_counter()
 
-    header_src = emit_c_header(flat_ir, model_c_src)
-    tb_c = emit_tb_c(tb_ir, header_src, half_period, model_ir=flat_ir)
+    tb_c = emit_tb_c(tb_ir, model_c_src, half_period, model_ir=flat_ir)
 
     build_dir = tempfile.mkdtemp(prefix='veripy_tb_')
     c_path = os.path.join(build_dir, 'bench.c')
@@ -3527,19 +3527,16 @@ def compile_tb(tb_ir, model_lib_path, model_c_src, flat_ir, half_period=10):
 
     ext = '.dylib' if os.uname().sysname == 'Darwin' else '.so'
     lib_path = os.path.join(build_dir, f'libbench{ext}')
-    model_dir = os.path.dirname(model_lib_path)
-    model_stem = os.path.basename(model_lib_path)
-    # Strip lib prefix and extension to get -l<name>
-    lib_link_name = model_stem[3:].rsplit('.', 1)[0]  # e.g. libcounter_abc.dylib → counter_abc
 
     cc = os.environ.get('CC', 'cc')
     flag = '-dynamiclib' if ext == '.dylib' else '-shared'
-    rpath_flag = f'-Wl,-rpath,{model_dir}'
+    fstapi_dir, fstapi_srcs = _find_fstapi()
+    extra_flags = [f'-I{fstapi_dir}', '-DVERIPY_FST', '-lz'] if fstapi_dir else []
+    extra_srcs = fstapi_srcs if fstapi_dir else []
 
     r = subprocess.run(
-        [cc, '-O3', '-march=native', '-fPIC', flag,
-         '-o', lib_path, c_path,
-         f'-L{model_dir}', f'-l{lib_link_name}', rpath_flag],
+        [cc, '-O3', '-march=native', '-flto', '-fPIC', flag,
+         '-o', lib_path, c_path] + extra_srcs + extra_flags,
         capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f'TB compilation failed:\n{r.stderr}\n\nSource:\n{tb_c}')
