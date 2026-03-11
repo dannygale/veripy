@@ -185,6 +185,7 @@ def cmd_build(args):
             _collect(fresh, sub_snake)
         from .lower import lower_module
         from .backend_verilog import emit_verilog as _emit_v
+        mod.check_has_rtl()
         ir = lower_module(mod, mod_name)
         if args._synth:
             ir.formal_props.clear()
@@ -437,6 +438,7 @@ def cmd_formal(args):
 
     for name, instance in modules:
         mod_name = _to_snake(name)
+        instance.check_has_rtl()
         ir = lower_module(instance, mod_name)
         if not ir.formal_props:
             print(f"  {mod_name}: no formal properties, skipping")
@@ -483,6 +485,8 @@ def cmd_equiv(args):
     gold_name, gold_inst = gold_mods[0]
     gate_name, gate_inst = gate_mods[0]
 
+    gold_inst.check_has_rtl()
+    gate_inst.check_has_rtl()
     gold_ir = lower_module(gold_inst, _to_snake(gold_name))
     gate_ir = lower_module(gate_inst, _to_snake(gate_name))
 
@@ -659,6 +663,7 @@ def cmd_fpga(args):
         top_name, top_inst = modules[0]
         top_snake = _to_snake(top_name)
 
+        top_inst.check_has_rtl()
         ir = lower_module(top_inst, top_snake)
         verilog_src = emit_verilog(ir)
 
