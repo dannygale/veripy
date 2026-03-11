@@ -161,7 +161,7 @@ def _resolve_backends(cls):
         except Exception:
             pass
     if raw is None:
-        raw = 'check'
+        raw = 'cysim'
 
     if isinstance(raw, str):
         if raw in _BACKEND_ALIASES:
@@ -217,38 +217,33 @@ class TestBench(unittest.TestCase):
     Subclass and override create_module(). Set ``backend`` to control
     which simulation backends are used:
 
-        'check'      — behavioral + csim, cross-check outputs (default)
+        'cysim'      — Cython-compiled direct execution (default)
         'behavioral' — Python sim only, no compilation
-        'csim'       — csim only, no cross-check
+        'check'      — behavioral + csim, cross-check outputs
         'all'        — all backends (behavioral, iverilog, csim, csim_hier, verilator)
-        'csim,iverilog' — comma-separated list of specific backends
+        'behavioral,cysim' — comma-separated list of specific backends
 
     Override priority: VERIPY_BACKENDS env var > class attribute > veripy.toml [test] backend.
 
         class TestCounter(TestBench):
-            backend = 'check'
-
             def create_module(self):
                 return Counter(4)
 
             def test_counting(self):
-                @self.always
-                def clock():
-                    self.set(clock=0); yield 5
-                    self.set(clock=1); yield 5
+                dut = self.dut
+                self.clock('clock', 10)
 
-                @self.initial
-                def stimulus():
-                    self.set(reset=1, enable=1)
+                @initial
+                def stim():
+                    dut.reset = 1; dut.enable = 1
                     yield 10
-                    self.assertEqual(self.out('count'), 0)
-                    self.set(reset=0)
+                    dut.reset = 0
                     for _ in range(5):
                         yield 10
-                    self.assertEqual(self.out('count'), 5)
+                    assert dut.count == 5
     """
 
-    backend = 'check'
+    backend = 'cysim'
     model = None  # minimum fidelity floor: 'functional', 'cycle', or 'rtl' (None = auto)
 
     def create_module(self):
