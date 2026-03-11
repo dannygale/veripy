@@ -86,11 +86,17 @@ def cycle(sensitivity, init=None):
 
 
 def _wrap_cycle_fn(fn, state):
-    """Wrap a cycle model fn with its init state so it's always a 0-arg callable."""
+    """Wrap a cycle model fn with its init state so it's always a 0-arg callable.
+
+    State values are passed as keyword args. The function's return dict (if any)
+    is merged back into state, so immutable values like ints persist between calls.
+    """
     if not state:
         return fn
     def _wrapped():
-        fn(**state)
+        result = fn(**state)
+        if isinstance(result, dict):
+            state.update(result)
     _wrapped._veripy_cycle = True
     return _wrapped
 

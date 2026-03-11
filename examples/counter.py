@@ -24,13 +24,14 @@ def counter(n=8):
         elif reset._val:
             count._val = 0
 
-    @cycle(posedge(clock), init=dict(s=[0]))
-    def cycle_model(s):
+    @cycle(posedge(clock), init=dict(c=0))
+    def cycle_model(c):
         if reset._val:
-            s[0] = 0
+            c = 0
         elif enable._val:
-            s[0] = (s[0] + 1) & mask
-        count._val = s[0]
+            c = (c + 1) & mask
+        count._val = c
+        return dict(c=c)
 
     @always(posedge(clock))
     def increment():
