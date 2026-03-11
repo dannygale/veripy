@@ -35,25 +35,48 @@ def _dot_walk(module, mod_name, seen, lines):
 
 
 def module_stats(module, name=None):
-    """Return a dict of design statistics for *module* (lowered to IR)."""
+    """Return a dict of design statistics for *module*, flattened across hierarchy."""
     from .lower import lower_module
     from .flatten import _expr_reads, _stmt_writes_reads
+    from .signal import Signal
 
     mod_name = name or _to_snake(type(module).__name__)
+
+    # Collect stats recursively across all sub-modules
+    totals = dict(inputs=0, outputs=0, registers=0, reg_bits=0,
+                  memories=0, mem_bits=0, instances=0, comb_blocks=0, seq_blocks=0)
+
+    def _resolve(w, params):
+        if isinstance(w, int): return w
+        if isinstance(w, str): return params.get(w, 0)
+        return 0
+
+    def _accumulate(mod, is_top=False):
+        ir = lower_module(mod, type(mod).__name__.lower())
+        if is_top:
+            totals['inputs'] = sum(1 for p in ir.ports if p.direction == 'input')
+            totals['outputs'] = sum(1 for p in ir.ports if p.direction == 'output')
+        totals['registers'] += len(ir.regs)
+        totals['reg_bits'] += sum(_resolve(r.width, ir.params) for r in ir.regs)
+        totals['memories'] += len(ir.mems)
+        totals['mem_bits'] += sum(
+            _resolve(m.depth, ir.params) * _resolve(m.width, ir.params)
+            for m in ir.mems
+        )
+        totals['instances'] += len(ir.instances)
+        totals['comb_blocks'] += len(ir.comb_blocks)
+        totals['seq_blocks'] += len(ir.seq_blocks)
+        # Recurse into sub-modules
+        for k in dir(mod):
+            v = getattr(mod, k, None)
+            from .module import Module as _Module
+            if isinstance(v, _Module) and v is not mod:
+                _accumulate(v)
+
+    _accumulate(module, is_top=True)
+
+    # Estimate comb depth on top-level IR only
     ir = lower_module(module, mod_name)
-
-    n_inputs = sum(1 for p in ir.ports if p.direction == 'input')
-    n_outputs = sum(1 for p in ir.ports if p.direction == 'output')
-
-    def _resolve(w):
-        if isinstance(w, int):
-            return w
-        return ir.params.get(w, 0) if isinstance(w, str) else 0
-
-    reg_bits = sum(_resolve(r.width) for r in ir.regs)
-    mem_bits = sum(m.depth * _resolve(m.width) for m in ir.mems)
-
-    # Estimate comb depth: longest dependency chain in comb blocks
     nodes = []
     for b in ir.comb_blocks:
         w, r = set(), set()
@@ -62,8 +85,6 @@ def module_stats(module, name=None):
         nodes.append((w, r))
     for a in ir.assigns:
         nodes.append(({a.target}, _expr_reads(a.value)))
-
-    # Build adjacency: node i depends on node j if j writes something i reads
     n = len(nodes)
     depth = [1] * n
     for i in range(n):
@@ -76,14 +97,6 @@ def module_stats(module, name=None):
 
     return {
         'name': mod_name,
-        'inputs': n_inputs,
-        'outputs': n_outputs,
-        'registers': len(ir.regs),
-        'reg_bits': reg_bits,
-        'memories': len(ir.mems),
-        'mem_bits': mem_bits,
-        'instances': len(ir.instances),
-        'comb_blocks': len(ir.comb_blocks),
-        'seq_blocks': len(ir.seq_blocks),
+        **totals,
         'comb_depth_est': comb_depth,
     }
