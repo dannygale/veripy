@@ -10,7 +10,7 @@ from .decorator import module
 from .context import (comb, always, fsm, assert_always, cover, assume, pipeline,
                       behavioral, create_clock, max_delay, false_path, clock_domain)
 
-from .sim import SimEngine, until
+from .sim import until
 from .driver import Driver
 from .rv import QuickRunMixin
 from .cdc import Synchronizer, AsyncFIFO
@@ -22,7 +22,7 @@ from .axi4lite import Axi4LiteBus, Axi4LiteSub
 from .axi4 import Axi4Bus, Axi4Sub, Axi4Crossbar
 from .csr import Field, Reg, RegisterMap
 from .project import Project
-from .verify import TestBench, VeripyTestCase, BehavioralTestCase, initial
+from .verify import TestBench, initial
 from .firmware_test import FirmwareTestCase
 from .firmware import ElfSegment, ElfImage, load_elf
 from .soc_sim import FlatMemory, UartPeripheral, SocSim
@@ -39,7 +39,7 @@ __all__ = [
     "comb", "always", "fsm", "assert_always", "cover", "assume", "pipeline",
     "behavioral", "create_clock", "max_delay", "false_path", "clock_domain",
     # Simulation
-    "SimEngine", "until", "Driver", "QuickRunMixin",
+    "until", "Driver", "QuickRunMixin",
     # CDC / IP
     "Synchronizer", "AsyncFIFO",
     "SyncFifo", "EdgeDetector", "Debouncer", "RoundRobinArbiter",
@@ -49,7 +49,7 @@ __all__ = [
     "Axi4LiteBus", "Axi4LiteSub", "Axi4Bus", "Axi4Sub", "Axi4Crossbar",
     "Field", "Reg", "RegisterMap",
     # Testing
-    "TestBench", "VeripyTestCase", "BehavioralTestCase", "initial",
+    "TestBench", "initial",
     "FirmwareTestCase",
     # Firmware / SoC
     "ElfSegment", "ElfImage", "load_elf",

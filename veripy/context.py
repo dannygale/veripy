@@ -226,11 +226,20 @@ def fsm(clock, reset, states):
     def decorator(func):
         func.__globals__.update(state_vals)
 
+        # Capture source before any rewriting (for the lowerer)
+        try:
+            import inspect as _inspect, textwrap as _textwrap
+            _raw_src = _textwrap.dedent(_inspect.getsource(func))
+        except (OSError, TypeError):
+            _raw_src = None
+
         def comb_wrapper():
             ns = func(int(state_reg), **state_vals)
             next_state._assign(ns if ns is not None else int(state_reg))
 
         comb_wrapper.__wrapped__ = func
+        if _raw_src:
+            comb_wrapper.__wrapped__._veripy_raw_source = _raw_src
         comb_wrapper._fsm_info = {
             'states': states, 'state_vals': state_vals,
             'state_reg': state_reg, 'next_state': next_state,

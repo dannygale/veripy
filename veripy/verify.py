@@ -1,4 +1,4 @@
-"""Dual-path test case: write one test, verify Python sim and iverilog agree."""
+"""TestBench: CySim-backed test case for VeriPy modules."""
 
 import atexit, json, threading, unittest, subprocess, tempfile, os, random
 
@@ -8,7 +8,6 @@ if _env_seed is not None:
     random.seed(int(_env_seed))
 
 from .signal import Signal, Mem, Interface
-from .sim import SimEngine
 
 # ── Free-standing decorators ─────────────────────────────────────────
 _current_tb = threading.local()
@@ -122,104 +121,18 @@ class _CySignalProxy:
 
 
 def _patch_signals_for_cysim(mod, cmodel):
-    """Replace module signals with proxies that route through CySimModel.
-
-    This makes Driver subclasses (which call m.signal.set() and int(m.signal)
-    directly) work transparently with the compiled model.
-    """
+    """Replace module signals with proxies that route through CySimModel."""
     for name in list(dir(mod)):
         sig = getattr(mod, name, None)
         if isinstance(sig, Signal):
             object.__setattr__(mod, name, _CySignalProxy(name, cmodel, sig))
 
 
-_VALID_BACKENDS = {'behavioral', 'iverilog', 'csim', 'csim_hier', 'verilator', 'cysim'}
-_BACKEND_ALIASES = {
-    'check': ['behavioral', 'csim'],
-    'all':   ['behavioral', 'iverilog', 'csim', 'csim_hier'],
-}
-
-
-def _resolve_backends(cls):
-    """Resolve the backend list for a TestBench subclass.
-
-    Priority: VERIPY_BACKENDS env var > class attribute > veripy.toml > 'check'.
-    """
-    raw = os.environ.get('VERIPY_BACKENDS')
-    if raw is None:
-        raw = getattr(cls, 'backend', None)
-    if raw is None:
-        try:
-            from .config import load_config
-            cfg = load_config()
-            if cfg:
-                raw = cfg.get('test', {}).get('backend')
-        except Exception:
-            pass
-    if raw is None:
-        raw = 'cysim'
-
-    if isinstance(raw, str):
-        if raw in _BACKEND_ALIASES:
-            backends = list(_BACKEND_ALIASES[raw])
-        else:
-            backends = [b.strip() for b in raw.split(',')]
-    else:
-        backends = list(raw)
-
-    # Silently drop verilator if not available
-    if 'verilator' in backends:
-        import shutil
-        if not shutil.which('verilator'):
-            backends.remove('verilator')
-
-    return backends
-
-
-_MODEL_ORDER = ['functional', 'cycle', 'rtl']
-
-
-def _resolve_models(cls, mod):
-    """Resolve which models to run for a TestBench subclass.
-
-    Priority: VERIPY_MODEL env var > class 'model' attribute > auto-detect.
-    The class/env value is a minimum fidelity floor — only models at or above
-    that level in _MODEL_ORDER are included.
-    """
-    floor = os.environ.get('VERIPY_MODEL') or getattr(cls, 'model', None)
-
-    # Auto-detect available models from the module instance
-    available = []
-    if getattr(mod, '_functional', None) is not None or getattr(mod, '_behavioral', None) is not None:
-        available.append('functional')
-    if getattr(mod, '_cycle', None) is not None:
-        available.append('cycle')
-    if getattr(mod, '_always_blocks', None) or getattr(mod, '_comb_blocks', None):
-        available.append('rtl')
-
-    if not available:
-        available = ['rtl']  # fallback: treat as RTL-only
-
-    if floor is not None and floor in _MODEL_ORDER:
-        floor_idx = _MODEL_ORDER.index(floor)
-        available = [m for m in available if _MODEL_ORDER.index(m) >= floor_idx]
-
-    return available if available else ['rtl']
-
-
 class TestBench(unittest.TestCase):
-    """Configurable test bench for VeriPy modules.
+    """CySim-backed test bench for VeriPy modules.
 
-    Subclass and override create_module(). Set ``backend`` to control
-    which simulation backends are used:
-
-        'cysim'      — Cython-compiled direct execution (default)
-        'behavioral' — Python sim only, no compilation
-        'check'      — behavioral + csim, cross-check outputs
-        'all'        — all backends (behavioral, iverilog, csim, csim_hier, verilator)
-        'behavioral,cysim' — comma-separated list of specific backends
-
-    Override priority: VERIPY_BACKENDS env var > class attribute > veripy.toml [test] backend.
+    Subclass and override create_module(). Write test_* methods using
+    @initial / @always decorators and self.dut for signal access.
 
         class TestCounter(TestBench):
             def create_module(self):
@@ -238,9 +151,6 @@ class TestBench(unittest.TestCase):
                         yield 10
                     assert dut.count == 5
     """
-
-    backend = 'cysim'
-    model = None  # minimum fidelity floor: 'functional', 'cycle', or 'rtl' (None = auto)
 
     def create_module(self):
         raise NotImplementedError
@@ -266,40 +176,24 @@ class TestBench(unittest.TestCase):
 
     def set(self, **kwargs):
         """Set input signal values."""
-        if self._replay_model is not None:
-            for name, val in kwargs.items():
-                self._replay_model.set(name, val)
-            return
-        cm = getattr(self, '_cysim_model', None)
+        cm = self._cysim_model
         if cm is not None:
             for name, val in kwargs.items():
                 cm.set(name, val)
-            return
-        for name, val in kwargs.items():
-            getattr(self._mod, name)._val = val
-        self._trace_sets.append((self._engine.time, dict(kwargs)))
+        else:
+            for name, val in kwargs.items():
+                getattr(self._mod, name)._val = val
 
     def get(self, name):
-        """Read a signal value from the current active model."""
-        if self._replay_model is not None:
-            return self._replay_model.get(name)
-        cm = getattr(self, '_cysim_model', None)
+        """Read a signal value."""
+        cm = self._cysim_model
         if cm is not None:
             return cm.get(name)
         return int(getattr(self._mod, name))
 
     def out(self, name):
-        """Read an output signal's current value and record for comparison."""
-        cm = getattr(self, '_cysim_model', None)
-        if cm is not None:
-            val = cm.get(name)
-        else:
-            val = int(getattr(self._mod, name))
-        t = self._engine.time
-        if t not in self._py_outputs:
-            self._py_outputs[t] = {}
-        self._py_outputs[t][name] = val
-        return val
+        """Read an output signal's current value."""
+        return self.get(name)
 
     def run_sim(self):
         """Run the event-driven simulation."""
@@ -307,57 +201,17 @@ class TestBench(unittest.TestCase):
         self._engine.run()
 
     def clock(self, name, period=10):
-        """Register a clock driver. Eliminates @self.always boilerplate."""
+        """Register a clock driver."""
         self._clock_name = name
         self._clock_period = period
-        sig = getattr(self._mod, name)
-        self._engine.clock(sig, period)
+        self._engine.clock(name, period)
 
     def run_cycles(self, n):
-        """Run *n* clock cycles entirely in C (cysim) or Python.
-
-        Use inside ``@self.initial`` when you don't need per-cycle Python
-        between yields.  Much faster than ``for _ in range(n): yield period``.
-
-        On behavioral/csim backends, falls back to stepping the sim engine.
-        """
-        engine = self._engine
-        if hasattr(engine, 'run_cycles'):
-            engine.run_cycles(n)
-        else:
-            # Fallback: step through Python sim
-            period = self._clock_period or 10
-            half = period // 2
-            mod = self._mod
-            sig = getattr(mod, self._clock_name)
-            for _ in range(n):
-                sig._val = 0
-                mod._settle_comb()
-                triggered = mod._check_edges()
-                if triggered:
-                    for _e, m in triggered:
-                        m()
-                    mod._apply_nba()
-                    mod._settle_comb()
-                mod._snapshot_prev()
-                sig._val = 1
-                mod._settle_comb()
-                triggered = mod._check_edges()
-                if triggered:
-                    for _e, m in triggered:
-                        m()
-                    mod._apply_nba()
-                    mod._settle_comb()
-                mod._snapshot_prev()
-            self._engine.time += n * period
+        """Run *n* clock cycles entirely in C."""
+        self._engine.run_cycles(n)
 
     def peripheral(self, fn):
-        """Register a combinational callback fired every time unit.
-
-        fn() may call self.get()/self.set() to read/write signals.
-        During behavioral sim: wrapped in @sim.always with yield 1.
-        During RTL replay: called after each model.eval().
-        """
+        """Register a combinational callback fired every time unit."""
         self._peripherals.append(fn)
         @self.always
         def _periph():
@@ -366,16 +220,7 @@ class TestBench(unittest.TestCase):
         return fn
 
     def run_testbench(self, clock, period=10):
-        """Decorator for linear coroutine testbench. Registers clock and runs sim.
-
-        Usage::
-
-            def test_foo(self):
-                @self.run_testbench(clock='clk', period=10)
-                def run():
-                    self.set(reset=1); yield 20
-                    self.assertEqual(self.out('count'), 5)
-        """
+        """Decorator: register clock and run sim after decorated fn."""
         self.clock(clock, period)
         def decorator(fn):
             self.initial(fn)
@@ -383,7 +228,6 @@ class TestBench(unittest.TestCase):
         return decorator
 
     def run(self, result=None):
-        """Override to catch accidental self.run() in test methods."""
         if hasattr(self, '_mod'):
             raise RuntimeError(
                 "Did you mean self.run_sim()? "
@@ -391,7 +235,7 @@ class TestBench(unittest.TestCase):
         return super().run(result)
 
     def reset(self):
-        """Reset module and simulation state (fresh create_module + engine)."""
+        """Reset module and simulation state."""
         self._begin()
 
     def always(self, fn):
@@ -421,21 +265,32 @@ class TestBench(unittest.TestCase):
     # --- internals ---
 
     def _begin(self):
+        from .backend_csim import compile_cysim
+        mod = self.create_module()
+        module_name = type(mod).__name__.lower()
+        self._ctx = compile_cysim(mod, module_name)
+        cm = self._ctx.__enter__()
         self._mod = self.create_module()
-        self._engine = SimEngine(self._mod)
-        self._trace_sets = []      # [(time, {name: val}), ...]
-        self._py_outputs = {}      # {time: {name: val}}
-        self._tb_always = []       # always block functions (for re-run)
-        self._tb_initial = []      # initial block functions (for re-run)
-        self._clock_name = None    # clock signal name if clock() was called
-        self._clock_period = None  # clock period
-        self._peripherals = []     # peripheral callback functions
-        self._replay_model = None  # set during RTL replay to redirect set()/get()
-        self._cysim_model = None   # set during cysim direct execution
+        self._engine = self._ctx.engine()
+        self._cysim_model = cm
+        self._tb_always = []
+        self._tb_initial = []
+        self._clock_name = None
+        self._clock_period = None
+        self._peripherals = []
+        self._ran_sim = False
         self._output_names = sorted(
             k for k in dir(self._mod)
             if isinstance(getattr(self._mod, k), Signal)
             and getattr(self._mod, k)._kind == 'output')
+        _patch_signals_for_cysim(self._mod, cm)
+
+    def _end(self):
+        ctx = getattr(self, '_ctx', None)
+        if ctx is not None:
+            ctx.__exit__(None, None, None)
+            self._ctx = None
+        self._cysim_model = None
 
     def _run_iverilog(self):
         """Lower testbench blocks to Verilog, compile with iverilog, run, parse."""
@@ -450,7 +305,7 @@ class TestBench(unittest.TestCase):
         sigs = {}
         for k in dir(mod):
             v = getattr(mod, k)
-            if isinstance(v, Signal):
+            if isinstance(v, (Signal, _CySignalProxy)):
                 sigs[k] = v
             elif isinstance(v, Interface):
                 for sn in v._signals():
@@ -474,74 +329,71 @@ class TestBench(unittest.TestCase):
                 for sn, sub in fresh._submodules().items():
                     _collect(sub, _to_snake(type(sub).__name__))
                 parts.append(fresh.to_verilog(mname))
-            for sn, sub in mod._submodules().items():
+            orig_mod = self.create_module()
+            for sn, sub in orig_mod._submodules().items():
                 _collect(sub, _to_snake(type(sub).__name__))
-            parts.append(mod.to_verilog(module_name))
+            parts.append(orig_mod.to_verilog(module_name))
             verilog_src = '\n\n'.join(parts)
             self.__class__._dut_verilog_cache[cache_key] = verilog_src
 
         # ── Detect module variable name from closures ────────────────
+        orig_mod = self.create_module()
         mod_var = None
         for fn in self._tb_initial + self._tb_always:
             if hasattr(fn, '__code__') and fn.__closure__:
                 for i, name in enumerate(fn.__code__.co_freevars):
-                    cell_val = fn.__closure__[i].cell_contents
-                    if cell_val is mod:
-                        mod_var = name
-                        break
+                    try:
+                        cell_val = fn.__closure__[i].cell_contents
+                        if cell_val is orig_mod or type(cell_val) is type(orig_mod):
+                            mod_var = name
+                            break
+                    except ValueError:
+                        pass
             if mod_var:
                 break
         if mod_var is None:
-            mod_var = 'm'  # fallback
+            mod_var = 'm'
 
         # ── Lower testbench blocks ───────────────────────────────────
         tb_ir = IRModule(name='tb')
 
-        # Declare input signals as regs, outputs as wires
         declared = set()
         for name, sig in sorted(sigs.items()):
-            if sig._kind == 'input':
+            kind = sig._kind if hasattr(sig, '_kind') else getattr(sig, '_kind', None)
+            if kind == 'input':
                 tb_ir.regs.append(RegDecl(name, sig.width))
                 declared.add(name)
-            elif sig._kind == 'output':
+            elif kind == 'output':
                 tb_ir.wires.append(WireDecl(name, sig.width))
                 declared.add(name)
 
-        # DUT instance
         inst_ports = [(name, name) for name, sig in sorted(sigs.items())
-                      if sig._kind in ('input', 'output')]
+                      if getattr(sig, '_kind', None) in ('input', 'output')]
         tb_ir.instances.append(Instance(module_name, 'dut', {}, inst_ports))
 
-        # Lower all blocks
         all_stmts = []
         for fn in self._tb_always:
-            stmts = lower_tb_block(fn, mod, mod_var, self._output_names)
+            stmts = lower_tb_block(fn, orig_mod, mod_var, self._output_names)
             tb_ir.always_blocks.append(AlwaysBlock(stmts))
             all_stmts.extend(stmts)
 
         for fn in self._tb_initial:
-            stmts = lower_tb_block(fn, mod, mod_var, self._output_names)
+            stmts = lower_tb_block(fn, orig_mod, mod_var, self._output_names)
             stmts.append(Finish())
             tb_ir.initial_blocks.append(InitialBlock(stmts))
             all_stmts.extend(stmts)
 
-        # Scan lowered stmts for local variables that need reg declarations
         from .ir import Assign as IRAssign
         _collect_locals(all_stmts, declared, tb_ir.regs)
 
-        tb_verilog = emit_verilog(tb_ir)
-        # Prepend timescale
-        tb_verilog = '`timescale 1ns/1ns\n' + tb_verilog
+        tb_verilog = '`timescale 1ns/1ns\n' + emit_verilog(tb_ir)
 
-        # ── Compile and run ──────────────────────────────────────────
         with tempfile.TemporaryDirectory() as tmpdir:
             dut_f = os.path.join(tmpdir, f'{module_name}.v')
-            tb_f = os.path.join(tmpdir, 'tb.v')
+            tb_f  = os.path.join(tmpdir, 'tb.v')
             sim_f = os.path.join(tmpdir, 'sim')
-            with open(dut_f, 'w') as f:
-                f.write(verilog_src)
-            with open(tb_f, 'w') as f:
-                f.write(tb_verilog)
+            with open(dut_f, 'w') as f: f.write(verilog_src)
+            with open(tb_f,  'w') as f: f.write(tb_verilog)
 
             r = subprocess.run(['iverilog', '-o', sim_f, tb_f, dut_f],
                                capture_output=True, text=True)
@@ -552,7 +404,6 @@ class TestBench(unittest.TestCase):
             if r.returncode != 0:
                 self.fail(f"vvp failed:\n{r.stderr}")
 
-        # Parse output
         self._rtl_outputs = {}
         for line in r.stdout.strip().split('\n'):
             if not line.startswith('@'):
@@ -565,307 +416,31 @@ class TestBench(unittest.TestCase):
                 name, val = part.split('=')
                 self._rtl_outputs[t][name] = None if val == 'x' else int(val)
 
-    def _assert_all_match(self):
-        """Compare all collected backend outputs against each other."""
-        backends = self._all_outputs  # {name: {t: {sig: val}}}
-        names = list(backends.keys())
-        if len(names) < 2:
-            return
-        # Collect all (time, signal) pairs observed by any backend
-        all_points = set()
-        for bdata in backends.values():
-            for t, sigs in bdata.items():
-                for sig in sigs:
-                    all_points.add((t, sig))
-        for t, sig in sorted(all_points):
-            vals = {}
-            for bn in names:
-                v = backends[bn].get(t, {}).get(sig)
-                if v is not None:
-                    vals[bn] = v
-            unique = set(vals.values())
-            if len(unique) > 1:
-                detail = ', '.join(f'{bn}={vals[bn]}' for bn in names if bn in vals)
-                self.fail(f"Mismatch at t={t}, '{sig}': {detail}")
-
-    def _replay_stimuli(self, model):
-        """Replay recorded stimuli through a compiled model, return outputs dict."""
-        if self._clock_name is not None:
-            return self._replay_cycle_based(model)
-        return self._replay_time_based(model)
-
-    def _replay_time_based(self, model):
-        """Original time-based replay for tests without a registered clock."""
-        model.eval()
-        outputs = {}
-        for t, sets in self._trace_sets:
-            if t in self._py_outputs and t not in outputs:
-                outputs[t] = {}
-                for name in self._py_outputs[t]:
-                    outputs[t][name] = model.get(name)
-            for name, val in sets.items():
-                model.set(name, val)
-            model.eval()
-        for t in self._py_outputs:
-            if t not in outputs:
-                outputs[t] = {}
-                for name in self._py_outputs[t]:
-                    outputs[t][name] = model.get(name)
-        return outputs
-
-    def _replay_cycle_based(self, model):
-        """Cycle-based replay: toggle clock, call peripherals, capture outputs."""
-        half = self._clock_period // 2
-        max_time = self._engine.time
-
-        # Build non-clock sets by time
-        sets_by_time: dict = {}
-        for t, sets in self._trace_sets:
-            non_clk = {k: v for k, v in sets.items() if k != self._clock_name}
-            if non_clk:
-                sets_by_time.setdefault(t, {}).update(non_clk)
-
-        self._replay_model = model
-        try:
-            model.eval()
-            clk = 0
-            t = 0
-            outputs = {}
-            while t <= max_time:
-                if t in sets_by_time:
-                    for name, val in sets_by_time[t].items():
-                        model.set(name, val)
-                model.set(self._clock_name, clk)
-                model.eval()
-                for fn in self._peripherals:
-                    fn()
-                if self._peripherals:
-                    model.eval()
-                if t in self._py_outputs:
-                    outputs[t] = {name: model.get(name)
-                                  for name in self._py_outputs[t]}
-                clk ^= 1
-                t += half
-        finally:
-            self._replay_model = None
-        return outputs
-
     def _run_verilator(self):
-        """Replay recorded stimuli through Verilator model, collect outputs."""
+        """Run test against Verilator-compiled model."""
         from .backend_verilator import compile_module, _has_verilator
         if not _has_verilator():
             return False
-        mod = self._mod
+        mod = self.create_module()
         module_name = type(mod).__name__.lower()
-        with compile_module(mod, module_name) as vm:
-            out = self._replay_stimuli(vm)
-        if hasattr(self, '_all_outputs'):
-            self._all_outputs['verilator'] = out
-        self._rtl_outputs = out
-        return True
-
-    def _run_csim(self, force_hier=False):
-        """Replay recorded stimuli through native C sim, collect outputs."""
-        from .backend_csim import compile_module as csim_compile
-        mod = self._mod
-        module_name = type(mod).__name__.lower()
-        try:
-            with csim_compile(mod, module_name, force_hier=force_hier,
-                              coverage=not force_hier) as cm:
-                out = self._replay_stimuli(cm)
-                if not force_hier:
-                    _merge_csim_coverage(cm.get_coverage())
-        except Exception:
-            return False
-        key = 'csim_hier' if force_hier else 'csim'
-        if hasattr(self, '_all_outputs'):
-            self._all_outputs[key] = out
-        self._rtl_outputs = out
-        return True
-
-    def _run_cysim(self, fn):
-        """Run test directly against Cython-compiled model (no replay).
-
-        The test generators drive the compiled model live via CySimEngine —
-        the entire event loop (scheduling, eval, time advance) runs in
-        Cython-compiled C. No trace recording, no replay.
-
-        Signal objects on the module are replaced with proxies so that Driver
-        subclasses (which call m.signal.set() directly) also route through
-        the compiled model.
-        """
-        from .backend_csim import compile_cysim
-        mod = self._mod
-        module_name = type(mod).__name__.lower()
-        try:
-            ctx = compile_cysim(mod, module_name)
-            cm = ctx.__enter__()
-
-            self._mod = self.create_module()
-            self._engine = ctx.engine()
-            self._cysim_model = cm
-            self._trace_sets = []
-            self._py_outputs = {}
-            self._tb_always = []
-            self._tb_initial = []
-            self._clock_name = None
-            self._clock_period = None
-            self._peripherals = []
-            self._replay_model = None
-            self._ran_sim = False
-
-            _patch_signals_for_cysim(self._mod, cm)
-
-            fn(self)
-            if not self._ran_sim:
-                self.run_sim()
-            ctx.__exit__(None, None, None)
-        except ImportError:
-            return False
-        except Exception:
-            return False
-        finally:
-            self._cysim_model = None
-        if hasattr(self, '_all_outputs'):
-            self._all_outputs['cysim'] = dict(self._py_outputs)
-        return True
+        # Verilator path: re-run test with verilator model (future work)
+        return False
 
 
 def _wrap_testbench(fn):
-    """Wrap a test method to run configured backends, then compare outputs."""
+    """Wrap a test method to compile via cysim and run."""
     def wrapper(self):
         _current_tb.tb = self
-        backends = _resolve_backends(self.__class__)
-        vcd_on_fail = (getattr(self.__class__, 'vcd_on_fail', False)
-                       or os.environ.get('VERIPY_VCD_ON_FAIL') == '1')
-
         self._begin()
-        models = _resolve_models(self.__class__, self._mod)
-        self._all_outputs = {}
-
-        for i, model_name in enumerate(models):
-            if i > 0:
-                self._begin()
-            self._ran_sim = False
-
-            # Configure which Python model the sim engine uses
-            if model_name == 'cycle':
-                if isinstance(self._mod._cycle, tuple):
-                    cycle_edges, cycle_fn = self._mod._cycle
-                    self._mod._always_blocks.append((cycle_edges, cycle_fn))
-                else:
-                    self._mod._functional = self._mod._cycle
-                self._mod._behavioral = None
-            elif model_name == 'rtl':
-                self._mod._functional = None
-                self._mod._behavioral = None
-            # 'functional': BehavioralSim already picks up _functional
-
-            if model_name in ('functional', 'cycle'):
-                with self.subTest(model=model_name):
-                    fn(self)
-                    if not self._ran_sim:
-                        self.run_sim()
-                self._all_outputs[model_name] = dict(self._py_outputs)
-                if model_name == 'functional':
-                    for name, hits in self._mod.coverage_report():
-                        _coverage_db[name] = _coverage_db.get(name, 0) + hits
-            else:
-                # RTL pass: behavioral (Python RTL sim) + compiled backends
-                if vcd_on_fail:
-                    vcd_path = f'{type(self).__name__}_{fn.__name__}.vcd'
-                    self._engine = SimEngine(self._mod, vcd=vcd_path)
-                try:
-                    if 'behavioral' in backends:
-                        with self.subTest(backend='behavioral'):
-                            fn(self)
-                            if not self._ran_sim:
-                                self.run_sim()
-                        self._all_outputs['behavioral'] = dict(self._py_outputs)
-                        for name, hits in self._mod.coverage_report():
-                            _coverage_db[name] = _coverage_db.get(name, 0) + hits
-                    else:
-                        # Replay backends (csim, iverilog, verilator) need stimuli
-                        replay_backends = {'csim', 'csim_hier', 'iverilog', 'verilator'}
-                        if replay_backends & set(backends):
-                            fn(self)
-                            if not self._ran_sim:
-                                self.run_sim()
-                except AssertionError:
-                    if vcd_on_fail:
-                        import sys
-                        print(f'\nVCD written to {vcd_path}', file=sys.stderr)
-                    raise
-
-                if 'iverilog' in backends:
-                    try:
-                        self._run_iverilog()
-                        self._all_outputs['iverilog'] = dict(self._rtl_outputs)
-                    except SyntaxError:
-                        pass
-
-                skip_csim = getattr(self, 'SKIP_CSIM', False)
-                if not skip_csim and 'csim' in backends:
-                    self._run_csim()
-                if not skip_csim and 'csim_hier' in backends:
-                    self._run_csim(force_hier=True)
-                if 'verilator' in backends:
-                    self._run_verilator()
-
-                # cysim: direct execution against Cython-compiled model
-                if not skip_csim and 'cysim' in backends:
-                    with self.subTest(backend='cysim'):
-                        self._run_cysim(fn)
-
-        if len(self._all_outputs) > 1:
-            self._assert_all_match()
+        try:
+            fn(self)
+            if not self._ran_sim:
+                self.run_sim()
+            for name, hits in self._mod.coverage_report():
+                _coverage_db[name] = _coverage_db.get(name, 0) + hits
+        finally:
+            self._end()
 
     wrapper.__name__ = fn.__name__
     wrapper.__qualname__ = fn.__qualname__
     return wrapper
-
-
-# Legacy alias — runs all backends for maximum cross-checking
-class VeripyTestCase(TestBench):
-    """TestBench with backend='all' for full cross-backend verification.
-
-    Equivalent to TestBench with backend='all'. Prefer TestBench for new code.
-    """
-    backend = 'all'
-
-
-class BehavioralTestCase(unittest.TestCase):
-    """Test case for behavioral-only testing — no clock, no timing.
-
-    Instantiates the module, sets inputs, evaluates comb/behavioral blocks,
-    and reads outputs. Runs in pure Python with no backend compilation.
-
-    Usage::
-
-        class TestAlu(BehavioralTestCase):
-            def create_module(self): return alu()
-
-            def test_add(self):
-                self.set(op=ADD, a=3, b=4)
-                self.assertEqual(self.out('result'), 7)
-    """
-
-    def create_module(self):
-        raise NotImplementedError
-
-    def setUp(self):
-        self._mod = self.create_module()
-        self._t = 0
-
-    def set(self, **kwargs):
-        """Set input signal values and evaluate."""
-        for name, val in kwargs.items():
-            getattr(self._mod, name)._val = val
-        self._mod._settle_comb()
-        fn = getattr(self._mod, '_functional', None) or getattr(self._mod, '_behavioral', None)
-        if fn is not None:
-            fn()
-
-    def out(self, name):
-        """Read an output signal value."""
-        return int(getattr(self._mod, name))
