@@ -108,7 +108,6 @@ class HazardUnitTestBench(TestBench):
             assert dut.stall == 0
             assert dut.fwd_a == 0
             assert dut.fwd_b == 0
-        self.run_sim()
 
     def test_ex_mem_forward_a(self):
         dut = self.dut
@@ -119,7 +118,6 @@ class HazardUnitTestBench(TestBench):
             dut.ex_mem_rd_addr = 3; dut.id_ex_rs1_addr = 3
             yield 1
             assert dut.fwd_a == 1
-        self.run_sim()
 
     def test_mem_wb_forward_b(self):
         dut = self.dut
@@ -130,7 +128,6 @@ class HazardUnitTestBench(TestBench):
             dut.mem_wb_rd_addr = 5; dut.id_ex_rs2_addr = 5
             yield 1
             assert dut.fwd_b == 2
-        self.run_sim()
 
     def test_load_use_stall(self):
         dut = self.dut
@@ -141,7 +138,6 @@ class HazardUnitTestBench(TestBench):
             dut.id_ex_rd_addr = 2; dut.id_rs1_addr = 2
             yield 1
             assert dut.stall == 1
-        self.run_sim()
 
     def test_branch_taken_flush(self):
         dut = self.dut
@@ -151,7 +147,6 @@ class HazardUnitTestBench(TestBench):
             dut.branch_taken = 1
             yield 1
             assert dut.flush_if_id == 1
-        self.run_sim()
 
 
 if __name__ == '__main__':

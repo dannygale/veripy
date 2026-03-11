@@ -49,7 +49,6 @@ class CounterTestBench(TestBench):
             yield 10
             assert dut.count == 0
 
-        self.run_sim()
 
     def test_counts_up(self):
         dut = self.dut
@@ -64,7 +63,6 @@ class CounterTestBench(TestBench):
                 yield 10
                 assert dut.count == i
 
-        self.run_sim()
 
     def test_enable_gate(self):
         dut = self.dut
@@ -80,7 +78,6 @@ class CounterTestBench(TestBench):
             yield 30
             assert dut.count == 1
 
-        self.run_sim()
 
 
 if __name__ == '__main__':

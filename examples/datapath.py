@@ -96,7 +96,6 @@ class DatapathTestBench(TestBench):
             yield 10
             assert dut.result == 15
 
-        self.run_sim()
 
     def test_alu_sub(self):
         dut = self.dut
@@ -110,7 +109,6 @@ class DatapathTestBench(TestBench):
             yield 10
             assert dut.result == 13
 
-        self.run_sim()
 
     def test_reset_clears(self):
         dut = self.dut
@@ -124,7 +122,6 @@ class DatapathTestBench(TestBench):
             yield 10
             assert dut.result == 0
 
-        self.run_sim()
 
 
 if __name__ == '__main__':

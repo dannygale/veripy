@@ -89,7 +89,6 @@ class ALUTestBench(TestBench):
             yield 1
             assert dut.result == 150
             assert dut.zero == 0
-        self.run_sim()
 
     def test_sub(self):
         dut = self.dut
@@ -99,7 +98,6 @@ class ALUTestBench(TestBench):
             yield 1
             assert dut.result == 0
             assert dut.zero == 1
-        self.run_sim()
 
     def test_and(self):
         dut = self.dut
@@ -108,7 +106,6 @@ class ALUTestBench(TestBench):
             dut.a = 0xFF0F; dut.b = 0x0FF0; dut.op = ALU_AND
             yield 1
             assert dut.result == 0x0F00
-        self.run_sim()
 
     def test_shl(self):
         dut = self.dut
@@ -118,7 +115,6 @@ class ALUTestBench(TestBench):
             yield 1
             assert dut.result == 0x0002
             assert dut.carry == 1
-        self.run_sim()
 
     def test_pass(self):
         dut = self.dut
@@ -127,7 +123,6 @@ class ALUTestBench(TestBench):
             dut.a = 0; dut.b = 42; dut.op = ALU_PASS
             yield 1
             assert dut.result == 42
-        self.run_sim()
 
 
 if __name__ == '__main__':

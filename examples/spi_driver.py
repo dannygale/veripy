@@ -126,7 +126,6 @@ class SpiDriverTestBench(TestBench):
             yield from drv.send(0xA5)
             assert self.dut.shreg == 0xA5
 
-        self.run_sim()
 
     def test_shift_zero(self):
         self.clock('clock', 10)
@@ -140,7 +139,6 @@ class SpiDriverTestBench(TestBench):
             yield from drv.send(0x00)
             assert self.dut.shreg == 0x00
 
-        self.run_sim()
 
 
 # ── Quick demo ───────────────────────────────────────────────────────

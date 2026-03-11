@@ -110,7 +110,6 @@ class PipeRegTestBench(TestBench):
             yield 10
             assert dut.q == 0xAB
 
-        self.run_sim()
 
     def test_stall_holds(self):
         dut = self.dut
@@ -126,7 +125,6 @@ class PipeRegTestBench(TestBench):
             yield 10
             assert dut.q == 0x42
 
-        self.run_sim()
 
     def test_flush_clears(self):
         dut = self.dut
@@ -142,7 +140,6 @@ class PipeRegTestBench(TestBench):
             yield 10
             assert dut.q == 0
 
-        self.run_sim()
 
 
 class ForwardMuxTestBench(TestBench):
@@ -159,7 +156,6 @@ class ForwardMuxTestBench(TestBench):
             yield 1
             assert dut.out == 0x10
             assert dut.fwd_sel == 0
-        self.run_sim()
 
     def test_ex_forward(self):
         dut = self.dut
@@ -171,7 +167,6 @@ class ForwardMuxTestBench(TestBench):
             yield 1
             assert dut.out == 0xEE
             assert dut.fwd_sel == 1
-        self.run_sim()
 
     def test_mem_forward(self):
         dut = self.dut
@@ -183,7 +178,6 @@ class ForwardMuxTestBench(TestBench):
             yield 1
             assert dut.out == 0xDD
             assert dut.fwd_sel == 2
-        self.run_sim()
 
     def test_ex_priority(self):
         dut = self.dut
@@ -195,7 +189,6 @@ class ForwardMuxTestBench(TestBench):
             yield 1
             assert dut.out == 0xEE
             assert dut.fwd_sel == 1
-        self.run_sim()
 
 
 if __name__ == '__main__':

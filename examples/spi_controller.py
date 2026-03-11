@@ -198,7 +198,6 @@ class SpiControllerTestBench(TestBench):
             yield 10
             assert dut.tx_ready == 1
 
-        self.run_sim()
 
     def test_single_transfer(self):
         dut = self.dut
@@ -221,7 +220,6 @@ class SpiControllerTestBench(TestBench):
                     break
             self.assertTrue(saw_rx, "rx_valid never asserted")
 
-        self.run_sim()
 
 
 # ── Main: emit Verilog + run quick sim ───────────────────────────────

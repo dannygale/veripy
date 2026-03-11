@@ -56,7 +56,6 @@ class RegFileTestBench(TestBench):
             yield 10
             assert dut.rdata1 == 42
 
-        self.run_sim()
 
     def test_r0_hardwired_zero(self):
         dut = self.dut
@@ -70,7 +69,6 @@ class RegFileTestBench(TestBench):
             yield 10
             assert dut.rdata1 == 0
 
-        self.run_sim()
 
     def test_two_read_ports(self):
         dut = self.dut
@@ -87,4 +85,3 @@ class RegFileTestBench(TestBench):
             assert dut.rdata1 == 10
             assert dut.rdata2 == 20
 
-        self.run_sim()
