@@ -225,6 +225,17 @@ def cmd_check(args):
 
     from .backend_csim import compile_module as csim_compile
 
+    if not args.file:
+        from .config import load_config
+        cfg = load_config()
+        if cfg is None:
+            sys.exit("error: no file given and no veripy.toml found")
+        build = cfg["build"]
+        if not build["top"]:
+            sys.exit("error: [build] top is not set in veripy.toml")
+        args.file = os.path.join(cfg["_dir"], build["top"])
+        if not args.module and build["module"]:
+            args.module = build["module"]
     modules = _load_modules(args.file, args.module, args.param)
     if not modules:
         print('error: no modules found')
@@ -404,6 +415,19 @@ def cmd_formal(args):
     from .backend_formal import emit_sby
 
     params = _parse_params(args.param)
+    if not args.file:
+        from .config import load_config
+        cfg = load_config()
+        if cfg is None:
+            sys.exit("error: no file given and no veripy.toml found")
+        build = cfg["build"]
+        if not build["top"]:
+            sys.exit("error: [build] top is not set in veripy.toml")
+        args.file = os.path.join(cfg["_dir"], build["top"])
+        if not args.output:
+            args.output = os.path.join(cfg["_dir"], build.get("output", "."))
+        if not args.module and build["module"]:
+            args.module = build["module"]
     modules = _load_modules(args.file, module_name=args.module, params=params)
     if not modules:
         sys.exit(f"error: no modules found in {args.file}")
@@ -494,6 +518,17 @@ def cmd_doc(args):
     """Generate markdown documentation for modules in a Python file."""
     from .autodoc import to_markdown
     params = _parse_params(args.param)
+    if not args.file:
+        from .config import load_config
+        cfg = load_config()
+        if cfg is None:
+            sys.exit("error: no file given and no veripy.toml found")
+        build = cfg["build"]
+        if not build["top"]:
+            sys.exit("error: [build] top is not set in veripy.toml")
+        args.file = os.path.join(cfg["_dir"], build["top"])
+        if not args.module and build["module"]:
+            args.module = build["module"]
     modules = _load_modules(args.file, module_name=args.module, params=params)
     if not modules:
         sys.exit(f"error: no modules found in {args.file}")
@@ -806,9 +841,23 @@ def cmd_run(args):
     exec(compile(code, script, 'exec'), {'__name__': '__main__', '__file__': script})
 
 
+_CMD_GROUPS = [
+    ('design',       ['build', 'lint', 'doc', 'graph', 'stats']),
+    ('verification', ['test', 'check', 'formal', 'equiv', 'profile']),
+    ('targets',      ['fpga', 'soc']),
+    ('project',      ['init', 'ip', 'import', 'run']),
+]
+
+
 def main():
-    parser = argparse.ArgumentParser(prog="veripy", description="VeriPy HDL toolchain")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(
+        prog="veripy",
+        usage="veripy [-h] command ...",
+        description="VeriPy HDL toolchain",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="command", required=True, metavar="command",
+                                help=argparse.SUPPRESS)
 
     # build
     p_build = sub.add_parser("build", help="Emit and compile-check Verilog from a Python module")
@@ -819,7 +868,7 @@ def main():
     p_build.add_argument("--target", help="Build target name from [build.targets.*] in veripy.toml")
 
     # test
-    p_test = sub.add_parser("test", help="Run dual-path VeripyTestCase suite")
+    p_test = sub.add_parser("test", help="Run test suite")
     p_test.add_argument("path", nargs="?", help="Test file or directory (default: discover)")
     p_test.add_argument("-v", "--verbose", action="store_true")
     p_test.add_argument("-j", "--jobs", nargs="?", const=0, type=int, metavar="N",
@@ -845,7 +894,7 @@ def main():
 
     # formal
     p_formal = sub.add_parser("formal", help="Generate .sby + Verilog for SymbiYosys formal verification")
-    p_formal.add_argument("file", help="Python file containing Module subclass(es)")
+    p_formal.add_argument("file", nargs="?", help="Python file containing Module subclass(es) (default: from veripy.toml)")
     p_formal.add_argument("-o", "--output", help="Output directory (default: current dir)")
     p_formal.add_argument("-m", "--module", help="Target a specific Module subclass by name")
     p_formal.add_argument("-p", "--param", action="append", help="Module parameter (e.g. -p n=4)")
@@ -858,7 +907,7 @@ def main():
 
     # doc
     p_doc = sub.add_parser("doc", help="Generate markdown documentation from module definitions")
-    p_doc.add_argument("file", help="Python file containing Module subclass(es)")
+    p_doc.add_argument("file", nargs="?", help="Python file containing Module subclass(es) (default: from veripy.toml)")
     p_doc.add_argument("-o", "--output", help="Output directory for .md files (default: stdout)")
     p_doc.add_argument("-m", "--module", help="Target a specific Module subclass by name")
     p_doc.add_argument("-p", "--param", action="append", help="Module parameter (e.g. -p n=4)")
@@ -947,6 +996,18 @@ def main():
     p_run = sub.add_parser("run", help="Run a Python script with project on sys.path")
     p_run.add_argument("file", help="Python script to execute")
     p_run.add_argument("--project", help="Project root to add to sys.path (default: script's directory)")
+
+    # Build grouped help from actual parser help strings, then suppress default listing
+    help_map = {a.dest: a.help for a in sub._choices_actions}
+    lines = []
+    for group, cmds in _CMD_GROUPS:
+        lines.append(f'{group}:')
+        for name in cmds:
+            lines.append(f'  {name:<18}{help_map.get(name, "")}')
+        lines.append('')
+    lines.append('All file arguments are optional when veripy.toml is present.')
+    parser.epilog = '\n'.join(lines)
+    sub._choices_actions.clear()
 
     args = parser.parse_args()
     {
