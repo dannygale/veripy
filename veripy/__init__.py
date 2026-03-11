@@ -10,7 +10,7 @@ from .decorator import module
 from .context import (comb, always, fsm, assert_always, cover, assume, pipeline,
                       behavioral, create_clock, max_delay, false_path, clock_domain)
 
-from .sim import until
+from .sim import SimEngine, until
 from .driver import Driver
 from .rv import QuickRunMixin
 from .cdc import Synchronizer, AsyncFIFO
@@ -22,11 +22,43 @@ from .axi4lite import Axi4LiteBus, Axi4LiteSub
 from .axi4 import Axi4Bus, Axi4Sub, Axi4Crossbar
 from .csr import Field, Reg, RegisterMap
 from .project import Project
-from .verify import TestBench, VeripyTestCase, BehavioralTestCase, initial, always
+from .verify import TestBench, VeripyTestCase, BehavioralTestCase, initial
 from .firmware_test import FirmwareTestCase
 from .firmware import ElfSegment, ElfImage, load_elf
 from .soc_sim import FlatMemory, UartPeripheral, SocSim
 from .gdb_stub import GdbStub
+
+__all__ = [
+    # Signals
+    "Signal", "Input", "Output", "OutputReg", "Register", "Mem",
+    "DualPortMem", "TrueDualPortMem", "Edge", "SensitivityList", "Interface",
+    "posedge", "negedge", "clz", "ctz", "popcount", "sext",
+    # Modules
+    "Module", "BlackBox", "Parameter", "module",
+    # Logic blocks
+    "comb", "always", "fsm", "assert_always", "cover", "assume", "pipeline",
+    "behavioral", "create_clock", "max_delay", "false_path", "clock_domain",
+    # Simulation
+    "SimEngine", "until", "Driver", "QuickRunMixin",
+    # CDC / IP
+    "Synchronizer", "AsyncFIFO",
+    "SyncFifo", "EdgeDetector", "Debouncer", "RoundRobinArbiter",
+    "PriorityArbiter", "ClockDivider", "CreditFlowControl",
+    "IntController", "DmaEngine", "DdrPhy", "DdrController", "JtagTap", "DebugModule",
+    # Bus / CSR
+    "Axi4LiteBus", "Axi4LiteSub", "Axi4Bus", "Axi4Sub", "Axi4Crossbar",
+    "Field", "Reg", "RegisterMap",
+    # Testing
+    "TestBench", "VeripyTestCase", "BehavioralTestCase", "initial",
+    "FirmwareTestCase",
+    # Firmware / SoC
+    "ElfSegment", "ElfImage", "load_elf",
+    "FlatMemory", "UartPeripheral", "SocSim", "GdbStub",
+    # Project
+    "Project",
+    # Lazy backends
+    "VerilatorModel", "CSimModel", "GpuSim",
+]
 
 
 def VerilatorModel(*args, **kwargs):
