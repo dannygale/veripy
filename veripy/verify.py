@@ -64,6 +64,20 @@ def _collect_locals(stmts, declared, regs):
             _collect_locals(stmt.body, declared, regs)
 
 
+class _SignalNamespace:
+    """Signal namespace: ``dut.reset = 0`` → set, ``dut.count`` → get."""
+    __slots__ = ('_tb',)
+
+    def __init__(self, tb):
+        object.__setattr__(self, '_tb', tb)
+
+    def __getattr__(self, name):
+        return self._tb.get(name)
+
+    def __setattr__(self, name, value):
+        self._tb.set(**{name: int(value)})
+
+
 class _CySignalProxy:
     """Proxy that routes signal set/read through a CySimModel."""
     __slots__ = ('_name', '_cm', '_kind', 'width', '_mask')
@@ -240,6 +254,11 @@ class TestBench(unittest.TestCase):
     def module(self):
         """The module under test."""
         return self._mod
+
+    @property
+    def dut(self):
+        """Signal namespace: ``dut.reset = 0`` sets, ``dut.count`` reads."""
+        return _SignalNamespace(self)
 
     def set(self, **kwargs):
         """Set input signal values."""
