@@ -1229,6 +1229,8 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
 
     # Dirty bits: one bit per signal, packed into uint64_t words
     lines.append(f'    uint64_t _dirty[{n_dirty_words}];')
+    # TB activity flag: set by TB when an input changes; cleared by _step after comb
+    lines.append(f'    uint8_t _tb_dirty;')
 
     lines.append('} State;')
     lines.append('')
@@ -1301,29 +1303,25 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
     lines.append('}')
     lines.append('')
 
-    # ── Monolithic eval ─────────────────────────────────────────
-    # All comb+seq+re-settle logic is emitted inline in veripy_eval
-    # so that intermediate signals can be C locals (register-allocated).
+    # ── Split eval: comb + seq ───────────────────────────────────
+    # veripy_eval_comb: Phase 1 (comb settle) — called every clock toggle
+    # veripy_eval_seq:  Phase 2+3+4 (seq + re-settle) — called only on edge
+    # veripy_eval:      backward-compat wrapper (checks edge, calls both)
 
-    # Recompute promoted_locals: everything that doesn't need to persist
     promoted_locals = set(all_sigs) - must_persist - nba_sigs
-    # Exclude packed signals (they use bitfield ops on struct words)
     promoted_locals -= set(pack_map.keys())
-
     _c_locals.clear()
     _c_locals.update(promoted_locals)
 
-    lines.append('void veripy_eval(void* p) {')
-    lines.append('    State* s = (State*)p;')
+    # ── veripy_eval_comb ─────────────────────────────────────────
+    lines.append('void veripy_eval_comb(void* p) {')
+    lines.append('    State* __restrict s = (State*)p;')
     lines.append('    _eval_cycle++;')
-
-    # Declare promoted locals as C local variables
     for name in sorted(promoted_locals):
         w = all_sigs[name]
         lines.append(f'    {_ctype(w)} {name} = 0;')
 
-    # ── Phase 1: Settle combinational logic (unconditional) ──────
-    # Continuous assigns
+    # Phase 1: comb settle
     for a in ir.assigns:
         w = sig_w.get(a.target, 0)
         val = _expr(a.value, sig_w, pack_map)
@@ -1335,8 +1333,6 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
         else:
             tgt = a.target if a.target in _c_locals else f's->{a.target}'
             lines.append(f'    {tgt} = {val};')
-
-    # Comb blocks in topo order (all inlined)
     for gi, group in enumerate(merge_groups):
         all_stmts = []
         for idx in group:
@@ -1346,54 +1342,62 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
         if coverage:
             lines.append(f'    _cov_line[{gi}]++;')
         lines.extend(body)
-
-    # Clear dirty bits after initial comb settle
     lines.append(f'    memset(s->_dirty, 0, {n_dirty_words * 8});')
+    lines.append('}')
+    lines.append('')
 
-    # ── Phase 2: Sequential logic (edge-triggered) ──────────────
-    # edge_blocks already computed above (before coverage statics)
-
+    # ── veripy_eval_seq ──────────────────────────────────────────
+    # Called only when an edge fires — no posedge guard inside.
+    # Each edge-group is emitted as a separate noinline function so the
+    # compiler can optimize each always-block independently.
+    seq_group_fns = []
     for _seq_gi, ((edge_kind, clk), block_ids) in enumerate(sorted(edge_blocks.items())):
-        clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
-        if edge_kind == 'posedge':
-            cond = f'__builtin_expect({clk_expr} && !s->_prev_{clk}, 0)'
-        else:
-            cond = f'__builtin_expect(!{clk_expr} && s->_prev_{clk}, 0)'
-        lines.append(f'    if ({cond}) {{')
+        fn_name = f'_seq_{_seq_gi}'
+        seq_group_fns.append(fn_name)
+        lines.append(f'__attribute__((noinline)) static void {fn_name}(State* __restrict s) {{')
+        for name in sorted(promoted_locals):
+            w = all_sigs[name]
+            lines.append(f'    {_ctype(w)} {name} = 0;')
         if coverage:
-            lines.append(f'        _cov_line[{len(merge_groups) + _seq_gi}]++;')
-        # NBA snapshot
+            lines.append(f'    _cov_line[{len(merge_groups) + _seq_gi}]++;')
         group_nba = set()
         for idx in block_ids:
             group_nba |= nba_per_seq[idx]
         for name in sorted(group_nba):
             src = _pack_read(name, pack_map) if name in pack_map else f's->{name}'
-            lines.append(f'        s->_nba_{name} = {src};')
-        # Seq block bodies (inlined)
+            lines.append(f'    s->_nba_{name} = {src};')
         for idx in block_ids:
             body = []
             _emit_stmts_batched(ir.seq_blocks[idx].stmts, body, sig_w,
                                 pack_map=pack_map, nba_sigs=nba_sigs)
             lines.extend('    ' + ln for ln in body)
-        # NBA commit
         for name in sorted(group_nba):
             if name in pack_map:
-                lines.append(f'        {_pack_write(name, f"s->_nba_{name}", pack_map)}')
+                lines.append(f'    {_pack_write(name, f"s->_nba_{name}", pack_map)}')
             else:
-                lines.append(f'        s->{name} = s->_nba_{name};')
-        # FSM coverage: track visited states and transitions after NBA commit
+                lines.append(f'    s->{name} = s->_nba_{name};')
         if coverage and fsm_n_states > 0 and '_fsm_state' in group_nba:
-            lines.append(f'        _cov_fsm_trans[_cov_fsm_prev * {fsm_n_states} + s->_fsm_state] = 1;')
-            lines.append(f'        _cov_fsm_visited |= (1ULL << s->_fsm_state);')
-            lines.append(f'        _cov_fsm_prev = s->_fsm_state;')
-        # Mark seq outputs dirty
+            lines.append(f'    _cov_fsm_trans[_cov_fsm_prev * {fsm_n_states} + s->_fsm_state] = 1;')
+            lines.append(f'    _cov_fsm_visited |= (1ULL << s->_fsm_state);')
+            lines.append(f'    _cov_fsm_prev = s->_fsm_state;')
         group_seq_writes: set = set()
         for idx in block_ids:
             group_seq_writes |= seq_writes[idx]
-        lines.extend(_dirty_set_lines(group_seq_writes, dirty_idx, indent=2))
-        lines.append('    }')
+        lines.extend(_dirty_set_lines(group_seq_writes, dirty_idx, indent=1))
+        lines.append('}')
+        lines.append('')
 
-    # ── Phase 3: Re-settle combinational logic (dirty-driven) ───
+    lines.append('void veripy_eval_seq(void* p) {')
+    lines.append('    State* __restrict s = (State*)p;')
+    for name in sorted(promoted_locals):
+        w = all_sigs[name]
+        lines.append(f'    {_ctype(w)} {name} = 0;')
+
+    # Phase 2: call per-block seq functions
+    for fn_name in seq_group_fns:
+        lines.append(f'    {fn_name}(s);')
+
+    # Phase 3: re-settle comb (dirty-driven)
     for a in ir.assigns:
         w = sig_w.get(a.target, 0)
         val = _expr(a.value, sig_w, pack_map)
@@ -1405,7 +1409,6 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
         else:
             tgt = a.target if a.target in _c_locals else f's->{a.target}'
             lines.append(f'    {tgt} = {val};')
-
     for group in resettl_groups:
         gi = merge_groups.index(group)
         all_stmts = []
@@ -1421,8 +1424,8 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
         if cond == '1':
             body = []
             _emit_stmts_batched(all_stmts, body, sig_w, pack_map=pack_map)
-            lines.extend(body)
-            lines.extend(out_lines)
+            lines.extend('    ' + b for b in body)
+            lines.extend('    ' + ol for ol in out_lines)
         else:
             lines.append(f'    if ({cond}) {{')
             body = []
@@ -1431,7 +1434,7 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
             lines.extend('    ' + ol for ol in out_lines)
             lines.append('    }')
 
-    # ── Phase 4: Runtime assertions (before prev update) ────────
+    # Phase 4: assertions
     for prop in ir.formal_props:
         if prop.kind != 'assert':
             continue
@@ -1445,24 +1448,52 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
         lines.append(f'    if ({edge_cond} && !({cond})) {{')
         lines.append(f'        _assert_fail = 1;')
         lines.append(f'    }}')
-
-    # ── Phase 4b: Temporal property FSMs ─────────────────────────
     lines.extend(_temporal_eval)
 
-    # ── Phase 5: Update previous values ──────────────────────────
+    # Phase 5: update prev values
     for clk in sorted(clocks):
         clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
         lines.append(f'    s->_prev_{clk} = {clk_expr};')
 
-    # ── Coverage: toggle tracking ─────────────────────────────────
     if coverage:
         for ci, (name, w, read_expr) in enumerate(cov_sigs):
             mask = _mask(w)
             lines.append(f'    {{ uint64_t _cv = {read_expr};')
             lines.append(f'      _cov_tog_ones[{ci}] |= _cv & {mask};')
             lines.append(f'      _cov_tog_zeros[{ci}] |= (~_cv) & {mask}; }}')
-
     lines.append('    if (_vcd_enabled) _vcd_dump(s);')
+    lines.append('}')
+    lines.append('')
+
+    # ── veripy_eval: backward-compat wrapper ─────────────────────
+    lines.append('void veripy_eval(void* p) {')
+    lines.append('    State* __restrict s = (State*)p;')
+    # Check edges before calling comb (comb doesn't update prev)
+    edge_checks = []
+    for edge_kind, clk in sorted(edge_blocks.keys()):
+        clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
+        if edge_kind == 'posedge':
+            edge_checks.append(f'int _posedge_{clk} = {clk_expr} && !s->_prev_{clk};')
+        else:
+            edge_checks.append(f'int _negedge_{clk} = !{clk_expr} && s->_prev_{clk};')
+    for ec in edge_checks:
+        lines.append(f'    {ec}')
+    lines.append('    veripy_eval_comb(p);')
+    # Call seq if any edge fired
+    edge_fired_parts = []
+    for edge_kind, clk in sorted(edge_blocks.keys()):
+        var = f'_posedge_{clk}' if edge_kind == 'posedge' else f'_negedge_{clk}'
+        edge_fired_parts.append(var)
+    if edge_fired_parts:
+        fired_cond = ' || '.join(edge_fired_parts)
+        lines.append(f'    if ({fired_cond}) veripy_eval_seq(p);')
+        lines.append(f'    else {{')
+        for clk in sorted(clocks):
+            clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
+            lines.append(f'        s->_prev_{clk} = {clk_expr};')
+        lines.append(f'    }}')
+    else:
+        lines.append('    veripy_eval_seq(p);')
     lines.append('}')
     lines.append('')
 
@@ -2718,15 +2749,27 @@ def emit_tb_c(tb_ir, model_c_src, half_period=10, model_ir=None):
     lines.append('')
     # task #66: direct struct clock toggle instead of veripy_set/get
     lines.append(f'static void _step(void* p, int time_units) {{')
-    lines.append(f'    State* s = (State*)p;')
+    lines.append(f'    State* __restrict s = (State*)p;')
     lines.append(f'    int n = time_units / {half_period};')
     lines.append(f'    for (int _i = 0; _i < n; _i++) {{')
     if clock_name in tb_pack_map:
         word, bit = tb_pack_map[clock_name]
+        lines.append(f'        uint64_t _prev_clk = (s->{word} >> {bit}ULL) & 1ULL;')
         lines.append(f'        s->{word} ^= (1ULL << {bit}ULL);')
+        lines.append(f'        uint64_t _clk_now = (s->{word} >> {bit}ULL) & 1ULL;')
+        prev_update = f's->_prev_{clock_name} = (uint8_t)_clk_now;'
     else:
+        lines.append(f'        uint32_t _prev_clk = s->{clock_name};')
         lines.append(f'        s->{clock_name} ^= 1;')
-    lines.append(f'        veripy_eval(p);')
+        lines.append(f'        uint32_t _clk_now = s->{clock_name};')
+        prev_update = f's->_prev_{clock_name} = (uint8_t)_clk_now;'
+    lines.append(f'        uint32_t _posedge = (uint32_t)(_clk_now & ~_prev_clk);')
+    lines.append(f'        if (__builtin_expect(_posedge | s->_tb_dirty, 1)) {{')
+    lines.append(f'            veripy_eval_comb(p);')
+    lines.append(f'            s->_tb_dirty = 0;')
+    lines.append(f'        }}')
+    lines.append(f'        if (_posedge) veripy_eval_seq(p);')
+    lines.append(f'        else {prev_update}')
     lines.append(f'    }}')
     lines.append(f'}}')
     lines.append('')
@@ -2806,6 +2849,7 @@ def emit_tb_c(tb_ir, model_c_src, half_period=10, model_ir=None):
                         lines.append(f'{pad}s->{stmt.target} = ({_ctype(sig_width)})({val} & {_mask(sig_width)});')
                     else:
                         lines.append(f'{pad}s->{stmt.target} = {val};')
+                lines.append(f'{pad}s->_tb_dirty = 1;')
             else:
                 # output signal — shouldn't be assigned in TB, but handle gracefully
                 if stmt.target in tb_pack_map:
@@ -2883,6 +2927,8 @@ def emit_c_header(ir: IRModule, model_c_src: str) -> str:
         'extern void*    veripy_create(void);',
         'extern void     veripy_destroy(void* p);',
         'extern void     veripy_eval(void* p);',
+        'extern void     veripy_eval_comb(void* p);',
+        'extern void     veripy_eval_seq(void* p);',
         'extern int      veripy_assert_failed(void);',
         'extern void     veripy_assert_clear(void);',
         'extern void     veripy_assert_info(int* prop_out, uint64_t* cycle_out);',
@@ -3491,7 +3537,7 @@ def compile_tb(tb_ir, model_lib_path, model_c_src, flat_ir, half_period=10):
     rpath_flag = f'-Wl,-rpath,{model_dir}'
 
     r = subprocess.run(
-        [cc, '-O2', '-fPIC', flag,
+        [cc, '-O3', '-march=native', '-fPIC', flag,
          '-o', lib_path, c_path,
          f'-L{model_dir}', f'-l{lib_link_name}', rpath_flag],
         capture_output=True, text=True)
