@@ -99,45 +99,48 @@ class PipeRegTestBench(TestBench):
         return PipeReg(width=8)
 
     def test_captures_data(self):
+        dut = self.dut
         self.clock('clock', 10)
 
         @self.initial
         def stim():
-            self.set(reset=1, stall=0, flush=0)
+            dut.reset = 1; dut.stall = 0; dut.flush = 0
             yield 10
-            self.set(reset=0, d=0xAB)
+            dut.reset = 0; dut.d = 0xAB
             yield 10
-            self.assertEqual(self.out('q'), 0xAB)
+            assert dut.q == 0xAB
 
         self.run_sim()
 
     def test_stall_holds(self):
+        dut = self.dut
         self.clock('clock', 10)
 
         @self.initial
         def stim():
-            self.set(reset=1, stall=0, flush=0)
+            dut.reset = 1; dut.stall = 0; dut.flush = 0
             yield 10
-            self.set(reset=0, d=0x42)
+            dut.reset = 0; dut.d = 0x42
             yield 10
-            self.set(stall=1, d=0xFF)
+            dut.stall = 1; dut.d = 0xFF
             yield 10
-            self.assertEqual(self.out('q'), 0x42)
+            assert dut.q == 0x42
 
         self.run_sim()
 
     def test_flush_clears(self):
+        dut = self.dut
         self.clock('clock', 10)
 
         @self.initial
         def stim():
-            self.set(reset=1, stall=0, flush=0)
+            dut.reset = 1; dut.stall = 0; dut.flush = 0
             yield 10
-            self.set(reset=0, d=0x42)
+            dut.reset = 0; dut.d = 0x42
             yield 10
-            self.set(flush=1)
+            dut.flush = 1
             yield 10
-            self.assertEqual(self.out('q'), 0)
+            assert dut.q == 0
 
         self.run_sim()
 
@@ -147,43 +150,51 @@ class ForwardMuxTestBench(TestBench):
         return ForwardMux(width=8)
 
     def test_no_forward(self):
+        dut = self.dut
         @self.initial
         def stim():
-            self.set(rs_addr=3, ex_rd_addr=5, mem_rd_addr=5,
-                     ex_we=0, mem_we=0, reg_val=0x10, ex_val=0xEE, mem_val=0xDD)
+            dut.rs_addr = 3; dut.ex_rd_addr = 5; dut.mem_rd_addr = 5
+            dut.ex_we = 0; dut.mem_we = 0
+            dut.reg_val = 0x10; dut.ex_val = 0xEE; dut.mem_val = 0xDD
             yield 1
-            self.assertEqual(self.out('out'), 0x10)
-            self.assertEqual(self.out('fwd_sel'), 0)
+            assert dut.out == 0x10
+            assert dut.fwd_sel == 0
         self.run_sim()
 
     def test_ex_forward(self):
+        dut = self.dut
         @self.initial
         def stim():
-            self.set(rs_addr=3, ex_rd_addr=3, mem_rd_addr=5,
-                     ex_we=1, mem_we=0, reg_val=0x10, ex_val=0xEE, mem_val=0xDD)
+            dut.rs_addr = 3; dut.ex_rd_addr = 3; dut.mem_rd_addr = 5
+            dut.ex_we = 1; dut.mem_we = 0
+            dut.reg_val = 0x10; dut.ex_val = 0xEE; dut.mem_val = 0xDD
             yield 1
-            self.assertEqual(self.out('out'), 0xEE)
-            self.assertEqual(self.out('fwd_sel'), 1)
+            assert dut.out == 0xEE
+            assert dut.fwd_sel == 1
         self.run_sim()
 
     def test_mem_forward(self):
+        dut = self.dut
         @self.initial
         def stim():
-            self.set(rs_addr=3, ex_rd_addr=5, mem_rd_addr=3,
-                     ex_we=0, mem_we=1, reg_val=0x10, ex_val=0xEE, mem_val=0xDD)
+            dut.rs_addr = 3; dut.ex_rd_addr = 5; dut.mem_rd_addr = 3
+            dut.ex_we = 0; dut.mem_we = 1
+            dut.reg_val = 0x10; dut.ex_val = 0xEE; dut.mem_val = 0xDD
             yield 1
-            self.assertEqual(self.out('out'), 0xDD)
-            self.assertEqual(self.out('fwd_sel'), 2)
+            assert dut.out == 0xDD
+            assert dut.fwd_sel == 2
         self.run_sim()
 
     def test_ex_priority(self):
+        dut = self.dut
         @self.initial
         def stim():
-            self.set(rs_addr=3, ex_rd_addr=3, mem_rd_addr=3,
-                     ex_we=1, mem_we=1, reg_val=0x10, ex_val=0xEE, mem_val=0xDD)
+            dut.rs_addr = 3; dut.ex_rd_addr = 3; dut.mem_rd_addr = 3
+            dut.ex_we = 1; dut.mem_we = 1
+            dut.reg_val = 0x10; dut.ex_val = 0xEE; dut.mem_val = 0xDD
             yield 1
-            self.assertEqual(self.out('out'), 0xEE)
-            self.assertEqual(self.out('fwd_sel'), 1)
+            assert dut.out == 0xEE
+            assert dut.fwd_sel == 1
         self.run_sim()
 
 

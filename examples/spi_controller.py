@@ -187,36 +187,36 @@ class SpiControllerTestBench(TestBench):
         return SpiController(width=8, fifo_depth=4, clk_div=2)
 
     def test_tx_ready_when_idle(self):
+        dut = self.dut
         self.clock('clock', 10)
 
         @self.initial
         def stim():
-            self.set(reset=1)
+            dut.reset = 1
             yield 10
-            self.set(reset=0)
+            dut.reset = 0
             yield 10
-            self.assertEqual(self.out('tx_ready'), 1)
+            assert dut.tx_ready == 1
 
         self.run_sim()
 
     def test_single_transfer(self):
+        dut = self.dut
         self.clock('clock', 10)
 
         @self.initial
         def stim():
-            self.set(reset=1, tx_valid=0, tx_data=0)
+            dut.reset = 1; dut.tx_valid = 0; dut.tx_data = 0
             yield 20
-            self.set(reset=0)
+            dut.reset = 0
             yield 10
-            # Push 0xA5 into FIFO
-            self.set(tx_data=0xA5, tx_valid=1)
+            dut.tx_data = 0xA5; dut.tx_valid = 1
             yield 10
-            self.set(tx_valid=0)
-            # Wait for rx_valid (FSM: IDLE→LOAD→SHIFT→DONE)
+            dut.tx_valid = 0
             saw_rx = False
             for _ in range(300):
                 yield 10
-                if self.out('rx_valid'):
+                if dut.rx_valid:
                     saw_rx = True
                     break
             self.assertTrue(saw_rx, "rx_valid never asserted")

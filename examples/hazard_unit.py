@@ -100,52 +100,57 @@ class HazardUnitTestBench(TestBench):
         )
 
     def test_no_hazard(self):
+        dut = self.dut
         @self.initial
         def stim():
             self._defaults()
             yield 1
-            self.assertEqual(self.out('stall'), 0)
-            self.assertEqual(self.out('fwd_a'), 0)
-            self.assertEqual(self.out('fwd_b'), 0)
+            assert dut.stall == 0
+            assert dut.fwd_a == 0
+            assert dut.fwd_b == 0
         self.run_sim()
 
     def test_ex_mem_forward_a(self):
+        dut = self.dut
         @self.initial
         def stim():
             self._defaults()
-            self.set(ex_mem_valid=1, ex_mem_reg_we=1, ex_mem_rd_addr=3,
-                     id_ex_rs1_addr=3)
+            dut.ex_mem_valid = 1; dut.ex_mem_reg_we = 1
+            dut.ex_mem_rd_addr = 3; dut.id_ex_rs1_addr = 3
             yield 1
-            self.assertEqual(self.out('fwd_a'), 1)
+            assert dut.fwd_a == 1
         self.run_sim()
 
     def test_mem_wb_forward_b(self):
+        dut = self.dut
         @self.initial
         def stim():
             self._defaults()
-            self.set(mem_wb_valid=1, mem_wb_reg_we=1, mem_wb_rd_addr=5,
-                     id_ex_rs2_addr=5)
+            dut.mem_wb_valid = 1; dut.mem_wb_reg_we = 1
+            dut.mem_wb_rd_addr = 5; dut.id_ex_rs2_addr = 5
             yield 1
-            self.assertEqual(self.out('fwd_b'), 2)
+            assert dut.fwd_b == 2
         self.run_sim()
 
     def test_load_use_stall(self):
+        dut = self.dut
         @self.initial
         def stim():
             self._defaults()
-            self.set(id_ex_valid=1, id_ex_mem_re=1, id_ex_rd_addr=2,
-                     id_rs1_addr=2)
+            dut.id_ex_valid = 1; dut.id_ex_mem_re = 1
+            dut.id_ex_rd_addr = 2; dut.id_rs1_addr = 2
             yield 1
-            self.assertEqual(self.out('stall'), 1)
+            assert dut.stall == 1
         self.run_sim()
 
     def test_branch_taken_flush(self):
+        dut = self.dut
         @self.initial
         def stim():
             self._defaults()
-            self.set(branch_taken=1)
+            dut.branch_taken = 1
             yield 1
-            self.assertEqual(self.out('flush_if_id'), 1)
+            assert dut.flush_if_id == 1
         self.run_sim()
 
 

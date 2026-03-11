@@ -85,41 +85,44 @@ class DatapathTestBench(TestBench):
         return Datapath(width=8)
 
     def test_alu_add(self):
+        dut = self.dut
         self.clock('clock', 10)
 
         @self.initial
         def stim():
-            self.set(reset=1)
+            dut.reset = 1
             yield 10
-            self.set(reset=0, a=10, b=5, op=0)
+            dut.reset = 0; dut.a = 10; dut.b = 5; dut.op = 0
             yield 10
-            self.assertEqual(self.out('result'), 15)
+            assert dut.result == 15
 
         self.run_sim()
 
     def test_alu_sub(self):
+        dut = self.dut
         self.clock('clock', 10)
 
         @self.initial
         def stim():
-            self.set(reset=1)
+            dut.reset = 1
             yield 10
-            self.set(reset=0, a=20, b=7, op=1)
+            dut.reset = 0; dut.a = 20; dut.b = 7; dut.op = 1
             yield 10
-            self.assertEqual(self.out('result'), 13)
+            assert dut.result == 13
 
         self.run_sim()
 
     def test_reset_clears(self):
+        dut = self.dut
         self.clock('clock', 10)
 
         @self.initial
         def stim():
-            self.set(reset=0, a=10, b=5, op=0)
+            dut.reset = 0; dut.a = 10; dut.b = 5; dut.op = 0
             yield 10
-            self.set(reset=1)
+            dut.reset = 1
             yield 10
-            self.assertEqual(self.out('result'), 0)
+            assert dut.result == 0
 
         self.run_sim()
 

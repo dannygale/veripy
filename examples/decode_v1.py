@@ -170,48 +170,53 @@ class DecodeTestBench(TestBench):
         return (opcode << 11) | (rd << 8) | (imm & 0xFF)
 
     def test_li(self):
+        dut = self.dut
         @self.initial
         def stim():
-            self.set(instr=self._encode(OP_LI, rd=2, imm=42))
+            dut.instr = self._encode(OP_LI, rd=2, imm=42)
             yield 1
-            self.assertEqual(self.out('reg_we'), 1)
-            self.assertEqual(self.out('use_imm'), 1)
-            self.assertEqual(self.out('rd_addr'), 2)
-            self.assertEqual(self.out('immediate'), 42)
+            assert dut.reg_we == 1
+            assert dut.use_imm == 1
+            assert dut.rd_addr == 2
+            assert dut.immediate == 42
         self.run_sim()
 
     def test_add(self):
+        dut = self.dut
         @self.initial
         def stim():
-            self.set(instr=self._encode(OP_ADD, rd=1))
+            dut.instr = self._encode(OP_ADD, rd=1)
             yield 1
-            self.assertEqual(self.out('reg_we'), 1)
-            self.assertEqual(self.out('alu_op'), ALU_ADD)
+            assert dut.reg_we == 1
+            assert dut.alu_op == ALU_ADD
         self.run_sim()
 
     def test_store(self):
+        dut = self.dut
         @self.initial
         def stim():
-            self.set(instr=self._encode(OP_STORE, rd=3, imm=10))
+            dut.instr = self._encode(OP_STORE, rd=3, imm=10)
             yield 1
-            self.assertEqual(self.out('mem_we'), 1)
-            self.assertEqual(self.out('reg_we'), 0)
+            assert dut.mem_we == 1
+            assert dut.reg_we == 0
         self.run_sim()
 
     def test_jmp(self):
+        dut = self.dut
         @self.initial
         def stim():
-            self.set(instr=self._encode(OP_JMP, rd=0, imm=0x20))
+            dut.instr = self._encode(OP_JMP, rd=0, imm=0x20)
             yield 1
-            self.assertEqual(self.out('is_jump'), 1)
+            assert dut.is_jump == 1
         self.run_sim()
 
     def test_halt(self):
+        dut = self.dut
         @self.initial
         def stim():
-            self.set(instr=self._encode(OP_HLT))
+            dut.instr = self._encode(OP_HLT)
             yield 1
-            self.assertEqual(self.out('is_halt'), 1)
+            assert dut.is_halt == 1
         self.run_sim()
 
 

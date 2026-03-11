@@ -40,42 +40,45 @@ class CounterTestBench(TestBench):
         return Counter(n=4)
 
     def test_reset_clears(self):
+        dut = self.dut
         self.clock('clock', 10)
 
         @self.initial
         def stim():
-            self.set(enable=1, reset=1)
+            dut.enable = 1; dut.reset = 1
             yield 10
-            self.assertEqual(self.out('count'), 0)
+            assert dut.count == 0
 
         self.run_sim()
 
     def test_counts_up(self):
+        dut = self.dut
         self.clock('clock', 10)
 
         @self.initial
         def stim():
-            self.set(enable=1, reset=1)
+            dut.enable = 1; dut.reset = 1
             yield 10
-            self.set(reset=0)
+            dut.reset = 0
             for i in range(1, 6):
                 yield 10
-                self.assertEqual(self.out('count'), i)
+                assert dut.count == i
 
         self.run_sim()
 
     def test_enable_gate(self):
+        dut = self.dut
         self.clock('clock', 10)
 
         @self.initial
         def stim():
-            self.set(enable=1, reset=1)
+            dut.enable = 1; dut.reset = 1
             yield 10
-            self.set(reset=0)
+            dut.reset = 0
             yield 10
-            self.set(enable=0)
+            dut.enable = 0
             yield 30
-            self.assertEqual(self.out('count'), 1)
+            assert dut.count == 1
 
         self.run_sim()
 

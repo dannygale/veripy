@@ -124,7 +124,7 @@ class SpiDriverTestBench(TestBench):
             m.cs_n.set(1)
             yield 10
             yield from drv.send(0xA5)
-            self.assertEqual(self.out('shreg'), 0xA5)
+            assert self.dut.shreg == 0xA5
 
         self.run_sim()
 
@@ -138,7 +138,7 @@ class SpiDriverTestBench(TestBench):
             m.cs_n.set(1)
             yield 10
             yield from drv.send(0x00)
-            self.assertEqual(self.out('shreg'), 0x00)
+            assert self.dut.shreg == 0x00
 
         self.run_sim()
 
