@@ -797,7 +797,8 @@ def cmd_stats(args):
         print(f"  Wires:       {s['wires']} ({s['wire_bits']} bits)")
         print(f"  Instances:   {s['instances']}")
         print(f"  Comb blocks: {s['comb_blocks']}  Seq blocks: {s['seq_blocks']}")
-        print(f"  Comb depth:  ~{s['comb_depth_est']} (estimated)")
+        print(f"  Comb depth:  {s['comb_depth']}")
+        print(f"  Logic ops:   {s['logic_ops']}")
 
 
 def cmd_ip(args):

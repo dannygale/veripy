@@ -90,30 +90,91 @@ def module_stats(module, name=None):
     wire_sigs = {n for n in sig_w if n not in _ports and n not in _regs and n not in _mems and n not in nba_sigs}
     wire_bits = sum(sig_w[n] for n in wire_sigs)
 
-    # Estimate comb depth on top-level IR only
-    ir = lower_module(module, mod_name)
-    nodes = []
-    for b in ir.comb_blocks:
-        w, r = set(), set()
+    # Compute comb depth and logic_ops on flat IR
+    from .ir import (BinOp, UnaryOp, Compare, BoolOp, Mux, Slice, Concat,
+                     Index, Assign, SliceAssign, If, Case)
+
+    def _count_ops(expr):
+        if expr is None:
+            return 0
+        if isinstance(expr, (BinOp, Compare)):
+            return 1 + _count_ops(expr.left) + _count_ops(expr.right)
+        if isinstance(expr, UnaryOp):
+            return 1 + _count_ops(expr.operand)
+        if isinstance(expr, BoolOp):
+            return len(expr.values) - 1 + sum(_count_ops(v) for v in expr.values)
+        if isinstance(expr, Mux):
+            return 1 + _count_ops(expr.sel) + _count_ops(expr.true_val) + _count_ops(expr.false_val)
+        if isinstance(expr, Slice):
+            return 1 + _count_ops(expr.signal)
+        if isinstance(expr, (Concat, Index)):
+            parts = getattr(expr, 'parts', None) or [expr.signal, expr.idx]
+            return 1 + sum(_count_ops(p) for p in parts)
+        return 0
+
+    def _count_stmt_ops(stmt):
+        if isinstance(stmt, (Assign, SliceAssign)):
+            return _count_ops(stmt.value)
+        if isinstance(stmt, If):
+            return (_count_ops(stmt.cond)
+                    + sum(_count_stmt_ops(s) for s in stmt.then_body)
+                    + sum(_count_stmt_ops(s) for s in stmt.else_body))
+        if isinstance(stmt, Case):
+            return (_count_ops(stmt.sel)
+                    + sum(_count_stmt_ops(s) for _, stmts in stmt.cases for s in stmts)
+                    + sum(_count_stmt_ops(s) for s in (stmt.default or [])))
+        return 0
+
+    # Signal-level DAG for comb depth
+    # "leaves" = ports + signals driven only by seq blocks (true flip-flops)
+    # Signals driven by comb blocks are wires and get their depth computed
+    seq_driven = set()
+    for b in flat.seq_blocks:
         for s in b.stmts:
-            _stmt_writes_reads(s, w, r)
-        nodes.append((w, r))
-    for a in ir.assigns:
-        nodes.append(({a.target}, _expr_reads(a.value)))
-    n = len(nodes)
-    depth = [1] * n
-    for i in range(n):
-        _, r_i = nodes[i]
-        for j in range(i):
-            w_j, _ = nodes[j]
-            if w_j & r_i:
-                depth[i] = max(depth[i], depth[j] + 1)
-    comb_depth = max(depth) if depth else 0
+            w = set(); _stmt_writes_reads(s, w, set())
+            seq_driven |= w
+
+    primary = ({p.name for p in flat.ports}
+               | seq_driven
+               | {m.name for m in flat.mems})
+    sig_depth = {name: 0 for name in primary}
+
+    def _expr_max_depth(expr):
+        return max((sig_depth.get(r, 0) for r in _expr_reads(expr)), default=0)
+
+    def _process_stmts(stmts):
+        for stmt in stmts:
+            if isinstance(stmt, (Assign, SliceAssign)):
+                d = _expr_max_depth(stmt.value) + 1
+                sig_depth[stmt.target] = max(sig_depth.get(stmt.target, 0), d)
+            elif isinstance(stmt, If):
+                _process_stmts(stmt.then_body)
+                _process_stmts(stmt.else_body)
+            elif isinstance(stmt, Case):
+                for _, body in stmt.cases:
+                    _process_stmts(body)
+                _process_stmts(stmt.default or [])
+
+    for b in flat.comb_blocks:
+        _process_stmts(b.stmts)
+    for a in flat.assigns:
+        d = _expr_max_depth(a.value) + 1
+        sig_depth[a.target] = max(sig_depth.get(a.target, 0), d)
+
+    comb_depth = max((v for k, v in sig_depth.items() if k not in primary), default=0)
+
+    total_ops = 0
+    for b in flat.comb_blocks + flat.seq_blocks:
+        for s in b.stmts:
+            total_ops += _count_stmt_ops(s)
+    for a in flat.assigns:
+        total_ops += _count_ops(a.value)
 
     return {
         'name': mod_name,
         **totals,
         'wires': len(wire_sigs),
         'wire_bits': wire_bits,
-        'comb_depth_est': comb_depth,
+        'comb_depth': comb_depth,
+        'logic_ops': total_ops,
     }
