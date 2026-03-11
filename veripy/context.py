@@ -135,30 +135,73 @@ def behavioral(fn):
     return functional(fn)
 
 
-def always(sensitivity):
-    """Standalone @always(sensitivity) decorator — multi-edge sensitivity list.
+def always(sensitivity_or_fn):
+    """@always decorator — works in both RTL and testbench contexts.
 
-    Usage:
-        @always(posedge(clk) | negedge(rst_n))
-        def async_reset():
-            if not rst_n:
-                reg = 0
-            else:
-                reg = d
+    RTL usage (edge-triggered):
+        @always(posedge(clk))
+        def seq():
+            ...
+
+    Testbench usage (free-running generator):
+        @always
+        def drive():
+            dut.x = 1
+            yield 10
+
+    Testbench usage (edge-triggered generator):
+        @always(posedge(clk))
+        def monitor():
+            yield 5
+            assert dut.q == 1
     """
-    if isinstance(sensitivity, Edge):
-        edges = [sensitivity]
-    elif isinstance(sensitivity, SensitivityList):
-        edges = sensitivity.edges
-    else:
-        raise TypeError(f"Expected Edge or SensitivityList, got {type(sensitivity)}")
+    import inspect
 
-    def decorator(fn):
-        ctx = _get_context()
-        if ctx is not None:
-            ctx.always_blocks.append((edges, fn))
+    if isinstance(sensitivity_or_fn, (Edge, SensitivityList)):
+        edges = ([sensitivity_or_fn] if isinstance(sensitivity_or_fn, Edge)
+                 else sensitivity_or_fn.edges)
+
+        def decorator(fn):
+            ctx = _get_context()
+            if ctx is not None:
+                # RTL: register with module context
+                ctx.always_blocks.append((edges, fn))
+            else:
+                # Testbench: wrap as edge-triggered generator
+                from .verify import _current_tb
+                is_gen = inspect.isgeneratorfunction(fn)
+
+                def _edge_block():
+                    prev = {e.signal: int(e.signal) for e in edges}
+                    while True:
+                        def _triggered(p=prev):
+                            return any(
+                                (e.kind == 'posedge' and p[e.signal] == 0 and int(e.signal) == 1) or
+                                (e.kind == 'negedge' and p[e.signal] == 1 and int(e.signal) == 0)
+                                for e in edges
+                            )
+                        from .sim import until
+                        yield until(_triggered)
+                        for e in edges:
+                            prev[e.signal] = int(e.signal)
+                        if is_gen:
+                            yield from fn()
+                        else:
+                            fn()
+
+                _current_tb.tb._engine.always(_edge_block)
+            return fn
+        return decorator
+
+    elif callable(sensitivity_or_fn):
+        # @always with no args — free-running testbench generator
+        fn = sensitivity_or_fn
+        from .verify import _current_tb
+        _current_tb.tb.always(fn)
         return fn
-    return decorator
+
+    else:
+        raise TypeError(f"always() expected Edge, SensitivityList, or callable, got {type(sensitivity_or_fn)}")
 
 
 # --- FSM ---

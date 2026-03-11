@@ -19,10 +19,6 @@ def initial(fn):
     return _current_tb.tb.initial(fn)
 
 
-def always(fn):
-    """Register a generator as an always block on the active TestBench."""
-    return _current_tb.tb.always(fn)
-
 # Global coverage accumulator: {cover_point_name: hit_count}
 _coverage_db = {}
 
