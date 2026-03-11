@@ -74,7 +74,7 @@ class ALU(Module):
 
 # ── Inline TestBench ─────────────────────────────────────────────────
 
-from veripy.verify import TestBench
+from veripy.verify import TestBench, initial
 
 
 class ALUTestBench(TestBench):
@@ -83,7 +83,7 @@ class ALUTestBench(TestBench):
 
     def test_add(self):
         dut = self.dut
-        @self.initial
+        @initial
         def stim():
             dut.a = 100; dut.b = 50; dut.op = ALU_ADD
             yield 1
@@ -92,7 +92,7 @@ class ALUTestBench(TestBench):
 
     def test_sub(self):
         dut = self.dut
-        @self.initial
+        @initial
         def stim():
             dut.a = 100; dut.b = 100; dut.op = ALU_SUB
             yield 1
@@ -101,7 +101,7 @@ class ALUTestBench(TestBench):
 
     def test_and(self):
         dut = self.dut
-        @self.initial
+        @initial
         def stim():
             dut.a = 0xFF0F; dut.b = 0x0FF0; dut.op = ALU_AND
             yield 1
@@ -109,7 +109,7 @@ class ALUTestBench(TestBench):
 
     def test_shl(self):
         dut = self.dut
-        @self.initial
+        @initial
         def stim():
             dut.a = 0x8001; dut.b = 0; dut.op = ALU_SHL
             yield 1
@@ -118,7 +118,7 @@ class ALUTestBench(TestBench):
 
     def test_pass(self):
         dut = self.dut
-        @self.initial
+        @initial
         def stim():
             dut.a = 0; dut.b = 42; dut.op = ALU_PASS
             yield 1

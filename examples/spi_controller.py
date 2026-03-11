@@ -178,7 +178,7 @@ class SpiController(Module):
 
 # ── Inline TestBench ─────────────────────────────────────────────────
 
-from veripy.verify import TestBench
+from veripy.verify import TestBench, initial
 
 
 class SpiControllerTestBench(TestBench):
@@ -190,7 +190,7 @@ class SpiControllerTestBench(TestBench):
         dut = self.dut
         self.clock('clock', 10)
 
-        @self.initial
+        @initial
         def stim():
             dut.reset = 1
             yield 10
@@ -203,7 +203,7 @@ class SpiControllerTestBench(TestBench):
         dut = self.dut
         self.clock('clock', 10)
 
-        @self.initial
+        @initial
         def stim():
             dut.reset = 1; dut.tx_valid = 0; dut.tx_data = 0
             yield 20

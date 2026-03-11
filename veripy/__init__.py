@@ -22,7 +22,7 @@ from .axi4lite import Axi4LiteBus, Axi4LiteSub
 from .axi4 import Axi4Bus, Axi4Sub, Axi4Crossbar
 from .csr import Field, Reg, RegisterMap
 from .project import Project
-from .verify import TestBench, VeripyTestCase, BehavioralTestCase
+from .verify import TestBench, VeripyTestCase, BehavioralTestCase, initial, always
 from .firmware_test import FirmwareTestCase
 from .firmware import ElfSegment, ElfImage, load_elf
 from .soc_sim import FlatMemory, UartPeripheral, SocSim

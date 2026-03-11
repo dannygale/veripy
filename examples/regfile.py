@@ -36,7 +36,7 @@ class RegFile(Module):
 
 # ── Inline TestBench ─────────────────────────────────────────────────
 
-from veripy.verify import TestBench
+from veripy.verify import TestBench, initial
 
 
 class RegFileTestBench(TestBench):
@@ -48,7 +48,7 @@ class RegFileTestBench(TestBench):
         dut = self.dut
         self.clock('clock', 10)
 
-        @self.initial
+        @initial
         def stim():
             dut.we = 1; dut.waddr = 1; dut.wdata = 42
             yield 10
@@ -61,7 +61,7 @@ class RegFileTestBench(TestBench):
         dut = self.dut
         self.clock('clock', 10)
 
-        @self.initial
+        @initial
         def stim():
             dut.we = 1; dut.waddr = 0; dut.wdata = 99
             yield 10
@@ -74,7 +74,7 @@ class RegFileTestBench(TestBench):
         dut = self.dut
         self.clock('clock', 10)
 
-        @self.initial
+        @initial
         def stim():
             dut.we = 1; dut.waddr = 1; dut.wdata = 10
             yield 10

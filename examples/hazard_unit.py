@@ -83,7 +83,7 @@ class HazardUnit(Module):
 
 # ── Inline TestBench ─────────────────────────────────────────────────
 
-from veripy.verify import TestBench
+from veripy.verify import TestBench, initial
 
 
 class HazardUnitTestBench(TestBench):
@@ -101,7 +101,7 @@ class HazardUnitTestBench(TestBench):
 
     def test_no_hazard(self):
         dut = self.dut
-        @self.initial
+        @initial
         def stim():
             self._defaults()
             yield 1
@@ -111,7 +111,7 @@ class HazardUnitTestBench(TestBench):
 
     def test_ex_mem_forward_a(self):
         dut = self.dut
-        @self.initial
+        @initial
         def stim():
             self._defaults()
             dut.ex_mem_valid = 1; dut.ex_mem_reg_we = 1
@@ -121,7 +121,7 @@ class HazardUnitTestBench(TestBench):
 
     def test_mem_wb_forward_b(self):
         dut = self.dut
-        @self.initial
+        @initial
         def stim():
             self._defaults()
             dut.mem_wb_valid = 1; dut.mem_wb_reg_we = 1
@@ -131,7 +131,7 @@ class HazardUnitTestBench(TestBench):
 
     def test_load_use_stall(self):
         dut = self.dut
-        @self.initial
+        @initial
         def stim():
             self._defaults()
             dut.id_ex_valid = 1; dut.id_ex_mem_re = 1
@@ -141,7 +141,7 @@ class HazardUnitTestBench(TestBench):
 
     def test_branch_taken_flush(self):
         dut = self.dut
-        @self.initial
+        @initial
         def stim():
             self._defaults()
             dut.branch_taken = 1

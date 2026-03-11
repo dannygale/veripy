@@ -1,6 +1,6 @@
 """Dual-path test case: write one test, verify Python sim and iverilog agree."""
 
-import atexit, json, unittest, subprocess, tempfile, os, random
+import atexit, json, threading, unittest, subprocess, tempfile, os, random
 
 # Seed Python's random from VERIPY_SEED if set (injected by parallel runner)
 _env_seed = os.environ.get('VERIPY_SEED')
@@ -9,6 +9,19 @@ if _env_seed is not None:
 
 from .signal import Signal, Mem, Interface
 from .sim import SimEngine
+
+# ── Free-standing decorators ─────────────────────────────────────────
+_current_tb = threading.local()
+
+
+def initial(fn):
+    """Register a generator as an initial block on the active TestBench."""
+    return _current_tb.tb.initial(fn)
+
+
+def always(fn):
+    """Register a generator as an always block on the active TestBench."""
+    return _current_tb.tb.always(fn)
 
 # Global coverage accumulator: {cover_point_name: hit_count}
 _coverage_db = {}
@@ -730,6 +743,7 @@ class TestBench(unittest.TestCase):
 def _wrap_testbench(fn):
     """Wrap a test method to run configured backends, then compare outputs."""
     def wrapper(self):
+        _current_tb.tb = self
         backends = _resolve_backends(self.__class__)
         vcd_on_fail = (getattr(self.__class__, 'vcd_on_fail', False)
                        or os.environ.get('VERIPY_VCD_ON_FAIL') == '1')

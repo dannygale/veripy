@@ -159,7 +159,7 @@ class Decode(Module):
 
 # ── Inline TestBench ─────────────────────────────────────────────────
 
-from veripy.verify import TestBench
+from veripy.verify import TestBench, initial
 
 
 class DecodeTestBench(TestBench):
@@ -171,7 +171,7 @@ class DecodeTestBench(TestBench):
 
     def test_li(self):
         dut = self.dut
-        @self.initial
+        @initial
         def stim():
             dut.instr = self._encode(OP_LI, rd=2, imm=42)
             yield 1
@@ -182,7 +182,7 @@ class DecodeTestBench(TestBench):
 
     def test_add(self):
         dut = self.dut
-        @self.initial
+        @initial
         def stim():
             dut.instr = self._encode(OP_ADD, rd=1)
             yield 1
@@ -191,7 +191,7 @@ class DecodeTestBench(TestBench):
 
     def test_store(self):
         dut = self.dut
-        @self.initial
+        @initial
         def stim():
             dut.instr = self._encode(OP_STORE, rd=3, imm=10)
             yield 1
@@ -200,7 +200,7 @@ class DecodeTestBench(TestBench):
 
     def test_jmp(self):
         dut = self.dut
-        @self.initial
+        @initial
         def stim():
             dut.instr = self._encode(OP_JMP, rd=0, imm=0x20)
             yield 1
@@ -208,7 +208,7 @@ class DecodeTestBench(TestBench):
 
     def test_halt(self):
         dut = self.dut
-        @self.initial
+        @initial
         def stim():
             dut.instr = self._encode(OP_HLT)
             yield 1

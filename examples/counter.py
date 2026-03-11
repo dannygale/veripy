@@ -31,7 +31,7 @@ class Counter(Module):
 
 # ── Inline TestBench ─────────────────────────────────────────────────
 
-from veripy.verify import TestBench
+from veripy.verify import TestBench, initial
 
 
 class CounterTestBench(TestBench):
@@ -43,7 +43,7 @@ class CounterTestBench(TestBench):
         dut = self.dut
         self.clock('clock', 10)
 
-        @self.initial
+        @initial
         def stim():
             dut.enable = 1; dut.reset = 1
             yield 10
@@ -54,7 +54,7 @@ class CounterTestBench(TestBench):
         dut = self.dut
         self.clock('clock', 10)
 
-        @self.initial
+        @initial
         def stim():
             dut.enable = 1; dut.reset = 1
             yield 10
@@ -68,7 +68,7 @@ class CounterTestBench(TestBench):
         dut = self.dut
         self.clock('clock', 10)
 
-        @self.initial
+        @initial
         def stim():
             dut.enable = 1; dut.reset = 1
             yield 10

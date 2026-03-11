@@ -90,7 +90,7 @@ class ForwardMux(Module):
 
 # ── Inline TestBench ─────────────────────────────────────────────────
 
-from veripy.verify import TestBench
+from veripy.verify import TestBench, initial
 
 
 class PipeRegTestBench(TestBench):
@@ -102,7 +102,7 @@ class PipeRegTestBench(TestBench):
         dut = self.dut
         self.clock('clock', 10)
 
-        @self.initial
+        @initial
         def stim():
             dut.reset = 1; dut.stall = 0; dut.flush = 0
             yield 10
@@ -115,7 +115,7 @@ class PipeRegTestBench(TestBench):
         dut = self.dut
         self.clock('clock', 10)
 
-        @self.initial
+        @initial
         def stim():
             dut.reset = 1; dut.stall = 0; dut.flush = 0
             yield 10
@@ -130,7 +130,7 @@ class PipeRegTestBench(TestBench):
         dut = self.dut
         self.clock('clock', 10)
 
-        @self.initial
+        @initial
         def stim():
             dut.reset = 1; dut.stall = 0; dut.flush = 0
             yield 10
@@ -148,7 +148,7 @@ class ForwardMuxTestBench(TestBench):
 
     def test_no_forward(self):
         dut = self.dut
-        @self.initial
+        @initial
         def stim():
             dut.rs_addr = 3; dut.ex_rd_addr = 5; dut.mem_rd_addr = 5
             dut.ex_we = 0; dut.mem_we = 0
@@ -159,7 +159,7 @@ class ForwardMuxTestBench(TestBench):
 
     def test_ex_forward(self):
         dut = self.dut
-        @self.initial
+        @initial
         def stim():
             dut.rs_addr = 3; dut.ex_rd_addr = 3; dut.mem_rd_addr = 5
             dut.ex_we = 1; dut.mem_we = 0
@@ -170,7 +170,7 @@ class ForwardMuxTestBench(TestBench):
 
     def test_mem_forward(self):
         dut = self.dut
-        @self.initial
+        @initial
         def stim():
             dut.rs_addr = 3; dut.ex_rd_addr = 5; dut.mem_rd_addr = 3
             dut.ex_we = 0; dut.mem_we = 1
@@ -181,7 +181,7 @@ class ForwardMuxTestBench(TestBench):
 
     def test_ex_priority(self):
         dut = self.dut
-        @self.initial
+        @initial
         def stim():
             dut.rs_addr = 3; dut.ex_rd_addr = 3; dut.mem_rd_addr = 3
             dut.ex_we = 1; dut.mem_we = 1

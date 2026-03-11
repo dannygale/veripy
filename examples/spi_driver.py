@@ -106,7 +106,7 @@ class SpiControllerDriver(Driver):
 
 # ── Inline TestBench ─────────────────────────────────────────────────
 
-from veripy.verify import TestBench
+from veripy.verify import TestBench, initial
 
 
 class SpiDriverTestBench(TestBench):
@@ -117,7 +117,7 @@ class SpiDriverTestBench(TestBench):
     def test_shift_byte(self):
         self.clock('clock', 10)
 
-        @self.initial
+        @initial
         def stim():
             m = self.module
             drv = SpiDriver(self._engine, m, half_period=10)
@@ -130,7 +130,7 @@ class SpiDriverTestBench(TestBench):
     def test_shift_zero(self):
         self.clock('clock', 10)
 
-        @self.initial
+        @initial
         def stim():
             m = self.module
             drv = SpiDriver(self._engine, m, half_period=10)

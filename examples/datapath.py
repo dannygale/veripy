@@ -76,7 +76,7 @@ class Datapath(Module):
 
 # ── Inline TestBench ─────────────────────────────────────────────────
 
-from veripy.verify import TestBench
+from veripy.verify import TestBench, initial
 
 
 class DatapathTestBench(TestBench):
@@ -88,7 +88,7 @@ class DatapathTestBench(TestBench):
         dut = self.dut
         self.clock('clock', 10)
 
-        @self.initial
+        @initial
         def stim():
             dut.reset = 1
             yield 10
@@ -101,7 +101,7 @@ class DatapathTestBench(TestBench):
         dut = self.dut
         self.clock('clock', 10)
 
-        @self.initial
+        @initial
         def stim():
             dut.reset = 1
             yield 10
@@ -114,7 +114,7 @@ class DatapathTestBench(TestBench):
         dut = self.dut
         self.clock('clock', 10)
 
-        @self.initial
+        @initial
         def stim():
             dut.reset = 0; dut.a = 10; dut.b = 5; dut.op = 0
             yield 10
