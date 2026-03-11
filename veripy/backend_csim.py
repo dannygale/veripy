@@ -1390,11 +1390,17 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
     for _seq_gi, ((edge_kind, clk), block_ids) in enumerate(sorted(edge_blocks.items())):
         fn_name = f'_seq_{_seq_gi}'
         seq_group_fns.append(fn_name)
-        # Only declare promoted locals actually read by this group's seq blocks
+        # Declare promoted locals that are read OR written by this group's seq blocks
         all_reads = set()
+        all_writes = set()
         for idx in block_ids:
             all_reads |= _collect_sig_reads(ir.seq_blocks[idx].stmts)
-        needed_locals = promoted_locals & all_reads
+            for s in ir.seq_blocks[idx].stmts:
+                w = set(); r = set()
+                from .flatten import _stmt_writes_reads
+                _stmt_writes_reads(s, w, r)
+                all_writes |= w
+        needed_locals = promoted_locals & (all_reads | all_writes)
         lines.append(f'__attribute__((noinline)) static void {fn_name}(State* __restrict s) {{')
         for name in sorted(needed_locals):
             w = all_sigs[name]
@@ -3250,6 +3256,15 @@ def emit_cysim_pyx(ir: IRModule) -> str:
         '        model.eval()',
         '        while (self._queue or self._waiting) and not self._finished:',
         '            if not self._queue:',
+        '                if has_clk and self._waiting:',
+        '                    # Advance clock to check until() conditions',
+        '                    self.time = clk_next',
+        '                    model.set(clk_name, clk_val)',
+        '                    model.eval()',
+        '                    clk_val ^= 1',
+        '                    clk_next += clk_half',
+        '                    self._check_waiting()',
+        '                    continue',
         '                deadlines = [d for _, _, _, d in self._waiting if d is not None]',
         '                if not deadlines:',
         '                    raise RuntimeError("Deadlock")',
@@ -3267,6 +3282,8 @@ def emit_cysim_pyx(ir: IRModule) -> str:
         '                    model.eval()',
         '                    clk_val ^= 1',
         '                    clk_next += clk_half',
+        '                    if self._waiting:',
+        '                        self._check_waiting()',
         '',
         '            entry = heapq.heappop(self._queue)',
         '            t = entry[0]',

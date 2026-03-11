@@ -800,8 +800,9 @@ class _Pipeline:
         except SyntaxError:
             return None
         lam = None
+        n_params = len(inspect.signature(stage_func).parameters)
         for node in _ast.walk(tree):
-            if isinstance(node, _ast.Lambda):
+            if isinstance(node, _ast.Lambda) and len(node.args.args) == n_params:
                 lam = node
                 break
         if lam is None:

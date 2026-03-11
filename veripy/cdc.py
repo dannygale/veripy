@@ -25,6 +25,11 @@ class Synchronizer(Module):
         def output():
             self.q = getattr(self, f'_stage{stages - 1}')
 
+        output._veripy_emit_source = (
+            f'def output():\n'
+            f'    self.q = self._stage{stages - 1}\n'
+        )
+
         @self.posedge(self.clk)
         def shift():
             if self.rst:
@@ -35,6 +40,21 @@ class Synchronizer(Module):
                 getattr(self, '_stage0')._val = int(self.d)
                 for i in range(1, stages):
                     getattr(self, f'_stage{i}')._val = vals[i - 1]
+
+        reset_lines = '\n'.join(
+            f'        self._stage{i} = 0' for i in range(stages))
+        shift_lines = '\n'.join(
+            f'        self._stage{i} = self._stage{i - 1}'
+            for i in range(stages - 1, 0, -1)
+        ) + f'\n        self._stage0 = self.d'
+
+        shift._veripy_emit_source = (
+            f'def shift():\n'
+            f'    if self.rst:\n'
+            f'{reset_lines}\n'
+            f'    else:\n'
+            f'{shift_lines}\n'
+        )
 
 
 def _bin2gray(b, bits):

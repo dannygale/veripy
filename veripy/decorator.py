@@ -207,6 +207,11 @@ def module(func):
         # Collect logic blocks with emitter source attached
         for fn in ctx.comb_blocks:
             src = emitter_sources.get(fn.__name__)
+            if src is None:
+                # FSM comb_wrapper: look up by wrapped function name
+                wrapped = getattr(fn, '__wrapped__', None)
+                if wrapped is not None:
+                    src = emitter_sources.get(wrapped.__name__)
             if src:
                 fn._veripy_emit_source = src
             instance._comb_blocks.append(fn)

@@ -714,7 +714,37 @@ class _Lowerer:
 
     def _get_func_ast(self, func):
         emit_src = getattr(func, '_veripy_emit_source', None)
-        src = emit_src if emit_src else textwrap.dedent(inspect.getsource(func))
+        if emit_src:
+            tree = ast.parse(emit_src)
+            func_def = tree.body[0]
+            return func_def if isinstance(func_def, ast.FunctionDef) else tree
+
+        # Raw source captured before @module rewriting (e.g. FSM functions)
+        raw_src = getattr(func, '_veripy_raw_source', None)
+        if raw_src:
+            tree = ast.parse(raw_src)
+            func_def = tree.body[0]
+            return func_def if isinstance(func_def, ast.FunctionDef) else tree
+
+        # Prefer file-based AST parsing: find the function node by line number.
+        # This avoids inspect.getsource() returning wrong source when multiple
+        # @module functions are defined close together in the same file.
+        try:
+            filename = inspect.getfile(func)
+            firstline = func.__code__.co_firstlineno
+            with open(filename) as f:
+                file_src = f.read()
+            file_tree = ast.parse(file_src)
+            for node in ast.walk(file_tree):
+                if (isinstance(node, ast.FunctionDef)
+                        and node.lineno == firstline
+                        and node.name == func.__name__):
+                    return node
+        except (OSError, TypeError):
+            pass
+
+        # Fallback: getsource
+        src = textwrap.dedent(inspect.getsource(func))
         tree = ast.parse(src)
         func_def = tree.body[0]
         return func_def if isinstance(func_def, ast.FunctionDef) else tree
@@ -823,10 +853,16 @@ class _Lowerer:
         """Lower an FSM comb block: state param → _fsm_state, return → _fsm_next."""
         wrapped = getattr(method, '__wrapped__', method)
         self._func = wrapped  # use wrapped func for name resolution (has state globals)
-        tree = self._get_func_ast(wrapped)
+        # Prefer emit source on the wrapper (set by @module decorator)
+        if hasattr(method, '_veripy_emit_source'):
+            tree = self._get_func_ast(method)
+        else:
+            tree = self._get_func_ast(wrapped)
 
         # The function has a 'state' parameter — map it to _fsm_state
-        state_param = tree.args.args[0].arg if tree.args.args else 'state'
+        # Skip 'self' if present (emit source has self as first param)
+        params = [a.arg for a in tree.args.args if a.arg != 'self']
+        state_param = params[0] if params else 'state'
         state_vals = fsm_info['state_vals']
 
         # Rewrite AST: replace state param refs with _fsm_state,
@@ -960,6 +996,11 @@ class _Lowerer:
 def lower_module(module, module_name=None):
     """Lower a Module to IRModule."""
     from .module import Module
+
+    # Finalize any pipelines that haven't been finalized yet
+    # (class-based modules create pipelines after super().__init__)
+    for pipe in getattr(module, '_pipelines', []):
+        pipe._finalize()
 
     name = module_name or type(module).__name__.lower()
 
