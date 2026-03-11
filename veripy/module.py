@@ -499,6 +499,15 @@ class Module:
 
     # --- Verilog generation ---
     def to_verilog(self, module_name=None):
+        # Functional-only modules have no RTL to emit
+        has_functional = any(
+            getattr(getattr(type(self), n, None), '_veripy_functional', False)
+            for n in dir(type(self))
+        )
+        if has_functional and not getattr(self, '_always_blocks', None) and not getattr(self, '_comb_blocks', None):
+            raise ValueError(
+                f'{type(self).__name__} has only a functional model — '
+                'add an @always or @comb block to emit Verilog')
         # Finalize any pipelines before emission
         for p in getattr(self, '_pipelines', []):
             p._finalize()
