@@ -671,12 +671,14 @@ def _expr_width(node, sig_w) -> int:
 _c_locals: set = set()
 
 
-def _emit_stmt(stmt, lines, sig_w, indent=1, pack_map=None, nba_sigs=None):
+def _emit_stmt(stmt, lines, sig_w, indent=1, pack_map=None, nba_sigs=None, nba_locals=None):
     """Emit C statements from an IR Stmt node.
 
     When *nba_sigs* is provided (seq block context), writes to those signals
     are redirected to ``s->_nba_<name>`` temporaries so that NBA semantics
     are preserved across concurrent seq blocks.
+    When *nba_locals* is provided, those NBA signals use bare local variables
+    ``_nba_X`` instead of struct fields ``s->_nba_X``.
     """
     pad = '    ' * indent
 
@@ -684,11 +686,12 @@ def _emit_stmt(stmt, lines, sig_w, indent=1, pack_map=None, nba_sigs=None):
         w = sig_w.get(stmt.target, 0)
         val = _expr(stmt.value, sig_w, pack_map)
         if nba_sigs and stmt.target in nba_sigs:
-            # NBA: write to temporary; type matches signal width
+            # NBA: write to temporary; use local if in nba_locals
+            tgt = f'_nba_{stmt.target}' if (nba_locals and stmt.target in nba_locals) else f's->_nba_{stmt.target}'
             if w and w < 64:
-                lines.append(f'{pad}s->_nba_{stmt.target} = ({_ctype(w)})({val} & {_mask(w)});')
+                lines.append(f'{pad}{tgt} = ({_ctype(w)})({val} & {_mask(w)});')
             else:
-                lines.append(f'{pad}s->_nba_{stmt.target} = {val};')
+                lines.append(f'{pad}{tgt} = {val};')
         elif pack_map and stmt.target in pack_map:
             lines.append(f'{pad}{_pack_write(stmt.target, val, pack_map)}')
         else:
@@ -702,8 +705,10 @@ def _emit_stmt(stmt, lines, sig_w, indent=1, pack_map=None, nba_sigs=None):
         lo = _expr(stmt.lo, sig_w, pack_map)
         hi = _expr(stmt.hi, sig_w, pack_map)
         val = _expr(stmt.value, sig_w, pack_map)
-        # Clear bits [hi:lo], then set them
-        tgt = f's->_nba_{stmt.target}' if (nba_sigs and stmt.target in nba_sigs) else f's->{stmt.target}'
+        if nba_sigs and stmt.target in nba_sigs:
+            tgt = f'_nba_{stmt.target}' if (nba_locals and stmt.target in nba_locals) else f's->_nba_{stmt.target}'
+        else:
+            tgt = f's->{stmt.target}'
         lines.append(f'{pad}{{')
         lines.append(f'{pad}    uint64_t _lo = {lo};')
         lines.append(f'{pad}    uint64_t _hi = {hi};')
@@ -720,15 +725,15 @@ def _emit_stmt(stmt, lines, sig_w, indent=1, pack_map=None, nba_sigs=None):
     elif isinstance(stmt, If):
         lines.append(f'{pad}if ({_expr(stmt.cond, sig_w, pack_map)}) {{')
         for s in stmt.then_body:
-            _emit_stmt(s, lines, sig_w, indent + 1, pack_map, nba_sigs)
+            _emit_stmt(s, lines, sig_w, indent + 1, pack_map, nba_sigs, nba_locals)
         if stmt.else_body:
             if len(stmt.else_body) == 1 and isinstance(stmt.else_body[0], If):
                 lines.append(f'{pad}}} else')
-                _emit_stmt(stmt.else_body[0], lines, sig_w, indent, pack_map, nba_sigs)
+                _emit_stmt(stmt.else_body[0], lines, sig_w, indent, pack_map, nba_sigs, nba_locals)
             else:
                 lines.append(f'{pad}}} else {{')
                 for s in stmt.else_body:
-                    _emit_stmt(s, lines, sig_w, indent + 1, pack_map, nba_sigs)
+                    _emit_stmt(s, lines, sig_w, indent + 1, pack_map, nba_sigs, nba_locals)
                 lines.append(f'{pad}}}')
         else:
             lines.append(f'{pad}}}')
@@ -742,37 +747,32 @@ def _emit_stmt(stmt, lines, sig_w, indent=1, pack_map=None, nba_sigs=None):
                 kw = 'if' if i == 0 else '} else if'
                 lines.append(f'{pad}{kw} ({sel} == {_expr(val, sig_w, pack_map)}) {{')
                 for s in body:
-                    _emit_stmt(s, lines, sig_w, indent + 1, pack_map, nba_sigs)
+                    _emit_stmt(s, lines, sig_w, indent + 1, pack_map, nba_sigs, nba_locals)
             if stmt.default:
                 lines.append(f'{pad}}} else {{')
                 for s in stmt.default:
-                    _emit_stmt(s, lines, sig_w, indent + 1, pack_map, nba_sigs)
+                    _emit_stmt(s, lines, sig_w, indent + 1, pack_map, nba_sigs, nba_locals)
             lines.append(f'{pad}}}')
         else:
             lines.append(f'{pad}switch ({_expr(stmt.sel, sig_w, pack_map)}) {{')
             for val, body in stmt.cases:
                 lines.append(f'{pad}    case {_expr(val, sig_w, pack_map)}:')
                 for s in body:
-                    _emit_stmt(s, lines, sig_w, indent + 2, pack_map, nba_sigs)
+                    _emit_stmt(s, lines, sig_w, indent + 2, pack_map, nba_sigs, nba_locals)
                 lines.append(f'{pad}        break;')
             if stmt.default:
                 lines.append(f'{pad}    default:')
                 for s in stmt.default:
-                    _emit_stmt(s, lines, sig_w, indent + 2, pack_map, nba_sigs)
+                    _emit_stmt(s, lines, sig_w, indent + 2, pack_map, nba_sigs, nba_locals)
                 lines.append(f'{pad}        break;')
             lines.append(f'{pad}}}')
 
 
-def _emit_stmts_batched(stmts, lines, sig_w, indent=1, pack_map=None, nba_sigs=None):
-    """Emit statements, merging consecutive top-level packed writes to the same word.
-
-    When multiple consecutive Assign statements write to 1-bit signals that
-    share the same pack word, they are collapsed into a single read-modify-write
-    instead of N separate RMW operations.
-    """
+def _emit_stmts_batched(stmts, lines, sig_w, indent=1, pack_map=None, nba_sigs=None, nba_locals=None):
+    """Emit statements, merging consecutive top-level packed writes to the same word."""
     pad = '    ' * indent
-    pending: dict = {}   # word_name → [(bit, val_expr_str)]
-    pending_order: list = []  # word names in insertion order
+    pending: dict = {}
+    pending_order: list = []
 
     def _flush():
         for word in pending_order:
@@ -799,7 +799,7 @@ def _emit_stmts_batched(stmts, lines, sig_w, indent=1, pack_map=None, nba_sigs=N
             pending.setdefault(word, []).append((bit, val))
         else:
             _flush()
-            _emit_stmt(stmt, lines, sig_w, indent, pack_map, nba_sigs)
+            _emit_stmt(stmt, lines, sig_w, indent, pack_map, nba_sigs, nba_locals)
     _flush()
 
 
@@ -1350,12 +1350,53 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
     # Called only when an edge fires — no posedge guard inside.
     # Each edge-group is emitted as a separate noinline function so the
     # compiler can optimize each always-block independently.
+
+    def _collect_sig_reads(stmts) -> set:
+        """Recursively collect all Sig names read in stmts."""
+        from .ir import Expr, Sig as _Sig, Assign, SliceAssign, If, ForLoop, Repeat, Case, MemWrite
+        import dataclasses
+        reads = set()
+        def _walk_expr(node):
+            if isinstance(node, _Sig):
+                reads.add(node.name)
+            elif dataclasses.is_dataclass(node):
+                for f in dataclasses.fields(node):
+                    v = getattr(node, f.name)
+                    if isinstance(v, Expr): _walk_expr(v)
+                    elif isinstance(v, list):
+                        for item in v:
+                            if isinstance(item, Expr): _walk_expr(item)
+        def _walk_stmt(s):
+            if isinstance(s, (Assign, SliceAssign)):
+                _walk_expr(s.value)
+                if isinstance(s, SliceAssign): _walk_expr(s.hi); _walk_expr(s.lo)
+            elif isinstance(s, If):
+                _walk_expr(s.cond)
+                for c in s.then_body: _walk_stmt(c)
+                for c in (s.else_body or []): _walk_stmt(c)
+            elif isinstance(s, (ForLoop, Repeat)):
+                for c in s.body: _walk_stmt(c)
+            elif isinstance(s, Case):
+                _walk_expr(s.sel)
+                for _val, body in s.cases:
+                    for c in body: _walk_stmt(c)
+                for c in (s.default or []): _walk_stmt(c)
+            elif isinstance(s, MemWrite):
+                _walk_expr(s.addr); _walk_expr(s.data)
+        for s in stmts: _walk_stmt(s)
+        return reads
+
     seq_group_fns = []
     for _seq_gi, ((edge_kind, clk), block_ids) in enumerate(sorted(edge_blocks.items())):
         fn_name = f'_seq_{_seq_gi}'
         seq_group_fns.append(fn_name)
+        # Only declare promoted locals actually read by this group's seq blocks
+        all_reads = set()
+        for idx in block_ids:
+            all_reads |= _collect_sig_reads(ir.seq_blocks[idx].stmts)
+        needed_locals = promoted_locals & all_reads
         lines.append(f'__attribute__((noinline)) static void {fn_name}(State* __restrict s) {{')
-        for name in sorted(promoted_locals):
+        for name in sorted(needed_locals):
             w = all_sigs[name]
             lines.append(f'    {_ctype(w)} {name} = 0;')
         if coverage:
@@ -1363,19 +1404,27 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
         group_nba = set()
         for idx in block_ids:
             group_nba |= nba_per_seq[idx]
+        # Declare NBA temporaries as locals (initialized from struct) — no struct pre-write
         for name in sorted(group_nba):
+            w = all_sigs.get(name, 32)
             src = _pack_read(name, pack_map) if name in pack_map else f's->{name}'
-            lines.append(f'    s->_nba_{name} = {src};')
+            lines.append(f'    {_ctype(w)} _nba_{name} = {src};')
+        # Temporarily restrict _c_locals to only the needed locals for this seq fn
+        _c_locals.clear()
+        _c_locals.update(needed_locals)
         for idx in block_ids:
             body = []
             _emit_stmts_batched(ir.seq_blocks[idx].stmts, body, sig_w,
-                                pack_map=pack_map, nba_sigs=nba_sigs)
+                                pack_map=pack_map, nba_sigs=nba_sigs, nba_locals=group_nba)
             lines.extend('    ' + ln for ln in body)
+        _c_locals.clear()
+        _c_locals.update(promoted_locals)
+        # Write locals back to struct
         for name in sorted(group_nba):
             if name in pack_map:
-                lines.append(f'    {_pack_write(name, f"s->_nba_{name}", pack_map)}')
+                lines.append(f'    {_pack_write(name, f"_nba_{name}", pack_map)}')
             else:
-                lines.append(f'    s->{name} = s->_nba_{name};')
+                lines.append(f'    s->{name} = _nba_{name};')
         if coverage and fsm_n_states > 0 and '_fsm_state' in group_nba:
             lines.append(f'    _cov_fsm_trans[_cov_fsm_prev * {fsm_n_states} + s->_fsm_state] = 1;')
             lines.append(f'    _cov_fsm_visited |= (1ULL << s->_fsm_state);')
