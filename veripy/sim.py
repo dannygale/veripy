@@ -387,6 +387,36 @@ class SimEngine:
         if self._vcd:
             self._vcd.record(self.time)
 
+    @classmethod
+    def compile(cls, module):
+        """Return a compiled engine backed by a Cython-compiled model of *module*.
+
+        Compiles the module through the cysim pipeline (cached by content hash)
+        and returns an object with the same API as SimEngine.
+        """
+        from .backend_csim import compile_cysim
+        name = type(module).__name__.lower()
+        ctx = compile_cysim(module, name)
+        ctx.__enter__()
+        return _CompiledEngine(ctx)
+
+
+class _CompiledEngine:
+    """Thin wrapper around CySimEngine that keeps the _CySimContext alive."""
+
+    def __init__(self, ctx):
+        self._ctx = ctx
+        self._engine = ctx.engine()
+
+    def __getattr__(self, name):
+        return getattr(self._engine, name)
+
+    def __del__(self):
+        try:
+            self._ctx.__exit__(None, None, None)
+        except Exception:
+            pass
+
 
 class BehavioralSim:
     """Fast behavioral simulator that runs @self.behavioral functions.
