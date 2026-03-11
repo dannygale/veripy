@@ -2,9 +2,9 @@
 
 ## Project overview
 
-VeriPy is a Python HDL framework. One Python source file produces both a behavioral simulation (runs natively in Python) and synthesizable Verilog output. The goal is to write hardware once and verify it through dual-path testing — the same test runs against both the Python sim and the generated Verilog (via iverilog).
+VeriPy is a Python HDL framework. One Python source file produces both a behavioral simulation (runs natively in Python) and synthesizable Verilog output. The goal is to write hardware once and verify it through multi-tier testing — the same test runs against functional, cycle-accurate, and RTL models, all compiled to native C via the cysim backend.
 
-A native C simulation backend (`csim`) compiles the IR to C for near-Verilator performance with much faster compile times. A Verilator co-simulation backend wraps Verilator-compiled models for Python-driven testing.
+A native C simulation backend (`csim`) compiles the IR to C for near-Verilator performance with much faster compile times. The `cysim` backend wraps csim in a Cython-compiled event loop for 40-120× speedup over Python simulation. A Verilator co-simulation backend wraps Verilator-compiled models for Python-driven testing.
 
 ## Key directories
 
@@ -23,13 +23,13 @@ veripy/
 │   ├── dce.py        # Dead code elimination and constant propagation
 │   ├── backend_verilog.py  # IR → Verilog emission
 │   ├── emit_verilog.py     # Verilog formatting helpers
-│   ├── backend_csim.py     # IR → C emission, CSimModel ctypes wrapper, native TB
+│   ├── backend_csim.py     # IR → C emission, CSimModel ctypes wrapper, CySimEngine Cython wrapper
 │   ├── backend_verilator.py # Verilator wrapper, native TB compilation
 │   ├── backend_formal.py   # SymbiYosys .sby generation
 │   ├── backend_equiv.py    # Yosys equivalence checking script generation
 │   ├── backend_wgpu.py     # WebGPU batch-parallel simulation
 │   ├── sim.py        # SimEngine, reactive yields (until), fork/join
-│   ├── verify.py     # TestBench, BehavioralTestCase, VeripyTestCase: multi-backend testing
+│   ├── verify.py     # TestBench, free-standing @initial/@always, self.dut signal namespace
 │   ├── firmware_test.py  # FirmwareTestCase: ELF-based CPU/SoC testing
 │   ├── rand.py       # Constrained random (Rand, Range)
 │   ├── driver.py     # Protocol driver base class
@@ -72,6 +72,9 @@ veripy/
 # Run full test suite (slow — run once, not repeatedly)
 python -m unittest discover -s tests -v 2>&1 | grep -E "^(FAIL|ERROR|OK|Ran )|^(FAIL|ERROR): "
 
+# Run example tests (fast — cysim default)
+veripy test examples/
+
 # Build Verilog from a module
 veripy build <file.py>
 
@@ -88,13 +91,14 @@ python benchmarks/stress_test.py
 
 All 1002+ tests must pass before committing.
 
-## C simulation backend (csim)
+## C simulation backend (csim / cysim)
 
 The csim backend in `backend_csim.py` compiles flat IR to C:
 
 - `emit_c(ir)` — generates a C source file with `State` struct, comb/seq block functions, `veripy_eval()`, and per-signal `veripy_set_*/veripy_get_*` API
-- `emit_tb_c(tb_ir, model_c_src, model_ir=)` — lowers testbench IR to C, produces a standalone `run_bench()` entry point
-- `compile_bench(module, tb_ir, name)` — end-to-end: lower → flatten → topo_sort → emit_c → emit_tb_c → cc -O2 → ctypes load
+- `emit_c_header(ir)` — generates a C header with reg getters, mem API, assert/trace declarations
+- `emit_cysim_pyx(ir)` — generates Cython wrapper: `CySimModel` (direct C calls), `CySimEngine` (compiled event loop with inlined clock)
+- `compile_cysim(module, name)` — full pipeline: emit_c → emit_header → emit_pyx → cythonize → cc → .so (SHA256 content-hash cached)
 - `CSimModel` — ctypes wrapper for driving compiled models from Python
 
 Key optimizations implemented:
@@ -128,14 +132,11 @@ See `benchmarks/BASELINES.md` for current performance numbers.
 - **Signal types**: `Input`, `Output`, `Register`, `Signal` are the wire types. `_Expr` is a lazy expression from operators — not instantiated directly.
 - **Width inference**: The lowerer infers widths from RHS expressions in @comb blocks. Only declare `Register(width)` for locals when the RHS references other locals.
 - **Pipelines**: Lambda-chain for simple cases, `pipe.stage('name', stall, flush, field=source)` for CPU-style pipelines.
-- **Testing**: Four test case classes for different needs. Don't add tests unless the work requires them.
-  - `TestBench` — functional tests with multi-backend comparison (behavioral + csim by default). Subclass, implement `create_module()`, write `test_*` methods.
-  - `BehavioralTestCase` — combinational/intent tests, pure Python, no clock. `set()` evaluates immediately.
+- **Testing**: Two test case classes for different needs. Don't add tests unless the work requires them.
+  - `TestBench` — multi-tier tests (functional/cycle/rtl) with cysim backend by default. Subclass, implement `create_module()`, write `test_*` methods. Use `self.dut` for signal access (`dut.reset = 0` sets, `dut.count` reads). Use free-standing `@initial`/`@always` decorators.
   - `FirmwareTestCase` — ELF-based CPU/SoC tests. `load_elf()`, `run_until_halt()`, `run_arch_suite()`.
-  - `VeripyTestCase` — legacy alias for `TestBench` with `backend='all'`.
-  - Use `self.clock(name, period)` instead of `@self.always` clock boilerplate.
-  - Use `self.peripheral(fn)` for memory/bus callbacks that work in both behavioral and RTL replay.
-  - Use `@self.run_testbench(clock, period)` for linear coroutine style.
+  - Use `self.clock(name, period)` instead of manual clock boilerplate.
+  - Use `self.run_cycles(n)` for pure-C batch execution.
   - Reactive helpers: `yield until(lambda: cond)`, `self.fork()`, `self.fork_any()`.
   - See [docs/testing.md](docs/testing.md) for full details.
 - **Minimal code**: Follow existing patterns. Don't over-abstract. Explicit wiring over magic.

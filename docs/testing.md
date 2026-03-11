@@ -2,111 +2,151 @@
 
 ## Test Case Types
 
-VeriPy provides four test case classes for different testing needs:
+VeriPy provides two test case classes for different testing needs:
 
 | Class | Purpose | Backend |
 |---|---|---|
-| `TestBench` | Functional tests with multi-backend comparison | csim (default) |
-| `VeripyTestCase` | Same as `TestBench` with `backend='all'` | all backends |
-| `BehavioralTestCase` | Combinational / intent tests, no timing | Python only |
+| `TestBench` | Multi-tier tests (functional/cycle/RTL) with cross-checking | cysim (default) |
 | `FirmwareTestCase` | ELF-based CPU / SoC tests | behavioral + csim |
 
 ---
 
 ## TestBench — Functional Testing
 
-Write one test, verify Python simulation and RTL produce identical outputs:
+Write one test, verify all model tiers produce identical outputs:
 
 ```python
-from veripy import TestBench
+from veripy.verify import TestBench, initial
 
 class TestCounter(TestBench):
     def create_module(self):
         return counter(width=4)
 
     def test_counting(self):
+        dut = self.dut
         self.clock('clock', period=10)
 
-        @self.initial
+        @initial
         def stimulus():
-            self.set(reset=1, enable=1)
+            dut.reset = 1; dut.enable = 1
             yield 10
-            self.assertEqual(self.out('count'), 0)
-            self.set(reset=0)
+            assert dut.count == 0
+            dut.reset = 0
             for _ in range(5):
                 yield 10
-            self.assertEqual(self.out('count'), 5)
+            assert dut.count == 5
 ```
 
-Or use the linear coroutine style with `run_testbench`:
+### Signal Namespace — `self.dut`
+
+`self.dut` provides a clean signal namespace for tests:
 
 ```python
-    def test_counting(self):
-        @self.run_testbench(clock='clock', period=10)
-        def run():
-            self.set(reset=1, enable=1)
-            yield 10
-            self.assertEqual(self.out('count'), 0)
-            self.set(reset=0)
-            for _ in range(5):
-                yield 10
-            self.assertEqual(self.out('count'), 5)
+dut = self.dut
+dut.reset = 1          # sets input signal (calls self.set('reset', 1))
+dut.enable = 0         # sets input signal
+val = dut.count        # reads output signal value (int)
+assert dut.count == 5  # compare directly
 ```
 
-`@self.run_testbench(clock, period)` registers the clock and runs the simulation — no separate `@self.always` clock block needed.
+In cysim mode, `dut.reset = 1` calls `CySimModel.set('reset', 1)` directly — no Python simulation overhead.
+
+### Free-Standing Decorators
+
+Use `@initial` and `@always` as free-standing decorators (not `@self.initial`):
+
+```python
+from veripy.verify import TestBench, initial, always
+
+class TestMyModule(TestBench):
+    def test_something(self):
+        dut = self.dut
+        self.clock('clock', 10)
+
+        @initial
+        def stimulus():
+            dut.reset = 1
+            yield 10
+            dut.reset = 0
+```
+
+These use thread-local context to find the current `TestBench` instance. Imported from `veripy.verify` or `veripy`.
 
 ### TestBench API
 
 ```python
+self.dut                         # signal namespace (dut.x = val sets, dut.x reads)
 self.clock(name, period=10)      # register a clock driver
-self.set(**kwargs)               # set input signal values
-self.out(name)                   # read output and record for comparison
-self.get(name)                   # read signal (works in peripheral callbacks too)
 self.module                      # direct access to the module under test
-self.run_sim()                   # run the simulation
+self.run_sim()                   # run the simulation (auto-called by wrapper)
+self.run_cycles(n)               # run N clock cycles in pure compiled C
+self.set(**kwargs)               # set input signals (bulk, e.g. self.set(a=1, b=2))
+self.get(name)                   # read signal value
 self.reset()                     # reset module and engine (fresh state)
-self.run_testbench(clock, period) # decorator: clock + initial + run_sim in one
 self.peripheral(fn)              # register a memory/bus callback (see below)
 self.fork(*fns)                  # parallel blocks, wait for all
 self.fork_any(*fns)              # parallel blocks, wait for first
 self.coverage_report()           # [(name, hit_count)] for cover points
 ```
 
+### Batch Execution — `run_cycles()`
+
+For performance-critical tests, `run_cycles(n)` runs N full clock cycles entirely
+in compiled C with no Python interaction:
+
+```python
+def test_long_run(self):
+    dut = self.dut
+    self.clock('clock', 10)
+
+    @initial
+    def stim():
+        dut.reset = 1
+        yield 10
+        dut.reset = 0; dut.enable = 1
+        self.run_cycles(100000)    # 100k cycles in pure C
+        assert dut.count == 100000 & 0xF
+```
+
 ### Peripheral Callbacks
 
 For modules with external memory or bus interfaces (e.g. a CPU pipeline), register
-a `peripheral` callback that fires every time unit during behavioral sim and after
-every `model.eval()` during RTL replay:
+a `peripheral` callback that fires every time unit during simulation:
 
 ```python
 class TestPipeline(TestBench):
     def create_module(self): return Pipeline(reset_pc=0)
 
     def test_addi(self):
+        dut = self.dut
         imem = {0: encode_i(42, 0, 0, 1, OP_IMM)}
+        self.clock('clock', 10)
 
         @self.peripheral
         def memory():
             addr = self.get('imem_addr') & ~3
             self.set(imem_data=imem.get(addr, NOP))
 
-        @self.run_testbench(clock='clock', period=10)
-        def run():
+        @initial
+        def stim():
+            dut.reset = 1
+            yield 10
+            dut.reset = 0
             yield 60
-            self.assertEqual(self.out('rd1'), 42)
+            assert dut.rd1 == 42
 ```
 
-The peripheral function uses `self.get()` to read signals and `self.set()` to write
-them. During RTL replay, these are automatically redirected to the compiled model.
+The peripheral function uses `self.get()` and `self.set()` for signal access.
+During cysim execution, these are automatically redirected to the compiled model.
 
 ### Controlling Backends
 
 ```python
 class TestMyModule(TestBench):
-    backend = 'check'      # behavioral + csim (default)
-    # backend = 'fast'     # csim only
-    # backend = 'thorough' # csim + iverilog
-    # backend = 'all'      # all backends
+    backend = 'cysim'      # Cython-compiled direct execution (default)
+    # backend = 'behavioral' # Python sim only
+    # backend = 'check'     # behavioral + csim, cross-check outputs
+    # backend = 'all'       # all backends
     SKIP_CSIM = True       # skip csim for this class
     USE_VERILATOR = True   # enable Verilator backend
     vcd_on_fail = True     # dump VCD when any assertion fails
@@ -129,7 +169,7 @@ $ veripy test tests/ -v
 
 When a module defines multiple simulation layers (`@functional`, `@cycle`, RTL),
 `TestBench` automatically runs the test against each available layer and
-cross-checks outputs at every `set()`/`out()` boundary.
+cross-checks outputs at every observation point.
 
 **Model fidelity order:** `functional` < `cycle` < `rtl`
 
@@ -167,34 +207,26 @@ Or via environment variable: `VERIPY_MODEL=rtl veripy test`.
 
 #### Cross-check
 
-When multiple models run, outputs recorded via `self.out()` are compared across
-all models. A mismatch fails the test with a diff showing which model diverged.
+When multiple models run, outputs are compared across all models at every sampled
+time point. A mismatch fails the test with a diff showing which model diverged.
 
 ---
 
-## BehavioralTestCase — Combinational / Intent Testing
+## Cysim — Cython-Compiled Simulation
 
-For combinational modules or pure behavioral models — no clock, no timing, just
-set inputs and check outputs:
+The cysim backend is the default for `TestBench`. It compiles your module's IR to C
+(via csim), then wraps it in a Cython-compiled event loop (`CySimEngine`) that runs
+the entire simulation — scheduling, eval, time advance — in native C.
 
-```python
-from veripy import BehavioralTestCase
-from src.alu import alu, ADD, SUB
+Performance vs Python simulation:
+- **yield-per-cycle**: ~40× faster (event loop in C, Python yields each cycle)
+- **run_cycles()**: ~120× faster (entire batch in C, no Python interaction)
 
-class TestAlu(BehavioralTestCase):
-    def create_module(self): return alu()
+Cysim compiles on first use and caches the `.so` by content hash. Subsequent runs
+skip compilation entirely.
 
-    def test_add(self):
-        self.set(op=ADD, a=3, b=4)
-        self.assertEqual(self.out('result'), 7)
-
-    def test_sub(self):
-        self.set(op=SUB, a=10, b=3)
-        self.assertEqual(self.out('result'), 7)
-```
-
-`set()` evaluates comb and `@behavioral` blocks immediately. No `yield`, no
-`run_sim()`. Runs in pure Python — fast and simple.
+For combinational-only testing (no clock, no timing), use the `@functional` model
+tier — it evaluates instantly in Python without needing a simulation engine.
 
 ---
 

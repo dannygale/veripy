@@ -4,7 +4,7 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from veripy import module, Input, Output, Register, posedge
+from veripy import module, Input, Output, OutputReg, Register, posedge
 from veripy.context import comb, always, functional, cycle
 
 
@@ -13,8 +13,7 @@ def counter(n=8):
     clock   = Input()
     reset   = Input()
     enable  = Input()
-    count   = Output(n)
-    cnt     = Register(n)
+    count   = OutputReg(n)
 
     mask = (1 << int(n)) - 1
 
@@ -25,24 +24,20 @@ def counter(n=8):
         elif reset._val:
             count._val = 0
 
-    @cycle(posedge(clock), init=dict(c=0))
-    def cycle_model(c):
-        count._val = c
+    @cycle(posedge(clock), init=dict(s=[0]))
+    def cycle_model(s):
         if reset._val:
-            c = 0
+            s[0] = 0
         elif enable._val:
-            c = (c + 1) & mask
-
-    @comb
-    def drive_output():
-        count = cnt
+            s[0] = (s[0] + 1) & mask
+        count._val = s[0]
 
     @always(posedge(clock))
     def increment():
         if reset:
-            cnt = 0
+            count = 0
         elif enable:
-            cnt = cnt + 1
+            count += 1
 
 
 # ── Inline TestBench ─────────────────────────────────────────────────

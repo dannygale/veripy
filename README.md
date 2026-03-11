@@ -61,27 +61,28 @@ class Counter(Module):
 Both APIs produce identical simulation results and Verilog output. Use whichever you prefer — `@module` is more concise, the class-based API gives full control over `__init__`.
 
 ```python
-from veripy import VeripyTestCase
+from veripy.verify import TestBench, initial
 
-class TestCounter(VeripyTestCase):
+class TestCounter(TestBench):
     def create_module(self):
         return counter(width=4)       # or Counter(width=4)
 
     def test_counting(self):
+        dut = self.dut
         self.clock('clock', period=10)
 
-        @self.initial
+        @initial
         def stimulus():
-            self.set(reset=1, enable=1)
+            dut.reset = 1; dut.enable = 1
             yield 10
-            self.assertEqual(self.out('count'), 0)
-            self.set(reset=0)
+            assert dut.count == 0
+            dut.reset = 0
             for _ in range(5):
                 yield 10
-            self.assertEqual(self.out('count'), 5)
+            assert dut.count == 5
 ```
 
-Each `test_*` method automatically runs against up to five backends — Python simulation, iverilog, native C simulation (csim flat and hierarchical), and optionally Verilator — all outputs are compared cycle-by-cycle.
+Each `test_*` method automatically runs against all available model tiers (functional, cycle, RTL) on the cysim backend — a Cython-compiled C simulation — and cross-checks that all models produce identical outputs.
 
 ## Installation
 
@@ -94,28 +95,41 @@ pip install -e .
 ## CLI
 
 ```
-veripy build <file.py>              # emit Verilog (compile-checked via iverilog)
-veripy build <file.py> -o out/      # write .v files to a directory
-veripy build <file.py> -p width=4   # pass parameters
-veripy test [path] [-v]             # dual-path test suite
-veripy check <file.py>              # behavioral vs RTL equivalence (requires hypothesis)
-veripy import <file.v>              # convert Verilog → VeriPy Python
-veripy import rtl/ -o src/          # convert entire project
-veripy lint <file.py>               # static checks
-veripy formal <file.py>             # emit .sby + Verilog for SymbiYosys
-veripy equiv gold.py gate.py        # formal equivalence checking (Yosys)
-veripy profile tests/test_foo.py    # compare backend performance
-veripy doc <file.py>                # generate markdown documentation
-veripy ip list                      # list installed IP packages
-veripy ip init <name>               # scaffold a new IP package
-veripy init                         # scaffold a new project with veripy.toml
+design:
+  veripy build [file.py]            # emit Verilog (compile-checked via iverilog)
+  veripy lint [file.py]             # static checks
+  veripy doc [file.py]              # generate markdown documentation
+  veripy graph <file.py>            # emit DOT block diagram of module hierarchy
+  veripy stats <file.py>            # print design statistics
+
+verification:
+  veripy test [path] [-v] [-j]      # run test suite (cysim default)
+  veripy check [file.py]            # behavioral vs RTL equivalence (Hypothesis)
+  veripy formal [file.py]           # emit .sby + Verilog for SymbiYosys
+  veripy equiv gold.py gate.py      # formal equivalence checking (Yosys)
+  veripy profile <test_file.py>     # compare backend performance
+
+targets:
+  veripy fpga build [file.py]       # synthesize to FPGA bitstream
+  veripy soc build <config.yaml>    # build SoC from config
+
+project:
+  veripy init <name>                # scaffold a new project with veripy.toml
+  veripy ip list|init <name>        # manage IP packages
+  veripy import <file.v>            # convert Verilog → VeriPy Python
+  veripy run <script.py>            # run script with project on sys.path
 ```
+
+Commands marked `[file.py]` are optional when `veripy.toml` is present.
 
 ## Features
 
-- **Multi-tier testing** — `TestBench` (functional + multi-backend), `BehavioralTestCase` (combinational/intent), `FirmwareTestCase` (ELF/CPU) ([docs](docs/testing.md))
+- **Multi-tier testing** — `TestBench` runs each test against all model tiers (functional, cycle, RTL) and cross-checks outputs. `FirmwareTestCase` for ELF/CPU tests ([docs](docs/testing.md))
+- **Cython-compiled simulation (cysim)** — default backend: Cython-compiled event loop with direct C model execution, 40-120× faster than Python sim ([docs](docs/testing.md#cysim))
+- **Signal namespace** — `self.dut` for clean test syntax: `dut.reset = 0` sets, `dut.count` reads ([docs](docs/testing.md#testbench--functional-testing))
+- **Batch execution** — `self.run_cycles(n)` runs N clock cycles entirely in compiled C ([docs](docs/testing.md#testbench-api))
 - **Behavioral ↔ RTL equivalence** — `veripy check` fuzzes `@behavioral` vs RTL automatically via Hypothesis ([docs](docs/testing.md#behavioral--rtl-equivalence-checking))
-- **Native C simulation** — csim backend compiles IR to C for near-Verilator speed with sub-second compile times
+- **Native C simulation (csim)** — csim backend compiles IR to C for near-Verilator speed with sub-second compile times
 - **Signal types** — `Input`, `Output`, `Register`, `Signal`, `Mem`, bit slicing, concatenation ([docs](docs/signals.md))
 - **Lazy expressions** — signal operators return composable `_Expr` objects with width tracking ([docs](docs/signals.md#operators))
 - **Parameters** — `Parameter`, `ParamExpr`, `clog2()` for parametric widths with Verilog emission ([docs](docs/signals.md#parameters-and-parametric-widths))
@@ -165,7 +179,7 @@ veripy init                         # scaffold a new project with veripy.toml
 - **[Guide](docs/guide.md)** — `@module` tutorial: signals, logic blocks, parameters, sub-modules, FSM, pipelines, formal, timing, interfaces
 - **[Class-based API](docs/class-api.md)** — the `Module` base class for advanced use cases
 - **[Signals](docs/signals.md)** — signal types, operations, slicing, memory arrays, parameters
-- **[Testing](docs/testing.md)** — multi-backend testing, SimEngine, VCD waveforms, csim
+- **[Testing](docs/testing.md)** — multi-tier testing, SimEngine, VCD waveforms, cysim, protocol drivers
 - **[Verilog](docs/verilog.md)** — import, export, emission, lint
 - **[Equivalence Checking](docs/equiv.md)** — formal equivalence via Yosys equiv_check
 - **[GPU Simulation](docs/gpu.md)** — WGPU backend, batch-parallel verification, flattening
