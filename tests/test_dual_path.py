@@ -3,7 +3,8 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from veripy import Module, Input, Output, Register, VeripyTestCase
+from veripy import Module, Input, Output, Register
+from veripy.verify import TestBench, initial
 
 
 class Counter(Module):
@@ -77,172 +78,98 @@ class ForwardMux(Module):
                 self.fwd_sel = 0
 
 
-# --- Dual-path tests ---
-
-class TestCounter(VeripyTestCase):
-    def create_module(self):
-        return Counter(4)
+class TestCounter(TestBench):
+    def create_module(self): return Counter(4)
 
     def test_reset_then_count(self):
-        @self.always
-        def clock():
-            self.set(clock=0)
-            yield 5
-            self.set(clock=1)
-            yield 5
-
-        @self.initial
-        def stimulus():
-            self.set(reset=1, enable=1)
-            yield 10
-            self.assertEqual(self.out('count'), 0)
-            self.set(reset=0)
-            for _ in range(5):
-                yield 10
-            self.assertEqual(self.out('count'), 5)
-
-        self.run_sim()
+        dut = self.dut; self.clock('clock', 10)
+        @initial
+        def _():
+            dut.reset = 1; dut.enable = 1; yield 10
+            self.assertEqual(self.get('count'), 0)
+            dut.reset = 0
+            for _ in range(5): yield 10
+            self.assertEqual(self.get('count'), 5)
 
     def test_enable_gating(self):
-        @self.always
-        def clock():
-            self.set(clock=0)
-            yield 5
-            self.set(clock=1)
-            yield 5
-
-        @self.initial
-        def stimulus():
-            self.set(reset=1, enable=0)
-            yield 10
-            self.set(reset=0, enable=0)
-            for _ in range(3):
-                yield 10
-            self.assertEqual(self.out('count'), 0)
-            self.set(enable=1)
-            yield 10
-            self.assertEqual(self.out('count'), 1)
-
-        self.run_sim()
+        dut = self.dut; self.clock('clock', 10)
+        @initial
+        def _():
+            dut.reset = 1; dut.enable = 0; yield 10
+            dut.reset = 0
+            for _ in range(3): yield 10
+            self.assertEqual(self.get('count'), 0)
+            dut.enable = 1; yield 10
+            self.assertEqual(self.get('count'), 1)
 
     def test_overflow(self):
-        @self.always
-        def clock():
-            self.set(clock=0)
-            yield 5
-            self.set(clock=1)
-            yield 5
-
-        @self.initial
-        def stimulus():
-            self.set(reset=1, enable=1)
-            yield 10
-            self.set(reset=0)
-            for _ in range(16):
-                yield 10
-            self.assertEqual(self.out('count'), 0)
-
-        self.run_sim()
+        dut = self.dut; self.clock('clock', 10)
+        @initial
+        def _():
+            dut.reset = 1; dut.enable = 1; yield 10
+            dut.reset = 0
+            for _ in range(16): yield 10
+            self.assertEqual(self.get('count'), 0)
 
 
-class TestPipeReg(VeripyTestCase):
-    def create_module(self):
-        return PipeReg(8)
+class TestPipeReg(TestBench):
+    def create_module(self): return PipeReg(8)
 
     def test_capture(self):
-        @self.always
-        def clock():
-            self.set(clock=0)
-            yield 5
-            self.set(clock=1)
-            yield 5
-
-        @self.initial
-        def stimulus():
-            self.set(reset=1, flush=0, stall=0, d=0)
-            yield 10
-            self.assertEqual(self.out('q'), 0)
-            self.set(reset=0, d=0xAB)
-            yield 10
-            self.assertEqual(self.out('q'), 0xAB)
-
-        self.run_sim()
+        dut = self.dut; self.clock('clock', 10)
+        @initial
+        def _():
+            dut.reset = 1; dut.flush = 0; dut.stall = 0; dut.d = 0; yield 10
+            self.assertEqual(self.get('q'), 0)
+            dut.reset = 0; dut.d = 0xAB; yield 10
+            self.assertEqual(self.get('q'), 0xAB)
 
     def test_stall(self):
-        @self.always
-        def clock():
-            self.set(clock=0)
-            yield 5
-            self.set(clock=1)
-            yield 5
-
-        @self.initial
-        def stimulus():
-            self.set(reset=1, flush=0, stall=0, d=0)
-            yield 10
-            self.set(reset=0, d=0x42)
-            yield 10
-            self.assertEqual(self.out('q'), 0x42)
-            self.set(stall=1, d=0xFF)
-            yield 10
-            self.assertEqual(self.out('q'), 0x42)
-
-        self.run_sim()
+        dut = self.dut; self.clock('clock', 10)
+        @initial
+        def _():
+            dut.reset = 1; dut.flush = 0; dut.stall = 0; dut.d = 0; yield 10
+            dut.reset = 0; dut.d = 0x42; yield 10
+            self.assertEqual(self.get('q'), 0x42)
+            dut.stall = 1; dut.d = 0xFF; yield 10
+            self.assertEqual(self.get('q'), 0x42)
 
     def test_flush(self):
-        @self.always
-        def clock():
-            self.set(clock=0)
-            yield 5
-            self.set(clock=1)
-            yield 5
-
-        @self.initial
-        def stimulus():
-            self.set(reset=1, flush=0, stall=0, d=0)
-            yield 10
-            self.set(reset=0, d=0x42)
-            yield 10
-            self.set(flush=1)
-            yield 10
-            self.assertEqual(self.out('q'), 0)
-
-        self.run_sim()
+        dut = self.dut; self.clock('clock', 10)
+        @initial
+        def _():
+            dut.reset = 1; dut.flush = 0; dut.stall = 0; dut.d = 0; yield 10
+            dut.reset = 0; dut.d = 0x42; yield 10
+            dut.flush = 1; yield 10
+            self.assertEqual(self.get('q'), 0)
 
 
-class TestForwardMux(VeripyTestCase):
-    def create_module(self):
-        return ForwardMux(8)
+class TestForwardMux(TestBench):
+    def create_module(self): return ForwardMux(8)
 
     def test_no_forward(self):
-        @self.initial
-        def stimulus():
+        @initial
+        def _():
             self.set(rs_addr=3, ex_rd_addr=5, mem_rd_addr=5,
                      ex_we=0, mem_we=0, reg_val=0x10, ex_val=0xEE, mem_val=0xDD)
             yield 1
-            self.assertEqual(self.out('out'), 0x10)
-            self.assertEqual(self.out('fwd_sel'), 0)
-
-        self.run_sim()
+            self.assertEqual(self.get('out'), 0x10)
+            self.assertEqual(self.get('fwd_sel'), 0)
 
     def test_ex_forward(self):
-        @self.initial
-        def stimulus():
+        @initial
+        def _():
             self.set(rs_addr=3, ex_rd_addr=3, mem_rd_addr=5,
                      ex_we=1, mem_we=0, reg_val=0x10, ex_val=0xEE, mem_val=0xDD)
             yield 1
-            self.assertEqual(self.out('out'), 0xEE)
-            self.assertEqual(self.out('fwd_sel'), 1)
-
-        self.run_sim()
+            self.assertEqual(self.get('out'), 0xEE)
+            self.assertEqual(self.get('fwd_sel'), 1)
 
     def test_ex_priority(self):
-        @self.initial
-        def stimulus():
+        @initial
+        def _():
             self.set(rs_addr=3, ex_rd_addr=3, mem_rd_addr=3,
                      ex_we=1, mem_we=1, reg_val=0x10, ex_val=0xEE, mem_val=0xDD)
             yield 1
-            self.assertEqual(self.out('out'), 0xEE)
-            self.assertEqual(self.out('fwd_sel'), 1)
-
-        self.run_sim()
+            self.assertEqual(self.get('out'), 0xEE)
+            self.assertEqual(self.get('fwd_sel'), 1)

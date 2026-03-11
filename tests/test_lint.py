@@ -110,7 +110,7 @@ class TestUnusedSignal(unittest.TestCase):
 
 class TestCleanModule(unittest.TestCase):
     def test_counter_is_clean(self):
-        from examples.counter import Counter
+        from examples.counter import counter as Counter
         self.assertEqual(lint(Counter(n=4)), [])
 
     def test_cdc_violation(self):

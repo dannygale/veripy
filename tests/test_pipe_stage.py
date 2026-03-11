@@ -4,83 +4,67 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
 from examples.pipe_stage import PipeReg, ForwardMux
-from veripy.sim import SimEngine
+from veripy.verify import TestBench, initial
 
 T = 10
 
 
-class TestPipeRegSim(unittest.TestCase):
+class TestPipeRegSim(TestBench):
+    def create_module(self): return PipeReg(width=8)
+
     def test_reset_clears(self):
-        pr = PipeReg(width=8)
-        sim = SimEngine(pr)
-        sim.clock(pr.clock, T)
-        @sim.initial
+        dut = self.dut; self.clock('clock', T)
+        @initial
         def _():
-            pr.d.set(0xFF); yield T
-            pr.reset.set(1); yield T
-            self.assertEqual(int(pr.q), 0)
-        sim.run()
+            dut.d = 0xFF; yield T
+            dut.reset = 1; yield T
+            self.assertEqual(self.get('q'), 0)
 
     def test_captures_data(self):
-        pr = PipeReg(width=8)
-        sim = SimEngine(pr)
-        sim.clock(pr.clock, T)
-        @sim.initial
+        dut = self.dut; self.clock('clock', T)
+        @initial
         def _():
-            pr.reset.set(1); yield T; pr.reset.set(0)
-            pr.d.set(0xAB); yield T
-            self.assertEqual(int(pr.q), 0xAB)
-        sim.run()
+            dut.reset = 1; yield T; dut.reset = 0
+            dut.d = 0xAB; yield T
+            self.assertEqual(self.get('q'), 0xAB)
 
     def test_stall_freezes(self):
-        pr = PipeReg(width=8)
-        sim = SimEngine(pr)
-        sim.clock(pr.clock, T)
-        @sim.initial
+        dut = self.dut; self.clock('clock', T)
+        @initial
         def _():
-            pr.reset.set(1); yield T; pr.reset.set(0)
-            pr.d.set(0x11); yield T
-            self.assertEqual(int(pr.q), 0x11)
-            pr.stall.set(1); pr.d.set(0x22); yield T
-            self.assertEqual(int(pr.q), 0x11)  # frozen
-        sim.run()
+            dut.reset = 1; yield T; dut.reset = 0
+            dut.d = 0x11; yield T
+            self.assertEqual(self.get('q'), 0x11)
+            dut.stall = 1; dut.d = 0x22; yield T
+            self.assertEqual(self.get('q'), 0x11)
 
     def test_stall_release(self):
-        pr = PipeReg(width=8)
-        sim = SimEngine(pr)
-        sim.clock(pr.clock, T)
-        @sim.initial
+        dut = self.dut; self.clock('clock', T)
+        @initial
         def _():
-            pr.reset.set(1); yield T; pr.reset.set(0)
-            pr.d.set(0x11); pr.stall.set(1); yield T
-            self.assertEqual(int(pr.q), 0)  # stalled
-            pr.stall.set(0); yield T
-            self.assertEqual(int(pr.q), 0x11)
-        sim.run()
+            dut.reset = 1; yield T; dut.reset = 0
+            dut.d = 0x11; dut.stall = 1; yield T
+            self.assertEqual(self.get('q'), 0)
+            dut.stall = 0; yield T
+            self.assertEqual(self.get('q'), 0x11)
 
     def test_flush_clears(self):
-        pr = PipeReg(width=8)
-        sim = SimEngine(pr)
-        sim.clock(pr.clock, T)
-        @sim.initial
+        dut = self.dut; self.clock('clock', T)
+        @initial
         def _():
-            pr.reset.set(1); yield T; pr.reset.set(0)
-            pr.d.set(0xCC); yield T
-            self.assertEqual(int(pr.q), 0xCC)
-            pr.flush.set(1); yield T
-            self.assertEqual(int(pr.q), 0)
-        sim.run()
+            dut.reset = 1; yield T; dut.reset = 0
+            dut.d = 0xCC; yield T
+            self.assertEqual(self.get('q'), 0xCC)
+            dut.flush = 1; yield T
+            self.assertEqual(self.get('q'), 0)
 
     def test_flush_priority_over_data(self):
-        pr = PipeReg(width=8)
-        sim = SimEngine(pr)
-        sim.clock(pr.clock, T)
-        @sim.initial
+        dut = self.dut; self.clock('clock', T)
+        @initial
         def _():
-            pr.reset.set(1); yield T; pr.reset.set(0)
-            pr.d.set(0xFF); pr.flush.set(1); yield T
-            self.assertEqual(int(pr.q), 0)  # flush wins
-        sim.run()
+            dut.reset = 1; yield T; dut.reset = 0
+            dut.d = 0xFF; dut.flush = 1; yield T
+            self.assertEqual(self.get('q'), 0)
 
 
 class TestForwardMuxSim(unittest.TestCase):
@@ -120,14 +104,14 @@ class TestForwardMuxSim(unittest.TestCase):
         fm.ex_we.set(1); fm.mem_we.set(1)
         fm.ex_rd_addr.set(3); fm.mem_rd_addr.set(3)
         fm._settle_comb()
-        self.assertEqual(int(fm.out), 0xEE)  # EX wins
+        self.assertEqual(int(fm.out), 0xEE)
         self.assertEqual(int(fm.fwd_sel), 1)
 
     def test_match_without_we(self):
         fm = self._make()
         fm.ex_rd_addr.set(3); fm.mem_rd_addr.set(3)
         fm._settle_comb()
-        self.assertEqual(int(fm.out), 0x10)  # no forward
+        self.assertEqual(int(fm.out), 0x10)
         self.assertEqual(int(fm.fwd_sel), 0)
 
 
@@ -144,7 +128,7 @@ class TestPipeRegVerilog(unittest.TestCase):
         self.assertIn('input flush', self.v)
         self.assertIn('input stall', self.v)
         self.assertIn('input [15:0] d', self.v)
-        self.assertIn('output [15:0] q', self.v)
+        self.assertIn('[15:0] q', self.v)  # output reg or output
 
     def test_posedge_block(self):
         self.assertIn('always @(posedge clock)', self.v)

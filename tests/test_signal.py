@@ -153,21 +153,23 @@ class TestNegedge(unittest.TestCase):
                 def capture():
                     self.r = self.d
 
-        from veripy.sim import SimEngine
-        m = FallingEdge()
-        sim = SimEngine(m)
+        from veripy.verify import TestBench, initial as _initial
 
-        @sim.initial
-        def stim():
-            m.d._val = 42
-            m.clk._val = 1
-            yield 1
-            # Falling edge: 1 → 0
-            m.clk._val = 0
-            yield 1
+        class _T(TestBench):
+            def create_module(self): return FallingEdge()
+            def test_it(self):
+                dut = self.dut
+                @_initial
+                def stim():
+                    dut.d = 42; dut.clk = 1; yield 1
+                    dut.clk = 0; yield 1
+                self.assertEqual(self.get('q'), 42)
 
-        sim.run()
-        self.assertEqual(int(m.q), 42)
+        import unittest
+        suite = unittest.TestLoader().loadTestsFromName('test_it', _T)
+        result = unittest.TestResult()
+        suite.run(result)
+        self.assertEqual(len(result.failures) + len(result.errors), 0)
 
     def test_negedge_verilog_emission(self):
         from veripy import Module, Input, Output, Register

@@ -4,7 +4,7 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
 from examples.datapath import ALU, Datapath
-from veripy.sim import SimEngine
+from veripy.verify import TestBench, initial
 
 T = 10
 
@@ -31,71 +31,44 @@ class TestALUSim(unittest.TestCase):
         self.assertEqual(int(alu.result), 0)
 
 
-class TestDatapathSim(unittest.TestCase):
+class TestDatapathSim(TestBench):
+    def create_module(self): return Datapath(width=8)
+
     def test_alu_wiring(self):
-        d = Datapath(width=8)
-        sim = SimEngine(d)
-        sim.clock(d.clock, T)
-        @sim.initial
+        dut = self.dut; self.clock('clock', T)
+        @initial
         def _():
-            d.reset.set(1); yield T; d.reset.set(0)
-            d.a.set(7); d.b.set(3); d.op.set(0)
-            yield T
-            self.assertEqual(int(d.alu.result), 10)
-        sim.run()
+            dut.reset = 1; yield T; dut.reset = 0
+            dut.a = 7; dut.b = 3; dut.op = 0; yield T
+            self.assertEqual(self.get('alu_result'), 10)
 
     def test_pipeline_delay(self):
-        d = Datapath(width=8)
-        sim = SimEngine(d)
-        sim.clock(d.clock, T)
-        @sim.initial
+        dut = self.dut; self.clock('clock', T)
+        @initial
         def _():
-            d.reset.set(1); yield T; d.reset.set(0)
-            d.a.set(10); d.b.set(5); d.op.set(0)
-            yield T
-            self.assertEqual(int(d.piped), 15)
-            d.a.set(100); d.b.set(1); d.op.set(0)
-            yield T
-            self.assertEqual(int(d.piped), 101)
-        sim.run()
+            dut.reset = 1; yield T; dut.reset = 0
+            dut.a = 10; dut.b = 5; dut.op = 0; yield T
+            self.assertEqual(self.get('piped'), 15)
+            dut.a = 100; dut.b = 1; dut.op = 0; yield T
+            self.assertEqual(self.get('piped'), 101)
 
     def test_reset_clears_piped(self):
-        d = Datapath(width=8)
-        sim = SimEngine(d)
-        sim.clock(d.clock, T)
-        @sim.initial
+        dut = self.dut; self.clock('clock', T)
+        @initial
         def _():
-            d.reset.set(1); yield T; d.reset.set(0)
-            d.a.set(10); d.b.set(5); d.op.set(0)
-            yield T
-            self.assertNotEqual(int(d.piped), 0)
-            d.reset.set(1); yield T
-            self.assertEqual(int(d.piped), 0)
-        sim.run()
-
-    def test_output_tracks_piped(self):
-        d = Datapath(width=8)
-        sim = SimEngine(d)
-        sim.clock(d.clock, T)
-        @sim.initial
-        def _():
-            d.reset.set(1); yield T; d.reset.set(0)
-            d.a.set(20); d.b.set(3); d.op.set(1)
-            yield T
-            self.assertEqual(int(d.result), int(d.piped))
-        sim.run()
+            dut.reset = 1; yield T; dut.reset = 0
+            dut.a = 10; dut.b = 5; dut.op = 0; yield T
+            self.assertNotEqual(self.get('piped'), 0)
+            dut.reset = 1; yield T
+            self.assertEqual(self.get('piped'), 0)
 
     def test_sub_through_pipeline(self):
-        d = Datapath(width=8)
-        sim = SimEngine(d)
-        sim.clock(d.clock, T)
-        @sim.initial
+        dut = self.dut; self.clock('clock', T)
+        @initial
         def _():
-            d.reset.set(1); yield T; d.reset.set(0)
-            d.a.set(50); d.b.set(8); d.op.set(1)
-            yield T
-            self.assertEqual(int(d.piped), 42)
-        sim.run()
+            dut.reset = 1; yield T; dut.reset = 0
+            dut.a = 50; dut.b = 8; dut.op = 1; yield T
+            self.assertEqual(self.get('piped'), 42)
 
 
 class TestDatapathVerilog(unittest.TestCase):

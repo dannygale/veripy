@@ -4,7 +4,7 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
 from veripy.import_verilog import import_verilog, import_project, _parse_pv as parse
-from veripy.sim import SimEngine
+from veripy.verify import TestBench, initial
 
 T = 10
 
@@ -148,16 +148,22 @@ class TestCodeGen(unittest.TestCase):
         ns = {}
         exec(py, ns)
         Counter = ns['Counter']
-        c = Counter(n=4)
-        sim = SimEngine(c)
-        sim.clock(c.clock, T)
-        @sim.initial
-        def _():
-            c.enable.set(1); c.reset.set(1); yield T; c.reset.set(0)
-            for _ in range(5):
-                yield T
-            self.assertEqual(int(c.count), 5)
-        sim.run()
+
+        class _TB(TestBench):
+            def create_module(self): return Counter(n=4)
+            def test_run(self):
+                dut = self.dut; self.clock('clock', T)
+                @initial
+                def _():
+                    dut.enable = 1; dut.reset = 1; yield T; dut.reset = 0
+                    for _ in range(5): yield T
+                    self.assertEqual(self.get('count'), 5)
+
+        import unittest
+        suite = unittest.TestLoader().loadTestsFromName('test_run', _TB)
+        result = unittest.TestResult()
+        suite.run(result)
+        self.assertEqual(result.errors + result.failures, [], result.errors + result.failures)
 
     def test_hierarchy_generates(self):
         py = import_verilog(HIER_V)
@@ -172,16 +178,23 @@ class TestCodeGen(unittest.TestCase):
         ns = {}
         exec(py, ns)
         Datapath = ns['Datapath']
-        d = Datapath(width=8)
-        sim = SimEngine(d)
-        sim.clock(d.clock, T)
-        @sim.initial
-        def _():
-            d.a.set(10); d.b.set(3); d.op.set(0)
-            d.reset.set(1); yield T; d.reset.set(0)
-            yield T
-            self.assertEqual(int(d.result), 13)
-        sim.run()
+
+        class _TB(TestBench):
+            def create_module(self): return Datapath(width=8)
+            def test_run(self):
+                dut = self.dut; self.clock('clock', T)
+                @initial
+                def _():
+                    dut.a = 10; dut.b = 3; dut.op = 0
+                    dut.reset = 1; yield T; dut.reset = 0
+                    yield T
+                    self.assertEqual(self.get('result'), 13)
+
+        import unittest
+        suite = unittest.TestLoader().loadTestsFromName('test_run', _TB)
+        result = unittest.TestResult()
+        suite.run(result)
+        self.assertEqual(result.errors + result.failures, [], result.errors + result.failures)
 
     def test_instance_wires_not_declared(self):
         py = import_verilog(HIER_V)

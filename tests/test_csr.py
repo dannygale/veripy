@@ -7,7 +7,7 @@ import tempfile
 import subprocess
 from veripy.csr import Field, Reg, RegisterMap
 from veripy import Module
-from veripy.sim import SimEngine
+from veripy.verify import TestBench, initial
 
 
 def _make_rmap():
@@ -108,48 +108,31 @@ class TestToModule(unittest.TestCase):
 
 # ── Simulation via to_module() ───────────────────────────────────────
 
-class TestToModuleSim(unittest.TestCase):
-    def _run(self, stim_fn):
-        mod = _make_rmap().to_module()
-        sim = SimEngine(mod)
-        sim.clock(mod.clock, 10)
-        results = {}
-        sim.initial(lambda: stim_fn(mod, results))
-        sim.run()
-        return mod, results
+class TestToModuleSim(TestBench):
+    def create_module(self): return _make_rmap().to_module()
 
     def test_write_read_roundtrip(self):
-        def stim(s, r):
-            s.reset.set(1); yield 20
-            s.reset.set(0); yield 10
-            # Write 0xAB to ctrl
-            s.bus.awaddr.set(0x00); s.bus.awvalid.set(1)
-            s.bus.wdata.set(0xAB); s.bus.wstrb.set(0xF); s.bus.wvalid.set(1)
-            yield 10
-            s.bus.awvalid.set(0); s.bus.wvalid.set(0); yield 10
-            # Read back
-            s.bus.araddr.set(0x00); s.bus.arvalid.set(1); yield 10
-            r['rdata'] = int(s.bus.rdata)
-            r['rvalid'] = int(s.bus.rvalid)
-
-        _, r = self._run(stim)
-        self.assertEqual(r['rdata'], 0xAB)
-        self.assertEqual(r['rvalid'], 1)
+        dut = self.dut; self.clock('clock', 10)
+        @initial
+        def _():
+            dut.reset = 1; yield 20; dut.reset = 0; yield 10
+            dut.bus_awaddr = 0x00; dut.bus_awvalid = 1
+            dut.bus_wdata = 0xAB; dut.bus_wstrb = 0xF; dut.bus_wvalid = 1
+            yield 10; dut.bus_awvalid = 0; dut.bus_wvalid = 0; yield 10
+            dut.bus_araddr = 0x00; dut.bus_arvalid = 1; yield 10
+            self.assertEqual(self.get('bus_rdata'), 0xAB)
+            self.assertEqual(self.get('bus_rvalid'), 1)
 
     def test_ro_not_writable(self):
-        def stim(s, r):
-            s.reset.set(1); yield 20
-            s.reset.set(0); yield 10
-            s.status.set(0x03); yield 10
-            # Try AXI write to status
-            s.bus.awaddr.set(0x04); s.bus.awvalid.set(1)
-            s.bus.wdata.set(0xFF); s.bus.wstrb.set(0xF); s.bus.wvalid.set(1)
-            yield 10
-            s.bus.awvalid.set(0); s.bus.wvalid.set(0); yield 10
-            r['status'] = int(s.status)
-
-        _, r = self._run(stim)
-        self.assertEqual(r['status'], 0x03)
+        dut = self.dut; self.clock('clock', 10)
+        @initial
+        def _():
+            dut.reset = 1; yield 20; dut.reset = 0; yield 10
+            dut.status = 0x03; yield 10
+            dut.bus_awaddr = 0x04; dut.bus_awvalid = 1
+            dut.bus_wdata = 0xFF; dut.bus_wstrb = 0xF; dut.bus_wvalid = 1
+            yield 10; dut.bus_awvalid = 0; dut.bus_wvalid = 0; yield 10
+            self.assertEqual(self.get('status'), 0x03)
 
 
 # ── to_c_header() ───────────────────────────────────────────────────

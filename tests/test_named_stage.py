@@ -1,20 +1,9 @@
 """Tests for named-stage pipeline API: pipe.stage('name', field=source, ...)."""
 import unittest
 from veripy import Module, Input, Output, Register
-from veripy.sim import SimEngine
+from veripy.verify import TestBench, initial
 
-PERIOD = 10  # clock period for sim.clock()
-
-
-def _run(module, stim_fn):
-    """Helper: clock + run stimulus."""
-    sim = SimEngine(module)
-    sim.clock(module.clk, PERIOD)
-    sim.initial(stim_fn)
-    sim.run()
-
-
-# ── basic register creation and latching ─────────────────────────
+PERIOD = 10
 
 
 class TestNamedStageBasic(unittest.TestCase):
@@ -48,29 +37,6 @@ class TestNamedStageBasic(unittest.TestCase):
         with self.assertRaises(AttributeError):
             _ = m.s0.nonexistent
 
-    def test_latch(self):
-        m = self._make()
-        def stim():
-            m.rst.set(1); m.a.set(10); m.b.set(20)
-            yield PERIOD
-            m.rst.set(0)
-            yield PERIOD
-            self.assertEqual(int(m.s0_a), 10)
-            self.assertEqual(int(m.s0_b), 20)
-        _run(m, stim)
-
-    def test_reset_zeros(self):
-        m = self._make()
-        def stim():
-            m.rst.set(0); m.a.set(42); m.b.set(99)
-            yield PERIOD  # latch values
-            self.assertEqual(int(m.s0_a), 42)
-            m.rst.set(1)
-            yield PERIOD
-            self.assertEqual(int(m.s0_a), 0)
-            self.assertEqual(int(m.s0_b), 0)
-        _run(m, stim)
-
     def test_width_inferred_from_source(self):
         class M(Module):
             def __init__(self):
@@ -86,169 +52,172 @@ class TestNamedStageBasic(unittest.TestCase):
         self.assertEqual(m.s_n.width, 1)
 
 
-# ── stall ────────────────────────────────────────────────────────
+class _NamedStageModule(Module):
+    def __init__(self):
+        self.clk = Input()
+        self.rst = Input()
+        self.a = Input(8)
+        self.b = Input(8)
+        super().__init__()
+        pipe = self.pipeline(self.clk, self.rst)
+        self.s0 = pipe.stage('s0', a=self.a, b=self.b)
 
 
-class TestNamedStageStall(unittest.TestCase):
+class TestNamedStageLatch(TestBench):
+    def create_module(self): return _NamedStageModule()
 
-    def _make(self):
-        class M(Module):
-            def __init__(self):
-                self.clk = Input()
-                self.rst = Input()
-                self.a = Input(8)
-                self.stall = Input()
-                super().__init__()
-                pipe = self.pipeline(self.clk, self.rst)
-                self.s0 = pipe.stage('s0', self.stall, None, a=self.a)
-        return M()
+    def test_latch(self):
+        dut = self.dut; self.clock('clk', PERIOD)
+        @initial
+        def _():
+            dut.rst = 1; dut.a = 10; dut.b = 20; yield PERIOD
+            dut.rst = 0; yield PERIOD
+            self.assertEqual(self.get('s0_a'), 10)
+            self.assertEqual(self.get('s0_b'), 20)
+
+    def test_reset_zeros(self):
+        dut = self.dut; self.clock('clk', PERIOD)
+        @initial
+        def _():
+            dut.rst = 0; dut.a = 42; dut.b = 99; yield PERIOD
+            self.assertEqual(self.get('s0_a'), 42)
+            dut.rst = 1; yield PERIOD
+            self.assertEqual(self.get('s0_a'), 0)
+            self.assertEqual(self.get('s0_b'), 0)
+
+
+class _StallModule(Module):
+    def __init__(self):
+        self.clk = Input()
+        self.rst = Input()
+        self.a = Input(8)
+        self.stall = Input()
+        super().__init__()
+        pipe = self.pipeline(self.clk, self.rst)
+        self.s0 = pipe.stage('s0', self.stall, None, a=self.a)
+
+
+class TestNamedStageStall(TestBench):
+    def create_module(self): return _StallModule()
 
     def test_stall_holds(self):
-        m = self._make()
-        def stim():
-            m.rst.set(1); m.stall.set(0); m.a.set(5)
-            yield PERIOD
-            m.rst.set(0)
-            yield PERIOD
-            self.assertEqual(int(m.s0_a), 5)
-            m.a.set(99); m.stall.set(1)
-            yield PERIOD
-            self.assertEqual(int(m.s0_a), 5)  # held
-        _run(m, stim)
+        dut = self.dut; self.clock('clk', PERIOD)
+        @initial
+        def _():
+            dut.rst = 1; dut.stall = 0; dut.a = 5; yield PERIOD
+            dut.rst = 0; yield PERIOD
+            self.assertEqual(self.get('s0_a'), 5)
+            dut.a = 99; dut.stall = 1; yield PERIOD
+            self.assertEqual(self.get('s0_a'), 5)
 
     def test_stall_release(self):
-        m = self._make()
-        def stim():
-            m.rst.set(1); m.stall.set(0); m.a.set(5)
-            yield PERIOD
-            m.rst.set(0)
-            yield PERIOD
-            m.a.set(99); m.stall.set(1)
-            yield PERIOD
-            self.assertEqual(int(m.s0_a), 5)
-            m.stall.set(0)
-            yield PERIOD
-            self.assertEqual(int(m.s0_a), 99)
-        _run(m, stim)
+        dut = self.dut; self.clock('clk', PERIOD)
+        @initial
+        def _():
+            dut.rst = 1; dut.stall = 0; dut.a = 5; yield PERIOD
+            dut.rst = 0; yield PERIOD
+            dut.a = 99; dut.stall = 1; yield PERIOD
+            self.assertEqual(self.get('s0_a'), 5)
+            dut.stall = 0; yield PERIOD
+            self.assertEqual(self.get('s0_a'), 99)
 
 
-# ── flush ────────────────────────────────────────────────────────
+class _FlushModule(Module):
+    def __init__(self):
+        self.clk = Input()
+        self.rst = Input()
+        self.a = Input(8)
+        self.flush = Input()
+        super().__init__()
+        pipe = self.pipeline(self.clk, self.rst)
+        self.s0 = pipe.stage('s0', None, self.flush, a=self.a)
 
 
-class TestNamedStageFlush(unittest.TestCase):
+class TestNamedStageFlush(TestBench):
+    def create_module(self): return _FlushModule()
 
     def test_flush_zeros(self):
-        class M(Module):
-            def __init__(self):
-                self.clk = Input()
-                self.rst = Input()
-                self.a = Input(8)
-                self.flush = Input()
-                super().__init__()
-                pipe = self.pipeline(self.clk, self.rst)
-                self.s0 = pipe.stage('s0', None, self.flush, a=self.a)
-        m = M()
-        def stim():
-            m.rst.set(1); m.flush.set(0); m.a.set(42)
-            yield PERIOD
-            m.rst.set(0)
-            yield PERIOD
-            self.assertEqual(int(m.s0_a), 42)
-            m.flush.set(1)
-            yield PERIOD
-            self.assertEqual(int(m.s0_a), 0)
-        _run(m, stim)
+        dut = self.dut; self.clock('clk', PERIOD)
+        @initial
+        def _():
+            dut.rst = 1; dut.flush = 0; dut.a = 42; yield PERIOD
+            dut.rst = 0; yield PERIOD
+            self.assertEqual(self.get('s0_a'), 42)
+            dut.flush = 1; yield PERIOD
+            self.assertEqual(self.get('s0_a'), 0)
 
 
-# ── multi-stage with cross-stage references ──────────────────────
+class _TwoStageModule(Module):
+    def __init__(self):
+        self.clk = Input()
+        self.rst = Input()
+        self.a = Input(8)
+        self.stall = Input()
+        super().__init__()
+        pipe = self.pipeline(self.clk, self.rst)
+        self.s0 = pipe.stage('s0', a=self.a)
+        self.s1 = pipe.stage('s1', self.stall, None, a=self.s0.a)
 
 
-class TestNamedStageMultiStage(unittest.TestCase):
-
-    def _make(self):
-        class M(Module):
-            def __init__(self):
-                self.clk = Input()
-                self.rst = Input()
-                self.a = Input(8)
-                self.stall = Input()
-                super().__init__()
-                pipe = self.pipeline(self.clk, self.rst)
-                self.s0 = pipe.stage('s0', a=self.a)
-                self.s1 = pipe.stage('s1', self.stall, None,
-                                     a=self.s0.a)
-        return M()
+class TestNamedStageMultiStage(TestBench):
+    def create_module(self): return _TwoStageModule()
 
     def test_two_stage_latency(self):
-        """Data takes two cycles to propagate through two stages."""
-        m = self._make()
-        def stim():
-            m.rst.set(1); m.stall.set(0); m.a.set(7)
+        dut = self.dut; self.clock('clk', PERIOD)
+        @initial
+        def _():
+            dut.rst = 1; dut.stall = 0; dut.a = 7; yield PERIOD
+            dut.rst = 0; yield PERIOD
+            self.assertEqual(self.get('s0_a'), 7)
+            self.assertEqual(self.get('s1_a'), 0)
             yield PERIOD
-            m.rst.set(0)
-            yield PERIOD  # posedge: s0 latches 7, s1 latches old s0 (0)
-            self.assertEqual(int(m.s0_a), 7)
-            self.assertEqual(int(m.s1_a), 0)
-            yield PERIOD  # posedge: s1 latches 7
-            self.assertEqual(int(m.s1_a), 7)
-        _run(m, stim)
+            self.assertEqual(self.get('s1_a'), 7)
 
     def test_per_stage_stall(self):
-        """Stalling s1 doesn't affect s0."""
-        m = self._make()
-        def stim():
-            m.rst.set(1); m.stall.set(0); m.a.set(7)
-            yield PERIOD
-            m.rst.set(0)
-            yield PERIOD * 2  # both stages have 7
-            self.assertEqual(int(m.s1_a), 7)
-            m.a.set(50); m.stall.set(1)
-            yield PERIOD
-            self.assertEqual(int(m.s0_a), 50)  # s0 advanced
-            self.assertEqual(int(m.s1_a), 7)   # s1 held
-        _run(m, stim)
+        dut = self.dut; self.clock('clk', PERIOD)
+        @initial
+        def _():
+            dut.rst = 1; dut.stall = 0; dut.a = 7; yield PERIOD
+            dut.rst = 0; yield PERIOD * 2
+            self.assertEqual(self.get('s1_a'), 7)
+            dut.a = 50; dut.stall = 1; yield PERIOD
+            self.assertEqual(self.get('s0_a'), 50)
+            self.assertEqual(self.get('s1_a'), 7)
 
 
-# ── valid propagation ────────────────────────────────────────────
+class _ValidModule(Module):
+    def __init__(self):
+        self.clk = Input()
+        self.rst = Input()
+        self.a = Input(8)
+        self.flush = Input()
+        self.vin = Register(1)
+        super().__init__()
+        pipe = self.pipeline(self.clk, self.rst)
+        self.s0 = pipe.stage('s0', None, self.flush, a=self.a, valid=self.vin)
+        self.s1 = pipe.stage('s1', None, self.flush, a=self.s0.a, valid=self.s0.valid)
+
+        @self.comb
+        def _():
+            self.vin = 1
 
 
-class TestNamedStageValid(unittest.TestCase):
+class TestNamedStageValid(TestBench):
+    def create_module(self): return _ValidModule()
 
     def test_valid_propagates(self):
-        class M(Module):
-            def __init__(self):
-                self.clk = Input()
-                self.rst = Input()
-                self.a = Input(8)
-                self.flush = Input()
-                super().__init__()
-                self.vin = Register(1)
-                pipe = self.pipeline(self.clk, self.rst)
-                self.s0 = pipe.stage('s0', None, self.flush,
-                                     a=self.a, valid=self.vin)
-                self.s1 = pipe.stage('s1', None, self.flush,
-                                     a=self.s0.a, valid=self.s0.valid)
-                @self.comb
-                def _():
-                    self.vin = 1
-        m = M()
-        def stim():
-            m.rst.set(1); m.flush.set(0); m.a.set(1)
+        dut = self.dut; self.clock('clk', PERIOD)
+        @initial
+        def _():
+            dut.rst = 1; dut.flush = 0; dut.a = 1; yield PERIOD
+            dut.rst = 0; yield PERIOD
+            self.assertEqual(self.get('s0_valid'), 1)
+            self.assertEqual(self.get('s1_valid'), 0)
             yield PERIOD
-            m.rst.set(0)
-            yield PERIOD  # s0 valid=1, s1 valid=0
-            self.assertEqual(int(m.s0_valid), 1)
-            self.assertEqual(int(m.s1_valid), 0)
-            yield PERIOD  # s1 valid=1
-            self.assertEqual(int(m.s1_valid), 1)
-            m.flush.set(1)
-            yield PERIOD
-            self.assertEqual(int(m.s0_valid), 0)
-            self.assertEqual(int(m.s1_valid), 0)
-        _run(m, stim)
-
-
-# ── Verilog emission ─────────────────────────────────────────────
+            self.assertEqual(self.get('s1_valid'), 1)
+            dut.flush = 1; yield PERIOD
+            self.assertEqual(self.get('s0_valid'), 0)
+            self.assertEqual(self.get('s1_valid'), 0)
 
 
 class TestNamedStageVerilog(unittest.TestCase):
@@ -264,8 +233,7 @@ class TestNamedStageVerilog(unittest.TestCase):
                 self.out = Output(8)
                 super().__init__()
                 pipe = self.pipeline(self.clk, self.rst)
-                s0 = pipe.stage('s0', self.stall, self.flush,
-                                a=self.a)
+                s0 = pipe.stage('s0', self.stall, self.flush, a=self.a)
                 @self.comb
                 def _():
                     self.out = s0.a
@@ -310,37 +278,31 @@ class TestNamedStageVerilog(unittest.TestCase):
         self.assertIn('s1_a <= s0_a', v)
 
 
-# ── coexistence with lambda-chain API ────────────────────────────
+class _LambdaModule(Module):
+    def __init__(self):
+        self.clk = Input()
+        self.rst = Input()
+        self.inp = Input(8)
+        self.out = Output(8)
+        super().__init__()
+        pipe = self.pipeline(self.clk, self.rst, width=8)
+        pipe.stage(lambda: int(self.inp))
+        pipe.stage(lambda x: x + 1)
+        @self.comb
+        def _():
+            self.out = pipe.result
 
 
-class TestNamedStageCoexistence(unittest.TestCase):
+class TestNamedStageCoexistence(TestBench):
+    def create_module(self): return _LambdaModule()
 
     def test_lambda_chain_still_works(self):
-        """Lambda-chain API is unaffected by named-stage additions."""
-        class M(Module):
-            def __init__(self):
-                self.clk = Input()
-                self.rst = Input()
-                self.inp = Input(8)
-                self.out = Output(8)
-                super().__init__()
-                pipe = self.pipeline(self.clk, self.rst, width=8)
-                pipe.stage(lambda: int(self.inp))
-                pipe.stage(lambda x: x + 1)
-                @self.comb
-                def _():
-                    self.out = pipe.result
-        m = M()
-        sim = SimEngine(m)
-        sim.clock(m.clk, PERIOD)
-        def stim():
-            m.rst.set(1); m.inp.set(10)
-            yield PERIOD
-            m.rst.set(0)
-            yield PERIOD * 2
-            self.assertEqual(int(m.out), 11)
-        sim.initial(stim)
-        sim.run()
+        dut = self.dut; self.clock('clk', PERIOD)
+        @initial
+        def _():
+            dut.rst = 1; dut.inp = 10; yield PERIOD
+            dut.rst = 0; yield PERIOD * 2
+            self.assertEqual(self.get('out'), 11)
 
 
 if __name__ == '__main__':

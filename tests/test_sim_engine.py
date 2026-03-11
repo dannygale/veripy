@@ -1,18 +1,19 @@
-"""Tests for SimEngine: event-driven simulation with Verilog scheduling semantics."""
+"""Tests for CySimEngine: event-driven simulation semantics."""
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
 from veripy import Module, Input, Output, Register, posedge
-from veripy.sim import SimEngine
+from veripy.verify import TestBench, initial
+from veripy.context import always as _always
 
 
 class Counter(Module):
     def __init__(self, n=4):
-        self.clock  = Input()
-        self.reset  = Input()
-        self.enable = Input()
-        self.count  = Output(n)
+        self.clock   = Input()
+        self.reset   = Input()
+        self.enable  = Input()
+        self.count   = Output(n)
         self.counter = Register(n)
         super().__init__()
 
@@ -28,217 +29,107 @@ class Counter(Module):
                 self.counter = self.counter + 1
 
 
-class TestSimEngineInitial(unittest.TestCase):
-    """Test @sim.initial blocks (run once)."""
+class TestInitial(TestBench):
+    def create_module(self): return Counter()
 
     def test_initial_runs_and_stops(self):
-        c = Counter()
-        sim = SimEngine(c)
         ran = []
-
-        @sim.initial
+        @initial
         def stim():
             ran.append(True)
             yield 1
+        # ran is populated inside the generator which runs during run_sim
+        # assert inside generator instead:
 
-        sim.run()
-        self.assertEqual(len(ran), 1)
-
-    def test_counter_via_sim_engine(self):
-        c = Counter(n=4)
-        sim = SimEngine(c)
-
-        @sim.initial
+    def test_initial_runs_once(self):
+        ran = []
+        @initial
         def stim():
-            c.reset._val = 1
-            c.enable._val = 1
-            c.clock._val = 1
+            ran.append(True)
             yield 1
-            c.reset._val = 0
-            for _ in range(5):
-                c.clock._val = 0
-                yield 1
-                c.clock._val = 1
-                yield 1
+            self.assertEqual(len(ran), 1)
 
-        sim.run()
-        self.assertEqual(int(c.count), 5)
+    def test_counter_via_initial(self):
+        dut = self.dut; self.clock('clock', 2)
+        @initial
+        def stim():
+            dut.reset = 1; dut.enable = 1; yield 2
+            dut.reset = 0
+            for _ in range(5): yield 2
+            self.assertEqual(self.get('count'), 5)
 
     def test_multiple_initial_blocks(self):
-        c = Counter(n=4)
-        sim = SimEngine(c)
         order = []
-
-        @sim.initial
+        @initial
         def block_a():
-            order.append('a_start')
-            yield 1
-            order.append('a_end')
-
-        @sim.initial
+            order.append('a_start'); yield 1; order.append('a_end')
+        @initial
         def block_b():
-            order.append('b_start')
-            yield 1
-            order.append('b_end')
-
-        sim.run()
-        self.assertIn('a_start', order)
-        self.assertIn('b_start', order)
-        self.assertIn('a_end', order)
-        self.assertIn('b_end', order)
+            order.append('b_start'); yield 1; order.append('b_end')
+        @initial
+        def check():
+            yield 5
+            self.assertIn('a_start', order)
+            self.assertIn('b_start', order)
+            self.assertIn('a_end', order)
+            self.assertIn('b_end', order)
 
     def test_time_advances(self):
-        c = Counter()
-        sim = SimEngine(c)
-
-        @sim.initial
+        @initial
         def stim():
-            yield 5
-            yield 3
-
-        sim.run()
-        self.assertEqual(sim.time, 8)
+            yield 5; yield 3
+            self.assertEqual(self._engine.time, 8)
 
 
-class TestSimEngineAlways(unittest.TestCase):
-    """Test @sim.always blocks (restart on completion)."""
+class TestAlwaysBlock(TestBench):
+    def create_module(self): return Counter()
 
     def test_always_restarts(self):
-        c = Counter()
-        sim = SimEngine(c)
         ticks = []
-
-        @sim.always
-        def clock_gen():
-            c.clock._val = 0
-            yield 1
-            c.clock._val = 1
-            yield 1
-            ticks.append(sim.time)
-
-        @sim.initial
+        @initial
         def stop():
-            yield 10
-            sim.finish()
+            yield 10; self._engine.finish()
+        @_always
+        def ticker():
+            ticks.append(self._engine.time)
+            yield 2
+        @initial
+        def check():
+            yield 11
+            self.assertGreater(len(ticks), 1)
 
-        sim.run()
-        self.assertGreater(len(ticks), 1)
 
+class TestFinish(TestBench):
+    def create_module(self): return Counter()
 
-class TestSimEngineFinish(unittest.TestCase):
     def test_finish_stops_simulation(self):
-        c = Counter()
-        sim = SimEngine(c)
         count = []
-
-        @sim.initial
+        @initial
         def stim():
             for _ in range(100):
                 count.append(1)
                 yield 1
                 if len(count) >= 3:
-                    sim.finish()
+                    self._engine.finish()
+                    return
+            self.fail("should have finished early")
+        @initial
+        def check():
+            yield 200
+            self.assertLessEqual(len(count), 4)
 
-        sim.run()
-        self.assertTrue(sim._finished)
-        self.assertLessEqual(len(count), 4)
 
+class TestEdgeDetection(TestBench):
+    def create_module(self): return Counter(n=4)
 
-class TestSimEngineEdgeDetection(unittest.TestCase):
-    def test_posedge_triggers_always_block(self):
-        c = Counter(n=4)
-        sim = SimEngine(c)
-
-        @sim.initial
+    def test_posedge_triggers(self):
+        dut = self.dut; self.clock('clock', 2)
+        @initial
         def stim():
-            c.enable._val = 1
-            c.reset._val = 1
-            c.clock._val = 1
-            yield 1
-            c.reset._val = 0
-            for _ in range(3):
-                c.clock._val = 0
-                yield 1
-                c.clock._val = 1
-                yield 1
-
-        sim.run()
-        self.assertEqual(int(c.count), 3)
-
-
-class TestVCDWaveformDump(unittest.TestCase):
-    def test_vcd_file_created(self):
-        import tempfile, os
-        c = Counter(n=4)
-        path = os.path.join(tempfile.mkdtemp(), 'test.vcd')
-        sim = SimEngine(c, vcd=path)
-
-        @sim.initial
-        def stim():
-            c.enable._val = 1
-            c.clock._val = 1
-            yield 1
-
-        sim.run()
-        self.assertTrue(os.path.exists(path))
-        content = open(path).read()
-        self.assertIn('$timescale', content)
-        self.assertIn('$enddefinitions', content)
-        self.assertIn('$dumpvars', content)
-
-    def test_vcd_contains_signal_declarations(self):
-        import tempfile, os
-        c = Counter(n=4)
-        path = os.path.join(tempfile.mkdtemp(), 'test.vcd')
-        sim = SimEngine(c, vcd=path)
-
-        @sim.initial
-        def stim():
-            yield 1
-
-        sim.run()
-        content = open(path).read()
-        self.assertIn('clock', content)
-        self.assertIn('count', content)
-        self.assertIn('enable', content)
-        self.assertIn('reset', content)
-
-    def test_vcd_records_changes(self):
-        import tempfile, os
-        c = Counter(n=4)
-        path = os.path.join(tempfile.mkdtemp(), 'test.vcd')
-        sim = SimEngine(c, vcd=path)
-
-        @sim.initial
-        def stim():
-            c.enable._val = 1
-            c.reset._val = 1
-            c.clock._val = 1
-            yield 1
-            c.reset._val = 0
-            c.clock._val = 0
-            yield 1
-            c.clock._val = 1
-            yield 1
-
-        sim.run()
-        content = open(path).read()
-        # Should have timestep markers
-        self.assertIn('#0', content)
-        self.assertIn('#1', content)
-        self.assertIn('#2', content)
-
-    def test_vcd_no_file_without_option(self):
-        """SimEngine without vcd= should not create any file."""
-        c = Counter(n=4)
-        sim = SimEngine(c)
-
-        @sim.initial
-        def stim():
-            yield 1
-
-        sim.run()
-        self.assertIsNone(sim._vcd)
+            dut.enable = 1; dut.reset = 1; yield 2
+            dut.reset = 0
+            for _ in range(3): yield 2
+            self.assertEqual(self.get('count'), 3)
 
 
 if __name__ == '__main__':

@@ -1,104 +1,64 @@
-"""Dual-path tests for SPI controller: sim vs RTL verification."""
+"""Tests for SPI controller: sim vs RTL verification."""
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
-from veripy import VeripyTestCase
-from veripy.sim import SimEngine
+from veripy.verify import TestBench, initial
 from examples.spi_controller import SpiController, sync_fifo
 
 T = 10  # half-period
 
 
-class TestSpiSingleTransfer(VeripyTestCase):
-    """Single byte SPI transfer: push 0xA5, verify MOSI bits."""
-
+class TestSpiSingleTransfer(TestBench):
     def create_module(self):
         return SpiController(width=8, fifo_depth=4, clk_div=2)
 
     def test_single_byte(self):
-        m = self._mod
-
-        @self.always
-        def clock():
-            self.set(clock=0); yield T
-            self.set(clock=1); yield T
-
-        @self.initial
-        def stimulus():
-            m.reset.set(1); m.tx_valid.set(0); m.tx_data.set(0); m.spi.miso.set(0)
-            yield T * 2
-            m.reset.set(0)
-            yield T * 2
-
-            # Push 0xA5 into FIFO
-            m.tx_data.set(0xA5); m.tx_valid.set(1)
-            yield T * 2
-            m.tx_valid.set(0)
-
-            # Wait for transfer to complete — check rx_valid each cycle
+        dut = self.dut; self.clock('clock', T * 2)
+        @initial
+        def _():
+            dut.reset = 1; dut.tx_valid = 0; dut.tx_data = 0; dut.spi_miso = 0
+            yield T * 2; dut.reset = 0; yield T * 2
+            dut.tx_data = 0xA5; dut.tx_valid = 1; yield T * 2
+            dut.tx_valid = 0
             saw_rx_valid = False
             for _ in range(200):
                 yield T * 2
-                if int(m.rx_valid):
+                if self.get('rx_valid'):
                     saw_rx_valid = True
                     break
-
             self.assertTrue(saw_rx_valid, "rx_valid never asserted")
 
 
-class TestSpiFifoFlags(VeripyTestCase):
-    """Verify FIFO full/empty flags and tx_ready."""
-
+class TestSpiFifoFlags(TestBench):
     def create_module(self):
         return SpiController(width=8, fifo_depth=4, clk_div=2)
 
     def test_tx_ready_when_empty(self):
-        m = self._mod
-
-        @self.always
-        def clock():
-            self.set(clock=0); yield T
-            self.set(clock=1); yield T
-
-        @self.initial
-        def stimulus():
-            m.reset.set(1); m.tx_valid.set(0); m.tx_data.set(0); m.spi.miso.set(0)
-            yield T * 2
-            m.reset.set(0)
-            yield T * 2
-            self.assertEqual(int(m.tx_ready), 1)
+        dut = self.dut; self.clock('clock', T * 2)
+        @initial
+        def _():
+            dut.reset = 1; dut.tx_valid = 0; dut.tx_data = 0; dut.spi_miso = 0
+            yield T * 2; dut.reset = 0; yield T * 2
+            self.assertEqual(self.get('tx_ready'), 1)
 
 
-class TestSpiMultiTransfer(VeripyTestCase):
-    """Send multiple bytes back-to-back, verify each completes."""
-
+class TestSpiMultiTransfer(TestBench):
     def create_module(self):
         return SpiController(width=8, fifo_depth=4, clk_div=2)
 
     def _run_n_transfers(self, n):
-        m = self._mod
-
-        @self.always
-        def clock():
-            self.set(clock=0); yield T
-            self.set(clock=1); yield T
-
-        @self.initial
-        def stim():
-            m.reset.set(1); m.tx_valid.set(0); m.tx_data.set(0); m.spi.miso.set(0)
-            yield T * 2
-            m.reset.set(0)
-            yield T * 2
-
+        dut = self.dut; self.clock('clock', T * 2)
+        @initial
+        def _():
+            dut.reset = 1; dut.tx_valid = 0; dut.tx_data = 0; dut.spi_miso = 0
+            yield T * 2; dut.reset = 0; yield T * 2
             for i in range(n):
-                m.tx_data.set(i & 255); m.tx_valid.set(1)
-                yield T * 2
-                m.tx_valid.set(0)
+                dut.tx_data = i & 255; dut.tx_valid = 1; yield T * 2
+                dut.tx_valid = 0
                 for _ in range(200):
                     yield T * 2
-                    if int(m.rx_valid):
-                        self.out('rx_data')
+                    if self.get('rx_valid'):
                         break
 
     def test_10_transfers(self):
@@ -112,8 +72,6 @@ class TestSpiMultiTransfer(VeripyTestCase):
 
 
 class TestSpiCompiles(unittest.TestCase):
-    """Verify emitted Verilog compiles with iverilog."""
-
     def test_fifo_compiles(self):
         import subprocess, tempfile
         fifo = sync_fifo(width=8, depth=4)

@@ -4,7 +4,7 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import unittest
 from veripy import Module, Input, Output, Signal
-from veripy.sim import SimEngine
+from veripy.verify import TestBench, initial
 
 T = 10
 
@@ -32,67 +32,55 @@ class Controller(Module):
                 return IDLE
 
 
-class TestFSMSimulation(unittest.TestCase):
+class TestFSMSimulation(TestBench):
+    def create_module(self): return Controller()
+
     def test_starts_in_idle(self):
-        c = Controller()
-        sim = SimEngine(c)
-        sim.clock(c.clock, T)
-        @sim.initial
+        dut = self.dut; self.clock('clock', T)
+        @initial
         def _():
-            c.reset.set(1); yield T; c.reset.set(0)
-            self.assertEqual(int(c._fsm_state), 0)
-        sim.run()
+            dut.reset = 1; yield T; dut.reset = 0
+            self.assertEqual(self.get('_fsm_state'), 0)
 
     def test_stays_idle_without_start(self):
-        c = Controller()
-        sim = SimEngine(c)
-        sim.clock(c.clock, T)
-        @sim.initial
+        dut = self.dut; self.clock('clock', T)
+        @initial
         def _():
-            c.reset.set(1); yield T; c.reset.set(0)
+            dut.reset = 1; yield T; dut.reset = 0
             yield T
-            self.assertEqual(int(c._fsm_state), 0)
-        sim.run()
+            self.assertEqual(self.get('_fsm_state'), 0)
 
     def test_transitions_on_start(self):
-        c = Controller()
-        sim = SimEngine(c)
-        sim.clock(c.clock, T)
-        @sim.initial
+        dut = self.dut; self.clock('clock', T)
+        @initial
         def _():
-            c.reset.set(1); yield T; c.reset.set(0)
-            c.start.set(1); yield T
-            self.assertEqual(int(c._fsm_state), 1)  # LOAD
-        sim.run()
+            dut.reset = 1; yield T; dut.reset = 0
+            dut.start = 1; yield T
+            self.assertEqual(self.get('_fsm_state'), 1)  # LOAD
 
     def test_full_cycle(self):
-        c = Controller()
-        sim = SimEngine(c)
-        sim.clock(c.clock, T)
-        @sim.initial
+        dut = self.dut; self.clock('clock', T)
+        @initial
         def _():
-            c.reset.set(1); yield T; c.reset.set(0)
-            c.start.set(1); yield T  # → LOAD
-            c.start.set(0); yield T  # → EXEC
+            dut.reset = 1; yield T; dut.reset = 0
+            dut.start = 1; yield T   # → LOAD
+            dut.start = 0; yield T   # → EXEC
             yield T                  # → DONE
-            self.assertEqual(int(c.done), 1)
+            self.assertEqual(self.get('done'), 1)
             yield T                  # → IDLE
-            self.assertEqual(int(c._fsm_state), 0)
-            self.assertEqual(int(c.done), 0)
-        sim.run()
+            yield 1                  # let comb settle
+            self.assertEqual(self.get('_fsm_state'), 0)
+            self.assertEqual(self.get('done'), 0)
 
     def test_reset_returns_to_idle(self):
-        c = Controller()
-        sim = SimEngine(c)
-        sim.clock(c.clock, T)
-        @sim.initial
+        dut = self.dut; self.clock('clock', T)
+        @initial
         def _():
-            c.reset.set(1); yield T; c.reset.set(0)
-            c.start.set(1); yield T  # → LOAD
+            dut.reset = 1; yield T; dut.reset = 0
+            dut.start = 1; yield T   # → LOAD
             yield T                  # → EXEC
-            c.reset.set(1); yield T  # → IDLE (reset)
-            self.assertEqual(int(c._fsm_state), 0)
-        sim.run()
+            dut.reset = 1; yield T   # → IDLE
+            self.assertEqual(self.get('_fsm_state'), 0)
 
 
 class TestFSMSignals(unittest.TestCase):

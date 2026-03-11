@@ -1,20 +1,13 @@
-"""Hierarchical csim tests: reproduce cache-like data corruption patterns.
-
-Each test exercises registered data flowing through parent wiring between
-sub-module instances — the exact pattern that caused corruption in the
-CPU cache hierarchy.
-"""
+"""Hierarchical csim tests: reproduce cache-like data corruption patterns."""
 
 import sys, os, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from veripy import Module, Input, Output, Register, Signal, VeripyTestCase
+from veripy import Module, Input, Output, Register, Signal
+from veripy.verify import TestBench, initial
 
-
-# ── Leaf modules ─────────────────────────────────────────────────────
 
 class RegStage(Module):
-    """Captures din on posedge clk, drives dout combinationally."""
     def __init__(self, width=8):
         self.clk = Input()
         self.din = Input(width)
@@ -32,8 +25,6 @@ class RegStage(Module):
 
 
 class RegSink(Module):
-    """4-entry register file: stores din at waddr when wen, reads raddr to dout.
-    Uses registers instead of Mem for Python sim compatibility."""
     def __init__(self, width=32):
         self.clk = Input()
         self.din = Input(width)
@@ -71,11 +62,7 @@ class RegSink(Module):
                     self.r3 = self.din
 
 
-# ── 2-level: registered passthrough between siblings ─────────────────
-
 class TwoStage(Module):
-    """src registers din, parent wire connects src.dout → snk.din,
-    snk registers that. 2-cycle pipeline."""
     def __init__(self, width=8):
         self.clk = Input()
         self.din = Input(width)
@@ -93,50 +80,39 @@ class TwoStage(Module):
             self.dout = self.snk.dout
 
 
-class TestTwoStage(VeripyTestCase):
-    def create_module(self):
-        return TwoStage(width=8)
+class TestTwoStage(TestBench):
+    def create_module(self): return TwoStage(width=8)
 
     def test_pipeline_data(self):
-        """Data flows through 2-stage registered pipeline."""
-        @self.initial
-        def stim():
-            self.set(clk=0, din=0)
-            yield 1
-            self.set(din=0xAB, clk=1); yield 1
-            self.set(clk=0); yield 1
-            self.set(din=0xCD, clk=1); yield 1
-            self.set(clk=0); yield 1
-            # 2-cycle latency: dout = snk.r = 0xAB (not 0xCD)
-            self.assertEqual(self.out('dout'), 0xAB)
-            self.set(clk=1); yield 1
-            self.set(clk=0); yield 1
-            self.assertEqual(self.out('dout'), 0xCD)
-        self.run_sim()
+        dut = self.dut
+        @initial
+        def _():
+            dut.clk = 0; dut.din = 0; yield 1
+            dut.din = 0xAB; dut.clk = 1; yield 1
+            dut.clk = 0; yield 1
+            dut.din = 0xCD; dut.clk = 1; yield 1
+            dut.clk = 0; yield 1
+            self.assertEqual(self.get('dout'), 0xAB)
+            dut.clk = 1; yield 1
+            dut.clk = 0; yield 1
+            self.assertEqual(self.get('dout'), 0xCD)
 
     def test_multiple_values(self):
-        """Several distinct values pass through correctly."""
+        dut = self.dut
         vals = [0x11, 0x22, 0x33, 0x44, 0x55]
-        @self.initial
-        def stim():
-            self.set(clk=0, din=0)
-            yield 1
+        @initial
+        def _():
+            dut.clk = 0; dut.din = 0; yield 1
             for v in vals:
-                self.set(din=v, clk=1); yield 1
-                self.set(clk=0); yield 1
-            # 2-cycle latency: snk.r = vals[-2]
-            self.assertEqual(self.out('dout'), vals[-2])
-            self.set(clk=1); yield 1
-            self.set(clk=0); yield 1
-            self.assertEqual(self.out('dout'), vals[-1])
-        self.run_sim()
+                dut.din = v; dut.clk = 1; yield 1
+                dut.clk = 0; yield 1
+            self.assertEqual(self.get('dout'), vals[-2])
+            dut.clk = 1; yield 1
+            dut.clk = 0; yield 1
+            self.assertEqual(self.get('dout'), vals[-1])
 
-
-# ── 2-level: registered source → register-file sink (cache pattern) ──
 
 class RegToSink(Module):
-    """src registers din, parent wires src.dout → sink.din.
-    Sink stores into register file. Reproduces cache fill data path."""
     def __init__(self, width=32):
         self.clk = Input()
         self.din = Input(width)
@@ -160,76 +136,57 @@ class RegToSink(Module):
             self.dout = self.snk.dout
 
 
-class TestRegToSink(VeripyTestCase):
-    def create_module(self):
-        return RegToSink(width=32)
+class TestRegToSink(TestBench):
+    def create_module(self): return RegToSink(width=32)
 
     def test_single_write_read(self):
-        """Write one value through src→parent wire→regfile, read it back."""
-        @self.initial
-        def stim():
-            self.set(clk=0, din=0, wen=0, waddr=0, raddr=0)
-            yield 1
-            # Clock 1: src captures 0x42
-            self.set(din=0x42, clk=1); yield 1
-            self.set(clk=0); yield 1
-            # Clock 2: src.dout=0x42 → snk.din, write to r0
-            self.set(wen=1, waddr=0, clk=1); yield 1
-            self.set(clk=0); yield 1
-            # Read back
-            self.set(wen=0, raddr=0)
-            yield 1
-            self.assertEqual(self.out('dout'), 0x42)
-        self.run_sim()
+        dut = self.dut
+        @initial
+        def _():
+            dut.clk = 0; dut.din = 0; dut.wen = 0; dut.waddr = 0; dut.raddr = 0; yield 1
+            dut.din = 0x42; dut.clk = 1; yield 1
+            dut.clk = 0; yield 1
+            dut.wen = 1; dut.waddr = 0; dut.clk = 1; yield 1
+            dut.clk = 0; yield 1
+            dut.wen = 0; dut.raddr = 0; yield 1
+            self.assertEqual(self.get('dout'), 0x42)
 
     def test_sequential_fill(self):
-        """Fill 4 register slots sequentially — reproduces cache line fill."""
+        dut = self.dut
         words = [0xAA, 0xBB, 0xCC, 0xDD]
-        @self.initial
-        def stim():
-            self.set(clk=0, din=0, wen=0, waddr=0, raddr=0)
-            yield 1
-            # Pre-load first word into src
-            self.set(din=words[0], clk=1); yield 1
-            self.set(clk=0); yield 1
-            # Fill: each clock, src outputs previous din, we write it
+        @initial
+        def _():
+            dut.clk = 0; dut.din = 0; dut.wen = 0; dut.waddr = 0; dut.raddr = 0; yield 1
+            dut.din = words[0]; dut.clk = 1; yield 1
+            dut.clk = 0; yield 1
             for i in range(4):
                 next_din = words[i + 1] if i < 3 else 0
-                self.set(din=next_din, wen=1, waddr=i, clk=1); yield 1
-                self.set(clk=0); yield 1
-            # Read back all 4
-            self.set(wen=0)
+                dut.din = next_din; dut.wen = 1; dut.waddr = i; dut.clk = 1; yield 1
+                dut.clk = 0; yield 1
+            dut.wen = 0
             for i in range(4):
-                self.set(raddr=i)
-                yield 1
-                self.assertEqual(self.out('dout'), words[i])
-        self.run_sim()
+                dut.raddr = i; yield 1
+                self.assertEqual(self.get('dout'), words[i])
 
     def test_fill_32bit(self):
-        """32-bit fill with actual instruction values — catches byte corruption."""
+        dut = self.dut
         words = [0x00001117, 0x00010113, 0x05000293, 0x05000313]
-        @self.initial
-        def stim():
-            self.set(clk=0, din=0, wen=0, waddr=0, raddr=0)
-            yield 1
-            self.set(din=words[0], clk=1); yield 1
-            self.set(clk=0); yield 1
+        @initial
+        def _():
+            dut.clk = 0; dut.din = 0; dut.wen = 0; dut.waddr = 0; dut.raddr = 0; yield 1
+            dut.din = words[0]; dut.clk = 1; yield 1
+            dut.clk = 0; yield 1
             for i in range(4):
                 next_din = words[i + 1] if i < 3 else 0
-                self.set(din=next_din, wen=1, waddr=i, clk=1); yield 1
-                self.set(clk=0); yield 1
-            self.set(wen=0)
+                dut.din = next_din; dut.wen = 1; dut.waddr = i; dut.clk = 1; yield 1
+                dut.clk = 0; yield 1
+            dut.wen = 0
             for i in range(4):
-                self.set(raddr=i)
-                yield 1
-                self.assertEqual(self.out('dout'), words[i])
-        self.run_sim()
+                dut.raddr = i; yield 1
+                self.assertEqual(self.get('dout'), words[i])
 
-
-# ── 3-level: wrapper adds another hierarchy level ────────────────────
 
 class ThreeLevel(Module):
-    """Wraps RegToSink in another level — 3-deep like cpu→memsys→cache."""
     def __init__(self, width=32):
         self.clk = Input()
         self.din = Input(width)
@@ -250,36 +207,15 @@ class ThreeLevel(Module):
             self.dout = self.inner.dout
 
 
-class TestThreeLevel(VeripyTestCase):
-    def create_module(self):
-        return ThreeLevel(width=32)
+class TestThreeLevel(TestBench):
+    def create_module(self): return ThreeLevel(width=32)
 
     @unittest.skip("Python sim doesn't propagate through 3-level sub-module hierarchy")
     def test_fill_through_3_levels(self):
-        """Data flows through 3 hierarchy levels into register file."""
-        words = [0x00001117, 0x00010113, 0x05000293, 0x05000313]
-        @self.initial
-        def stim():
-            self.set(clk=0, din=0, wen=0, waddr=0, raddr=0)
-            yield 1
-            self.set(din=words[0], clk=1); yield 1
-            self.set(clk=0); yield 1
-            for i in range(4):
-                next_din = words[i + 1] if i < 3 else 0
-                self.set(din=next_din, wen=1, waddr=i, clk=1); yield 1
-                self.set(clk=0); yield 1
-            self.set(wen=0)
-            for i in range(4):
-                self.set(raddr=i)
-                yield 1
-                self.assertEqual(self.out('dout'), words[i])
-        self.run_sim()
+        pass
 
-
-# ── 2-level: two consumers fed from same source ──────────────────────
 
 class DualSink(Module):
-    """Two RegSinks fed from the same RegStage source via parent wiring."""
     def __init__(self, width=32):
         self.clk = Input()
         self.din = Input(width)
@@ -314,29 +250,27 @@ class DualSink(Module):
             self.dout_b = self.b.dout
 
 
-class TestDualSink(VeripyTestCase):
-    def create_module(self):
-        return DualSink(width=32)
+class TestDualSink(TestBench):
+    def create_module(self): return DualSink(width=32)
 
     def test_both_sinks_get_same_data(self):
-        """Both register-file sinks store identical data from shared source."""
+        dut = self.dut
         words = [0x00001117, 0x00010113, 0x05000293, 0x05000313]
-        @self.initial
-        def stim():
-            self.set(clk=0, din=0, wen_a=0, wen_b=0,
-                     waddr_a=0, waddr_b=0, raddr_a=0, raddr_b=0)
-            yield 1
-            self.set(din=words[0], clk=1); yield 1
-            self.set(clk=0); yield 1
+        @initial
+        def _():
+            dut.clk = 0; dut.din = 0
+            dut.wen_a = 0; dut.wen_b = 0
+            dut.waddr_a = 0; dut.waddr_b = 0
+            dut.raddr_a = 0; dut.raddr_b = 0; yield 1
+            dut.din = words[0]; dut.clk = 1; yield 1
+            dut.clk = 0; yield 1
             for i in range(4):
                 next_din = words[i + 1] if i < 3 else 0
-                self.set(din=next_din, wen_a=1, wen_b=1,
-                         waddr_a=i, waddr_b=i, clk=1); yield 1
-                self.set(clk=0); yield 1
-            self.set(wen_a=0, wen_b=0)
+                dut.din = next_din; dut.wen_a = 1; dut.wen_b = 1
+                dut.waddr_a = i; dut.waddr_b = i; dut.clk = 1; yield 1
+                dut.clk = 0; yield 1
+            dut.wen_a = 0; dut.wen_b = 0
             for i in range(4):
-                self.set(raddr_a=i, raddr_b=i)
-                yield 1
-                self.assertEqual(self.out('dout_a'), words[i])
-                self.assertEqual(self.out('dout_b'), words[i])
-        self.run_sim()
+                dut.raddr_a = i; dut.raddr_b = i; yield 1
+                self.assertEqual(self.get('dout_a'), words[i])
+                self.assertEqual(self.get('dout_b'), words[i])
