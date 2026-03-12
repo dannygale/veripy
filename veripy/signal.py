@@ -311,6 +311,9 @@ def Input(width=1):
 def Output(width=1):
     return Signal(width, _kind='output')
 
+def Inout(width=1):
+    return Signal(width, _kind='inout')
+
 def Register(width=1, reset=0):
     return Signal(width, reset=reset, _kind='reg')
 

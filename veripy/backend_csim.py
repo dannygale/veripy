@@ -1187,7 +1187,7 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
         for _, sig in blk.edges:
             _seq_reads.add(sig)
     _output_ports = {p.name for p in ir.ports if p.direction == 'output'}
-    _input_ports = {p.name for p in ir.ports if p.direction == 'input'}
+    _input_ports = {p.name for p in ir.ports if p.direction in ('input', 'inout')}
     _reg_names = {r.name for r in ir.regs}
     _mem_names_set = {m.name for m in ir.mems}
     must_persist = _input_ports | _output_ports | _reg_names | _mem_names_set | _seq_reads
@@ -1747,7 +1747,7 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
         w = _resolve_width(p.width, ir.params)
         if p.name in pack_map:
             word, bit = pack_map[p.name]
-            if p.direction == 'input':
+            if p.direction in ('input', 'inout'):
                 dirty_stmt = ''
                 if p.name in dirty_idx:
                     dw, dm = dirty_idx[p.name]
@@ -1761,7 +1761,7 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
                 f'uint64_t veripy_get_{p.name}(void* p) '
                 f'{{ return (((State*)p)->{word} >> {bit}ULL) & 1ULL; }}')
         else:
-            if p.direction == 'input':
+            if p.direction in ('input', 'inout'):
                 dirty_stmt = ''
                 if p.name in dirty_idx:
                     dw, dm = dirty_idx[p.name]
@@ -1931,7 +1931,7 @@ def emit_c_hier(top_ir: IRModule, registry: dict) -> str:
         w = _resolve_width(p.width, top_ir.params)
         if p.name in _hier_pack_maps.get(top_ir.name, {}):
             word, bit = _hier_pack_maps[top_ir.name][p.name]
-            if p.direction == 'input':
+            if p.direction in ('input', 'inout'):
                 lines.append(
                     f'void veripy_set_{p.name}(void* p, uint64_t v) '
                     f'{{ State_{top_cid}* s = (State_{top_cid}*)p; '
@@ -1941,7 +1941,7 @@ def emit_c_hier(top_ir: IRModule, registry: dict) -> str:
                 f'uint64_t veripy_get_{p.name}(void* p) '
                 f'{{ return (((State_{top_cid}*)p)->{word} >> {bit}ULL) & 1ULL; }}')
         else:
-            if p.direction == 'input':
+            if p.direction in ('input', 'inout'):
                 lines.append(
                     f'void veripy_set_{p.name}(void* p, uint64_t v) '
                     f'{{ (({_state_type(top_ir)}*)p)->{p.name} = '
@@ -2817,7 +2817,7 @@ def emit_tb_c(tb_ir, model_c_src, half_period=10, model_ir=None):
     if model_ir:
         for p in model_ir.ports:
             model_sigs.add(p.name)
-            if p.direction == 'input':
+            if p.direction in ('input', 'inout'):
                 input_sigs.add(p.name)
     else:
         # Fallback: scan C source for set/get functions
@@ -3041,7 +3041,7 @@ def emit_c_header(ir: IRModule, model_c_src: str) -> str:
         'extern void     veripy_trace_enable(int en);',
     ]
     for p in ir.ports:
-        if p.direction == 'input':
+        if p.direction in ('input', 'inout'):
             lines.append(f'extern void     veripy_set_{p.name}(void* p, uint64_t v);')
         lines.append(f'extern uint64_t veripy_get_{p.name}(void* p);')
     _hdr_seen = {p.name for p in ir.ports}
@@ -3071,7 +3071,7 @@ def emit_cysim_pyx(ir: IRModule, model_c_src: str = '') -> str:
     """
     # Collect signal info
     inputs = [(p.name, _resolve_width(p.width, ir.params))
-              for p in ir.ports if p.direction == 'input']
+              for p in ir.ports if p.direction in ('input', 'inout')]
     all_getters = []  # (name, width)
     for p in ir.ports:
         all_getters.append((p.name, _resolve_width(p.width, ir.params)))

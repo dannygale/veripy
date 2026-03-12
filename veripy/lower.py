@@ -824,8 +824,8 @@ class _Lowerer:
             r_sig = r_obj._signals()[name] if name in r_obj._signals() else None
             if r_sig is None:
                 continue
-            # Direction-aware: input on left = drive from right
-            if l_sig._kind == 'input':
+            # Direction-aware: input/inout on left = drive from right
+            if l_sig._kind in ('input', 'inout'):
                 pairs.append((l_wire, Sig(r_wire)))
             else:
                 pairs.append((r_wire, Sig(l_wire)))
@@ -1049,7 +1049,7 @@ def lower_module(module, module_name=None):
 
     # Ports
     for sig_name, sig in sorted(signals.items()):
-        if sig._kind in ('input', 'output', 'output_reg'):
+        if sig._kind in ('input', 'output', 'output_reg', 'inout'):
             w = _width_str(sig)
             direction = 'output' if sig._kind == 'output_reg' else sig._kind
             is_reg = sig._kind == 'output_reg'
@@ -1057,7 +1057,7 @@ def lower_module(module, module_name=None):
 
     # Internal regs
     for sig_name, sig in sorted(signals.items()):
-        if sig._kind not in ('input', 'output', 'output_reg'):
+        if sig._kind not in ('input', 'output', 'output_reg', 'inout'):
             w = _width_str(sig)
             ir.regs.append(RegDecl(sig_name, w))
 
@@ -1100,7 +1100,7 @@ def lower_module(module, module_name=None):
 
     for sub_name, sub in sorted(submodules.items()):
         for port_name, sig in sorted(sub._signals().items()):
-            if sig._kind in ('input', 'output'):
+            if sig._kind in ('input', 'output', 'inout'):
                 w = sig.width  # concrete width for wires
                 wire_name = f'{sub_name}_{port_name}'
                 if wire_name in always_driven:
@@ -1112,7 +1112,7 @@ def lower_module(module, module_name=None):
         mod_type = getattr(sub, '_verilog_module_name', None) or _to_snake(type(sub).__name__)
         inst_ports = []
         for port_name, sig in sorted(sub._signals().items()):
-            if sig._kind in ('input', 'output'):
+            if sig._kind in ('input', 'output', 'inout'):
                 inst_ports.append((port_name, f'{sub_name}_{port_name}'))
         inst_params = {}
         for pk, pv in sub._params.items():

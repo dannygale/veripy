@@ -51,7 +51,7 @@ def _emit_header(ir, lines):
 
     # Ports — inputs first, then outputs (each group sorted)
     port_lines = []
-    for p in sorted(ir.ports, key=lambda p: (0 if p.direction == 'input' else 1, p.name)):
+    for p in sorted(ir.ports, key=lambda p: (0 if p.direction == 'input' else 2 if p.direction == 'output' else 1, p.name)):
         w = _width_decl(p.width)
         reg = ' reg' if p.is_reg else ''
         port_lines.append(f'    {p.direction}{reg} {w}{p.name}')

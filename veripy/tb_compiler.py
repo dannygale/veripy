@@ -374,7 +374,7 @@ def emit_generators_pyx(flat_ir, generator_sources, model_c_src=''):
     seen = set()
     for p in flat_ir.ports:
         w = _resolve_width(p.width, flat_ir.params)
-        if p.direction == 'input':
+        if p.direction in ('input', 'inout'):
             inputs.append((p.name, w))
         all_getters.append((p.name, w))
         seen.add(p.name)
@@ -435,7 +435,7 @@ def compile_generators(flat_ir, generator_funcs, model_c_src, header_src):
 
     from .backend_csim import _resolve_width, _default_model_cache_dir
 
-    input_names = {p.name for p in flat_ir.ports if p.direction == 'input'}
+    input_names = {p.name for p in flat_ir.ports if p.direction in ('input', 'inout')}
     # Only include wires that have getters in the C model
     accessible_wires = {w.name for w in flat_ir.wires
                         if not model_c_src or f'veripy_get_{w.name}' in model_c_src}

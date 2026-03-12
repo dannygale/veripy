@@ -270,7 +270,7 @@ class TemporalProperty:
 @dataclass
 class Port:
     name: str
-    direction: str   # 'input' | 'output'
+    direction: str   # 'input' | 'output' | 'inout'
     width: Union[int, str]  # int or param expression string
     is_reg: bool = False
 
