@@ -196,9 +196,9 @@ class TestBench(unittest.TestCase):
         return self.get(name)
 
     def run_sim(self):
-        """Run the event-driven simulation."""
+        """Compile generators to Cython and run the simulation."""
         self._ran_sim = True
-        self._engine.run()
+        self._compile_and_run()
 
     def clock(self, name, period=10):
         """Register a clock driver."""
@@ -240,13 +240,11 @@ class TestBench(unittest.TestCase):
 
     def always(self, fn):
         """Register a generator function as an always block."""
-        self._engine.always(fn)
         self._tb_always.append(fn)
         return fn
 
     def initial(self, fn):
         """Register a generator function as an initial block."""
-        self._engine.initial(fn)
         self._tb_initial.append(fn)
         return fn
 
@@ -265,9 +263,15 @@ class TestBench(unittest.TestCase):
     # --- internals ---
 
     def _begin(self):
-        from .backend_csim import compile_cysim
+        from .backend_csim import compile_cysim, compile_model
         mod = self.create_module()
         module_name = type(mod).__name__.lower()
+        # Compile model — keep C source + IR for generator compilation
+        lib_path, flat_ir, model_c_src, header_src = compile_model(mod, module_name)
+        self._flat_ir = flat_ir
+        self._model_c_src = model_c_src
+        self._header_src = header_src
+        # Compile cysim wrapper (CySimModel + CySimEngine)
         self._ctx = compile_cysim(mod, module_name)
         cm = self._ctx.__enter__()
         self._mod = self.create_module()
@@ -284,6 +288,32 @@ class TestBench(unittest.TestCase):
             if isinstance(getattr(self._mod, k), Signal)
             and getattr(self._mod, k)._kind == 'output')
         _patch_signals_for_cysim(self._mod, cm)
+
+    def _compile_and_run(self):
+        """Compile test generators to Cython, register with engine, run."""
+        from .tb_compiler import compile_generators
+        ptr = self._cysim_model.ptr()
+        engine = self._engine
+
+        if self._tb_initial or self._tb_always:
+            all_funcs = self._tb_initial + self._tb_always
+            compiled = compile_generators(
+                self._flat_ir, all_funcs,
+                self._model_c_src, self._header_src)
+
+            names = list(compiled.keys())
+            idx = 0
+            for fn in self._tb_initial:
+                cfn, (_, cvals) = compiled[names[idx]]
+                engine.initial(lambda _cfn=cfn, _cv=cvals: _cfn(ptr, engine, *_cv))
+                idx += 1
+
+            for fn in self._tb_always:
+                cfn, (_, cvals) = compiled[names[idx]]
+                engine.always(lambda _cfn=cfn, _cv=cvals: _cfn(ptr, engine, *_cv))
+                idx += 1
+
+        engine.run()
 
     def _end(self):
         ctx = getattr(self, '_ctx', None)
@@ -443,4 +473,5 @@ def _wrap_testbench(fn):
 
     wrapper.__name__ = fn.__name__
     wrapper.__qualname__ = fn.__qualname__
+    wrapper.__dict__.update(fn.__dict__)
     return wrapper
