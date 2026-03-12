@@ -144,10 +144,11 @@ def _collect_submodule_registry(module):
 
 
 def _ctype(width):
-    """Return C unsigned type for *width* bits.
-    Locals use uint32_t for <=32 bits — native register width on ARM64/x86-64,
-    avoids zero-extension overhead from uint8_t/uint16_t.
-    """
+    """Return minimal C unsigned type for *width* bits."""
+    if width <= 8:
+        return 'uint8_t'
+    if width <= 16:
+        return 'uint16_t'
     if width <= 32:
         return 'uint32_t'
     return 'uint64_t'
@@ -325,6 +326,9 @@ def _expr(node, sig_w, pack_map=None) -> str:
             return f'((uint64_t)({v}))'
         return f'{v}ULL'
     if isinstance(node, Param):
+        if node.name in _c_params:
+            v = _c_params[node.name]
+            return f'{v}ULL' if isinstance(v, int) and v >= 0 else f'((uint64_t)({v}))'
         return str(node.name)
     if isinstance(node, Sig):
         if pack_map and node.name in pack_map:
@@ -669,6 +673,8 @@ def _expr_width(node, sig_w) -> int:
 # Module-level set of signal names promoted to C locals.
 # When non-empty, _expr emits bare names and _emit_stmt omits 's->' prefix.
 _c_locals: set = set()
+# Module-level dict of parameter name → concrete value for Param node resolution.
+_c_params: dict = {}
 
 
 def _emit_stmt(stmt, lines, sig_w, indent=1, pack_map=None, nba_sigs=None, nba_locals=None):
@@ -1184,7 +1190,7 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
     _input_ports = {p.name for p in ir.ports if p.direction == 'input'}
     _reg_names = {r.name for r in ir.regs}
     _mem_names_set = {m.name for m in ir.mems}
-    must_persist = _input_ports | _output_ports | _reg_names | _mem_names_set
+    must_persist = _input_ports | _output_ports | _reg_names | _mem_names_set | _seq_reads
     promoted_locals = set(all_sigs) - must_persist - nba_sigs
 
     # Order fields by evaluation access pattern for spatial locality
@@ -1312,6 +1318,8 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
     promoted_locals -= set(pack_map.keys())
     _c_locals.clear()
     _c_locals.update(promoted_locals)
+    _c_params.clear()
+    _c_params.update(ir.params)
 
     # ── veripy_eval_comb ─────────────────────────────────────────
     lines.append('void veripy_eval_comb(void* p) {')
@@ -1343,6 +1351,12 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
             lines.append(f'    _cov_line[{gi}]++;')
         lines.extend(body)
     lines.append(f'    memset(s->_dirty, 0, {n_dirty_words * 8});')
+    if coverage:
+        for ci, (name, w, read_expr) in enumerate(cov_sigs):
+            mask = _mask(w)
+            lines.append(f'    {{ uint64_t _cv = {read_expr};')
+            lines.append(f'      _cov_tog_ones[{ci}] |= _cv & {mask};')
+            lines.append(f'      _cov_tog_zeros[{ci}] |= (~_cv) & {mask}; }}')
     lines.append('}')
     lines.append('')
 
@@ -1402,6 +1416,13 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
                 all_writes |= w
         needed_locals = promoted_locals & (all_reads | all_writes)
         lines.append(f'__attribute__((noinline)) static void {fn_name}(State* __restrict s) {{')
+        # Guard: only run when this specific clock edge fires (needed for multi-clock designs)
+        if len(edge_blocks) > 1:
+            clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
+            if edge_kind == 'posedge':
+                lines.append(f'    if (!({clk_expr} && !s->_prev_{clk})) return;')
+            else:
+                lines.append(f'    if (!(!{clk_expr} && s->_prev_{clk})) return;')
         for name in sorted(needed_locals):
             w = all_sigs[name]
             lines.append(f'    {_ctype(w)} {name} = 0;')
@@ -1510,12 +1531,6 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
         clk_expr = _pack_read(clk, pack_map) if clk in pack_map else f's->{clk}'
         lines.append(f'    s->_prev_{clk} = {clk_expr};')
 
-    if coverage:
-        for ci, (name, w, read_expr) in enumerate(cov_sigs):
-            mask = _mask(w)
-            lines.append(f'    {{ uint64_t _cv = {read_expr};')
-            lines.append(f'      _cov_tog_ones[{ci}] |= _cv & {mask};')
-            lines.append(f'      _cov_tog_zeros[{ci}] |= (~_cv) & {mask}; }}')
     lines.append('    if (_vcd_enabled) _vcd_dump(s);')
     lines.append('}')
     lines.append('')
@@ -1557,21 +1572,24 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
     # ── VCD trace support ────────────────────────────────────────
     # Build list of traceable signals: ports + regs (not C locals, not mems)
     trace_sigs = []  # (name, width, vcd_id)
-    vcd_id = 33  # start at '!' (ASCII 33)
+    # Safe VCD id chars: printable ASCII excluding C-string-breaking chars
+    _VCD_SAFE = [chr(c) for c in range(33, 127) if chr(c) not in '"\\\'%']
+    _vcd_idx = 0
     for name in struct_ordered:
         if name.startswith('_prev_') or name.startswith('_nba_') or name.startswith('_dirty'):
             continue
         w = all_sigs.get(name, sig_w.get(name, 1))
-        # VCD identifier: single or multi-char
+        # VCD identifier: single or multi-char from safe set
         tid = ''
-        v = vcd_id
+        v = _vcd_idx
+        base = len(_VCD_SAFE)
         while True:
-            tid = chr(33 + (v % 94)) + tid
-            v = v // 94
+            tid = _VCD_SAFE[v % base] + tid
+            v = v // base
             if v == 0:
                 break
         trace_sigs.append((name, w, tid))
-        vcd_id += 1
+        _vcd_idx += 1
 
     n_trace = len(trace_sigs)
     lines.append(f'static FILE* _vcd_fp = 0;')
@@ -1776,6 +1794,26 @@ def emit_c(ir: IRModule, coverage: bool = False) -> str:
                      f'{{ return ((State*)p)->{m.name}[idx]; }}')
         lines.append(f'void veripy_set_{m.name}(void* p, uint64_t idx, uint64_t v) '
                      f'{{ ((State*)p)->{m.name}[idx] = ({_ctype(w)})(v & {_mask(w)}); }}')
+        lines.append('')
+
+    # ── Wire getters (for wires kept in struct, e.g. read by seq blocks) ──
+    _port_names = {p.name for p in ir.ports}
+    _reg_names_set = {r.name for r in ir.regs}
+    _mem_names_emit = {m.name for m in ir.mems}
+    for w_decl in ir.wires:
+        if w_decl.name in _port_names or w_decl.name in _reg_names_set or w_decl.name in _mem_names_emit:
+            continue
+        if w_decl.name in promoted_locals:
+            continue  # not in struct
+        w = _resolve_width(w_decl.width, ir.params)
+        if w_decl.name in pack_map:
+            word, bit = pack_map[w_decl.name]
+            lines.append(
+                f'uint64_t veripy_get_{w_decl.name}(void* p) '
+                f'{{ return (((State*)p)->{word} >> {bit}ULL) & 1ULL; }}')
+        else:
+            lines.append(f'uint64_t veripy_get_{w_decl.name}(void* p) '
+                         f'{{ return ((State*)p)->{w_decl.name}; }}')
         lines.append('')
 
     return '\n'.join(lines) + '\n'
@@ -2573,6 +2611,17 @@ class CSimModel:
             fn.argtypes = [ctypes.c_void_p]
             self._getters[r.name] = fn
 
+        # Wire getters (wires kept in struct)
+        for w in ir.wires:
+            if w.name in self._getters:
+                continue
+            sym = f'veripy_get_{w.name}'
+            if hasattr(self._lib, sym):
+                fn = getattr(self._lib, sym)
+                fn.restype = ctypes.c_uint64
+                fn.argtypes = [ctypes.c_void_p]
+                self._getters[w.name] = fn
+
         self._mem_getters = {}
         self._mem_setters = {}
         for m in ir.mems:
@@ -2995,10 +3044,18 @@ def emit_c_header(ir: IRModule, model_c_src: str) -> str:
         if p.direction == 'input':
             lines.append(f'extern void     veripy_set_{p.name}(void* p, uint64_t v);')
         lines.append(f'extern uint64_t veripy_get_{p.name}(void* p);')
+    _hdr_seen = {p.name for p in ir.ports}
     for r in ir.regs:
-        if any(p.name == r.name for p in ir.ports):
+        if r.name in _hdr_seen:
             continue
         lines.append(f'extern uint64_t veripy_get_{r.name}(void* p);')
+        _hdr_seen.add(r.name)
+    for w in ir.wires:
+        if w.name in _hdr_seen:
+            continue
+        if f'veripy_get_{w.name}' in model_c_src:
+            lines.append(f'extern uint64_t veripy_get_{w.name}(void* p);')
+            _hdr_seen.add(w.name)
     for m in ir.mems:
         lines.append(f'extern uint64_t veripy_get_{m.name}(void* p, uint64_t idx);')
         lines.append(f'extern void     veripy_set_{m.name}(void* p, uint64_t idx, uint64_t v);')
@@ -3006,7 +3063,7 @@ def emit_c_header(ir: IRModule, model_c_src: str) -> str:
     return '\n'.join(lines) + '\n'
 
 
-def emit_cysim_pyx(ir: IRModule) -> str:
+def emit_cysim_pyx(ir: IRModule, model_c_src: str = '') -> str:
     """Generate a Cython .pyx wrapper for the compiled csim model.
 
     Produces a CySimModel class with direct C function calls — no ctypes
@@ -3023,10 +3080,14 @@ def emit_cysim_pyx(ir: IRModule) -> str:
         if r.name not in seen:
             all_getters.append((r.name, _resolve_width(r.width, ir.params)))
             seen.add(r.name)
+    for w in ir.wires:
+        if w.name not in seen and (not model_c_src or f'veripy_get_{w.name}' in model_c_src):
+            all_getters.append((w.name, _resolve_width(w.width, ir.params)))
+            seen.add(w.name)
 
     lines = [
         '# cython: language_level=3',
-        'from libc.stdint cimport uint64_t',
+        'from libc.stdint cimport uint64_t, uintptr_t',
         '',
         'cdef extern from "model.h":',
         '    void* veripy_create()',
@@ -3073,6 +3134,9 @@ def emit_cysim_pyx(ir: IRModule) -> str:
         '',
         '    cpdef void eval(self):',
         '        veripy_eval(self._ptr)',
+        '',
+        '    def ptr(self):',
+        '        return <uintptr_t>self._ptr',
         '',
     ]
 
@@ -3323,7 +3387,7 @@ def compile_cysim(module, module_name=None):
     lib_path, flat_ir, model_c_src, header_src = compile_model(
         module, module_name)
 
-    pyx_src = emit_cysim_pyx(flat_ir)
+    pyx_src = emit_cysim_pyx(flat_ir, model_c_src)
 
     # Cache key: hash of model C + pyx sources
     content = (model_c_src + pyx_src).encode()
@@ -3466,7 +3530,8 @@ def compile_model(module, module_name=None, cache_dir=None, coverage=False):
     if module_name is None:
         module_name = type(module).__name__.lower()
 
-    cache_key = (type(module), module_name, 'flat', coverage, cache_dir)
+    _params_key = tuple(sorted(getattr(module, '_params', {}).items()))
+    cache_key = (type(module), module_name, 'flat', coverage, cache_dir, _params_key)
     if cache_key in _compile_cache:
         return _compile_cache[cache_key]
 
