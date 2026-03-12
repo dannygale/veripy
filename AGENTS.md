@@ -70,7 +70,7 @@ veripy/
 
 ```bash
 # Run full test suite (slow — run once, not repeatedly)
-python -m unittest discover -s tests -v 2>&1 | grep -E "^(FAIL|ERROR|OK|Ran )|^(FAIL|ERROR): "
+pytest tests/ -n auto -q --tb=short --timeout=10
 
 # Run example tests (fast — cysim default)
 veripy test examples/
