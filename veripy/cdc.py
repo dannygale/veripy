@@ -108,6 +108,9 @@ class AsyncFIFO(Module):
     def rtl(self):
         mask      = self._mask
         addr_bits = self._addr_bits
+        mask_full = (1 << addr_bits) - 1
+        full_check = 3 << (addr_bits - 2)
+
         @self.comb
         def flags():
             self.rdata = self.mem[int(self.rptr) & mask]
@@ -116,6 +119,13 @@ class AsyncFIFO(Module):
             rg_s = int(self.rgray_s2)
             full_cond = (wg ^ rg_s) == (3 << (addr_bits - 2))
             self.full = 1 if full_cond else 0
+
+        flags._veripy_emit_source = (
+            f'def flags():\n'
+            f'    self.rdata = self.mem[self.rptr & {mask}]\n'
+            f'    self.empty = 1 if self.rgray == self.wgray_s2 else 0\n'
+            f'    self.full = 1 if (self.wgray ^ self.rgray_s2) == {full_check} else 0\n'
+        )
 
         @self.posedge(self.wclk)
         def write_logic():
@@ -130,9 +140,25 @@ class AsyncFIFO(Module):
                 if self.wen and not int(self.full):
                     wp = int(self.wptr)
                     self.mem.write(wp & mask, int(self.wdata))
-                    new_wp = (wp + 1) % (1 << addr_bits)
+                    new_wp = (wp + 1) & mask_full
                     self.wptr._val  = new_wp
-                    self.wgray._val = _bin2gray(new_wp, addr_bits)
+                    self.wgray._val = new_wp ^ (new_wp >> 1)
+
+        write_logic._veripy_emit_source = (
+            f'def write_logic():\n'
+            f'    if self.wrst:\n'
+            f'        self.wptr    = 0\n'
+            f'        self.wgray   = 0\n'
+            f'        self.rgray_s1 = 0\n'
+            f'        self.rgray_s2 = 0\n'
+            f'    else:\n'
+            f'        self.rgray_s2 = self.rgray_s1\n'
+            f'        self.rgray_s1 = self.rgray\n'
+            f'        if self.wen and not self.full:\n'
+            f'            self.mem.write(self.wptr & {mask}, self.wdata)\n'
+            f'            self.wptr  = (self.wptr + 1) & {mask_full}\n'
+            f'            self.wgray = ((self.wptr + 1) & {mask_full}) ^ (((self.wptr + 1) & {mask_full}) >> 1)\n'
+        )
 
         @self.posedge(self.rclk)
         def read_logic():
@@ -146,6 +172,21 @@ class AsyncFIFO(Module):
                 self.wgray_s1._val = int(self.wgray)
                 if self.ren and not int(self.empty):
                     rp = int(self.rptr)
-                    new_rp = (rp + 1) % (1 << addr_bits)
+                    new_rp = (rp + 1) & mask_full
                     self.rptr._val  = new_rp
-                    self.rgray._val = _bin2gray(new_rp, addr_bits)
+                    self.rgray._val = new_rp ^ (new_rp >> 1)
+
+        read_logic._veripy_emit_source = (
+            f'def read_logic():\n'
+            f'    if self.rrst:\n'
+            f'        self.rptr    = 0\n'
+            f'        self.rgray   = 0\n'
+            f'        self.wgray_s1 = 0\n'
+            f'        self.wgray_s2 = 0\n'
+            f'    else:\n'
+            f'        self.wgray_s2 = self.wgray_s1\n'
+            f'        self.wgray_s1 = self.wgray\n'
+            f'        if self.ren and not self.empty:\n'
+            f'            self.rptr  = (self.rptr + 1) & {mask_full}\n'
+            f'            self.rgray = ((self.rptr + 1) & {mask_full}) ^ (((self.rptr + 1) & {mask_full}) >> 1)\n'
+        )
