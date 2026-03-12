@@ -11,7 +11,6 @@ T = 10
 class TestSynchronizer(TestBench):
     def create_module(self): return Synchronizer(width=8, stages=2)
 
-    @unittest.skip("Synchronizer uses dynamic getattr not supported by csim")
     def test_data_propagates(self):
         dut = self.dut; self.clock('clk', T)
         @initial
@@ -26,7 +25,6 @@ class TestSynchronizer(TestBench):
     def test_3_stage(self):
         pass  # requires different module instance — tested separately
 
-    @unittest.skip("Synchronizer uses dynamic getattr not supported by csim")
     def test_reset_clears(self):
         dut = self.dut; self.clock('clk', T)
         @initial
@@ -40,7 +38,6 @@ class TestSynchronizer(TestBench):
 class TestSync3Stage(TestBench):
     def create_module(self): return Synchronizer(width=1, stages=3)
 
-    @unittest.skip("Synchronizer uses dynamic getattr not supported by csim")
     def test_3_stage(self):
         dut = self.dut; self.clock('clk', T)
         @initial
@@ -118,7 +115,6 @@ class TestAsyncFIFO(TestBench):
             self.set(rclk=0); yield T//2
             self.set(rclk=1); yield T//2
 
-    @unittest.expectedFailure  # AsyncFIFO uses ._val direct writes, not lowerable to IR
     def test_empty_after_reset(self):
         dut = self.dut; self._clocks()
         @initial
@@ -128,7 +124,6 @@ class TestAsyncFIFO(TestBench):
             self.assertEqual(self.get('empty'), 1)
             self.assertEqual(self.get('full'), 0)
 
-    @unittest.expectedFailure
     def test_write_then_read(self):
         dut = self.dut; self._clocks()
         @initial
@@ -143,7 +138,6 @@ class TestAsyncFIFO(TestBench):
             dut.ren = 1; yield T; dut.ren = 0
             self.assertEqual(val, 42)
 
-    @unittest.expectedFailure
     def test_fifo_ordering(self):
         dut = self.dut; self._clocks()
         @initial
@@ -161,7 +155,6 @@ class TestAsyncFIFO(TestBench):
                 yield T; yield T
             self.assertEqual(vals, [10, 20, 30])
 
-    @unittest.expectedFailure
     def test_full_flag(self):
         dut = self.dut; self._clocks()
         @initial

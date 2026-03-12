@@ -210,9 +210,23 @@ class ThreeLevel(Module):
 class TestThreeLevel(TestBench):
     def create_module(self): return ThreeLevel(width=32)
 
-    @unittest.skip("Python sim doesn't propagate through 3-level sub-module hierarchy")
     def test_fill_through_3_levels(self):
-        pass
+        words = [0xDEAD, 0xBEEF, 0xCAFE, 0xF00D]
+        @initial
+        def _():
+            dut = self.dut
+            dut.clk = 0; dut.wen = 0; dut.waddr = 0; dut.raddr = 0; dut.din = 0; yield 1
+            # Pre-load first word into src register
+            dut.din = words[0]; dut.clk = 1; yield 1; dut.clk = 0; yield 1
+            # Write src.dout to snk at each address, loading next word into src
+            for i in range(4):
+                next_din = words[i + 1] if i < 3 else 0
+                dut.din = next_din; dut.wen = 1; dut.waddr = i
+                dut.clk = 1; yield 1; dut.clk = 0; yield 1
+            dut.wen = 0
+            for i, w in enumerate(words):
+                dut.raddr = i; yield 1
+                self.assertEqual(self.get('dout'), w)
 
 
 class DualSink(Module):

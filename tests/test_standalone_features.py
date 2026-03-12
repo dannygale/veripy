@@ -157,7 +157,6 @@ class TestAlways(TestBench):
 class TestFSM(TestBench):
     def create_module(self): return traffic_light()
 
-    @unittest.skip("@module FSM defined at test file scope has source extraction issues")
     def test_starts_in_first_state(self):
         dut = self.dut; self.clock('clock', T)
         @initial
@@ -165,7 +164,6 @@ class TestFSM(TestBench):
             dut.reset = 1; yield T
             self.assertEqual(self.get('color'), 0)
 
-    @unittest.skip("@module FSM defined at test file scope has source extraction issues")
     def test_transitions(self):
         dut = self.dut; self.clock('clock', T)
         @initial
@@ -230,7 +228,6 @@ class TestTimingConstraints(unittest.TestCase):
 class TestPipeline(TestBench):
     def create_module(self): return pipe_adder(width=8)
 
-    @unittest.skip("pipeline() lambda stages not supported by csim backend")
     def test_pipeline_latency(self):
         dut = self.dut; self.clock('clock', T)
         @initial
@@ -242,7 +239,6 @@ class TestPipeline(TestBench):
             yield T  # output: 14
             self.assertEqual(self.get('out'), 14)
 
-    @unittest.skip("pipeline() lambda stages not supported by csim backend")
     def test_pipeline_reset(self):
         dut = self.dut; self.clock('clock', T)
         @initial

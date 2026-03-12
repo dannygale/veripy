@@ -151,9 +151,9 @@ class TestEmitC(unittest.TestCase):
     def test_eval_contains_all_logic(self):
         """veripy_eval_seq contains seq logic; veripy_eval_comb contains comb logic."""
         c = emit_c(self._counter_ir())
-        # Seq logic is in veripy_eval_seq
-        seq_start = c.index('void veripy_eval_seq(')
-        self.assertIn('s->cnt = s->_nba_cnt', c[seq_start:])
+        # NBA commit is in the _seq_0 function (called from eval_seq)
+        self.assertIn('_nba_cnt', c)
+        self.assertIn('s->cnt = _nba_cnt', c)
         # veripy_eval is a thin dispatcher
         eval_start = c.rindex('void veripy_eval(')
         eval_body = c[eval_start:c.index('}', eval_start) + 1]
@@ -665,26 +665,18 @@ class TestNBA(unittest.TestCase):
     def test_nba_seq_writes_to_temp(self):
         """Seq block writes go to _nba_ temporaries, not directly to state."""
         c = emit_c(self._swap_ir())
-        # In monolithic eval, seq logic is inline — check eval body
-        eval_start = c.index('void veripy_eval(')
-        eval_end = c.index('\n}', eval_start) + 2
-        eval_body = c[eval_start:eval_end]
-        self.assertIn('_nba_a', eval_body)
-        # No separate _seq_0 function
-        self.assertNotIn('void _seq_0(', c)
+        # Seq logic is in a separate _seq_0 function (noinline split)
+        self.assertIn('_seq_0(', c)
+        self.assertIn('_nba_a', c)
 
     def test_nba_eval_init_and_commit(self):
-        """veripy_eval initializes NBA temps before seq blocks and commits after."""
+        """NBA temps are initialized before seq logic and committed after."""
         c = emit_c(self._swap_ir())
-        eval_start = c.index('void veripy_eval(')
-        eval_end = c.index('\n}', eval_start) + 2
-        eval_body = c[eval_start:eval_end]
-        # Init: copy current value into NBA temp before seq blocks
-        self.assertIn('s->_nba_a = s->a', eval_body)
-        self.assertIn('s->_nba_b = s->b', eval_body)
-        # Commit: write NBA temp back to state after seq blocks
-        self.assertIn('s->a = s->_nba_a', eval_body)
-        self.assertIn('s->b = s->_nba_b', eval_body)
+        # NBA init and commit happen inside the _seq_0 function
+        self.assertIn('_nba_a = s->a', c)
+        self.assertIn('_nba_b = s->b', c)
+        self.assertIn('s->a = _nba_a', c)
+        self.assertIn('s->b = _nba_b', c)
 
     def test_nba_swap_correctness(self):
         """Two seq blocks swapping a and b produce correct NBA swap semantics."""

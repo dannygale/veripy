@@ -223,8 +223,9 @@ class _BehavMatchModule(Module):
         self.pipe = self.pipeline(self.clock, self.reset, width=8)
         self.pipe.stage(lambda: (int(self.a), int(self.b)))
         self.pipe.stage(lambda x, y: x + y)
+        pipe = self.pipe
         @self.comb
-        def o(): self.out = self.pipe.result
+        def o(): self.out = pipe.result
 
 
 class TestBehavioralMatchesSim(TestBench):

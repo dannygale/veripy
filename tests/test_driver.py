@@ -37,26 +37,23 @@ class TestDriverBase(unittest.TestCase):
 class TestSpiDriver(TestBench):
     def create_module(self): return spi_shift_reg()
 
-    def _shift(self, data):
+    def _shift(self, data, expected):
         dut = self.dut; self.clock('clock', 10)
         drv = SpiDriver(self._engine, self._mod)
-        result = []
         @initial
         def stim():
             dut.cs_n = 1; yield 10
             yield from drv.send(data)
-            result.append(self.get('shreg'))
-            self.assertEqual(len(result), 1)
-        return result[0] if result else None
+            self.assertEqual(self.get('shreg'), expected)
 
     def test_shift_0xA5(self):
-        self.assertEqual(self._shift(0xA5), 0xA5)
+        self._shift(0xA5, 0xA5)
 
     def test_shift_0xFF(self):
-        self.assertEqual(self._shift(0xFF), 0xFF)
+        self._shift(0xFF, 0xFF)
 
     def test_shift_0x00(self):
-        self.assertEqual(self._shift(0x00), 0x00)
+        self._shift(0x00, 0x00)
 
     def test_back_to_back(self):
         dut = self.dut; self.clock('clock', 10)

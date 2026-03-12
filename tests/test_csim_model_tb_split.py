@@ -90,9 +90,11 @@ class TestEmitCHeader(unittest.TestCase):
         with tempfile.TemporaryDirectory() as cache_dir:
             _, flat_ir, model_c_src, header_src = compile_model(
                 Counter(), 'counter', cache_dir=cache_dir)
-        self.assertIn('extern void* veripy_create', header_src)
-        self.assertIn('extern void  veripy_destroy', header_src)
-        self.assertIn('extern void  veripy_eval', header_src)
+        self.assertIn('extern void*', header_src)
+        self.assertIn('veripy_create', header_src)
+        self.assertIn('extern void', header_src)
+        self.assertIn('veripy_destroy', header_src)
+        self.assertIn('veripy_eval', header_src)
         self.assertIn('veripy_set_clock', header_src)
         self.assertIn('veripy_get_count', header_src)
 

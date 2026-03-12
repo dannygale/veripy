@@ -163,7 +163,7 @@ class TestNegedge(unittest.TestCase):
                 def stim():
                     dut.d = 42; dut.clk = 1; yield 1
                     dut.clk = 0; yield 1
-                self.assertEqual(self.get('q'), 42)
+                    self.assertEqual(self.get('q'), 42)
 
         import unittest
         suite = unittest.TestLoader().loadTestsFromName('test_it', _T)

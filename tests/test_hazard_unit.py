@@ -100,7 +100,7 @@ class TestStall(TestBench):
         @initial
         def _():
             d = _defaults()
-            d.update(id_ex_valid=1, id_ex_mem_re=1, id_ex_rd_addr=5, id_ex_rs2_addr=5)
+            d.update(id_ex_valid=1, id_ex_mem_re=1, id_ex_rd_addr=5, id_rs2_addr=5)
             self.set(**d); yield 1
             self.assertEqual(self.get('stall'), 1)
 

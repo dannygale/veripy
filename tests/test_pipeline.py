@@ -50,7 +50,6 @@ class TestPipelineVerilog(unittest.TestCase):
 class TestPipelineLatency(TestBench):
     def create_module(self): return _make_pipe()
 
-    @unittest.skip("pipeline() lambda stages not supported by csim backend")
     def test_pipeline_latency(self):
         dut = self.dut; self.clock('clock', T)
         @initial
@@ -62,7 +61,6 @@ class TestPipelineLatency(TestBench):
             yield T
             self.assertEqual(self.get('out'), 14)
 
-    @unittest.skip("pipeline() lambda stages not supported by csim backend")
     def test_pipeline_reset(self):
         dut = self.dut; self.clock('clock', T)
         @initial
@@ -90,7 +88,6 @@ class TestPipelineChaining(TestBench):
                     self.out = pipe.result
         return P()
 
-    @unittest.skip("pipeline() lambda stages not supported by csim backend")
     def test_pipeline_chaining(self):
         dut = self.dut; self.clock('clock', T)
         @initial
@@ -119,7 +116,6 @@ class TestThreeStages(TestBench):
                     self.out = pipe.result
         return P()
 
-    @unittest.skip("pipeline() lambda stages not supported by csim backend")
     def test_three_stages(self):
         dut = self.dut; self.clock('clock', T)
         @initial

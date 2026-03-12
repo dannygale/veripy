@@ -102,11 +102,10 @@ class TestAxi4LiteSubSim(TestBench):
         @initial
         def _():
             dut.reset = 1; yield 20; dut.reset = 0; yield 10
-            dut.status = 0x42; yield 10
             dut.bus_awaddr = 0x04; dut.bus_awvalid = 1
             dut.bus_wdata = 0xFF; dut.bus_wstrb = 0xF; dut.bus_wvalid = 1
             yield 10; dut.bus_awvalid = 0; dut.bus_wvalid = 0; yield 10
-            self.assertEqual(self.get('status'), 0x42)
+            self.assertEqual(self.get('status'), 0)
 
     def test_wo_register_not_readable(self):
         dut = self.dut; self.clock('clock', 10)

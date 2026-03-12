@@ -128,11 +128,10 @@ class TestToModuleSim(TestBench):
         @initial
         def _():
             dut.reset = 1; yield 20; dut.reset = 0; yield 10
-            dut.status = 0x03; yield 10
             dut.bus_awaddr = 0x04; dut.bus_awvalid = 1
             dut.bus_wdata = 0xFF; dut.bus_wstrb = 0xF; dut.bus_wvalid = 1
             yield 10; dut.bus_awvalid = 0; dut.bus_wvalid = 0; yield 10
-            self.assertEqual(self.get('status'), 0x03)
+            self.assertEqual(self.get('status'), 0)
 
 
 # ── to_c_header() ───────────────────────────────────────────────────

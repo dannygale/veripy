@@ -40,7 +40,7 @@ class TestDatapathSim(TestBench):
         def _():
             dut.reset = 1; yield T; dut.reset = 0
             dut.a = 7; dut.b = 3; dut.op = 0; yield T
-            self.assertEqual(self.get('alu_result'), 10)
+            self.assertEqual(self.get('result'), 10)
 
     def test_pipeline_delay(self):
         dut = self.dut; self.clock('clock', T)
@@ -48,9 +48,9 @@ class TestDatapathSim(TestBench):
         def _():
             dut.reset = 1; yield T; dut.reset = 0
             dut.a = 10; dut.b = 5; dut.op = 0; yield T
-            self.assertEqual(self.get('piped'), 15)
+            self.assertEqual(self.get('result'), 15)
             dut.a = 100; dut.b = 1; dut.op = 0; yield T
-            self.assertEqual(self.get('piped'), 101)
+            self.assertEqual(self.get('result'), 101)
 
     def test_reset_clears_piped(self):
         dut = self.dut; self.clock('clock', T)
@@ -58,9 +58,9 @@ class TestDatapathSim(TestBench):
         def _():
             dut.reset = 1; yield T; dut.reset = 0
             dut.a = 10; dut.b = 5; dut.op = 0; yield T
-            self.assertNotEqual(self.get('piped'), 0)
+            self.assertNotEqual(self.get('result'), 0)
             dut.reset = 1; yield T
-            self.assertEqual(self.get('piped'), 0)
+            self.assertEqual(self.get('result'), 0)
 
     def test_sub_through_pipeline(self):
         dut = self.dut; self.clock('clock', T)
@@ -68,7 +68,7 @@ class TestDatapathSim(TestBench):
         def _():
             dut.reset = 1; yield T; dut.reset = 0
             dut.a = 50; dut.b = 8; dut.op = 1; yield T
-            self.assertEqual(self.get('piped'), 42)
+            self.assertEqual(self.get('result'), 42)
 
 
 class TestDatapathVerilog(unittest.TestCase):
@@ -96,7 +96,7 @@ class TestDatapathVerilog(unittest.TestCase):
         self.assertIn('assign alu_op = op;', self.v)
 
     def test_piped_reads_alu(self):
-        self.assertIn('piped <= alu_result;', self.v)
+        self.assertIn('result <= alu_result;', self.v)
 
     def test_no_alu_internals_in_parent(self):
         self.assertNotIn('(a + b)', self.v)
