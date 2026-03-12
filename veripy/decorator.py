@@ -32,6 +32,11 @@ def _analyze_and_rewrite(func):
     for the emitter."""
     source = textwrap.dedent(inspect.getsource(func))
     tree = ast.parse(source)
+    # Shift line numbers to match original file so inspect.getsource works on
+    # inner functions (e.g. @fsm blocks) defined inside @module functions.
+    offset = func.__code__.co_firstlineno - 1
+    if offset > 0:
+        ast.increment_lineno(tree, offset)
     func_def = tree.body[0]
     func_def.decorator_list = []
 
