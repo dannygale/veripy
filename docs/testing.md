@@ -214,19 +214,27 @@ time point. A mismatch fails the test with a diff showing which model diverged.
 
 ## Cysim — Cython-Compiled Simulation
 
-The cysim backend is the default for `TestBench`. It compiles your module's IR to C
-(via csim), then wraps it in a Cython-compiled event loop (`CySimEngine`) that runs
-the entire simulation — scheduling, eval, time advance — in native C.
+The cysim backend is the default for `TestBench`. It compiles the entire simulation
+stack to native code:
+
+- **Model** (`backend_csim.py`): module IR → C source → compiled `.so`
+- **Event loop** (`CySimEngine`): Cython-compiled scheduler with inlined clock toggling
+- **Test generators** (`tb_compiler.py`): your `@initial`/`@always` functions are
+  AST-rewritten and compiled to Cython, with `dut.x = val` and `dut.x` lowered to
+  direct `veripy_set_x()`/`veripy_get_x()` C calls
+
+There is no Python interpreter involvement during `run()`. The event loop, all
+generator resumptions, and all signal reads/writes execute entirely in compiled C.
 
 Performance vs Python simulation:
-- **yield-per-cycle**: ~40× faster (event loop in C, Python yields each cycle)
-- **run_cycles()**: ~120× faster (entire batch in C, no Python interaction)
+- **event-driven run()**: ~40× faster
+- **run_cycles()**: ~120× faster (clock batch loop with zero generator overhead)
 
 Cysim compiles on first use and caches the `.so` by content hash. Subsequent runs
 skip compilation entirely.
 
 For combinational-only testing (no clock, no timing), use the `@functional` model
-tier — it evaluates instantly in Python without needing a simulation engine.
+tier — it evaluates instantly without needing a simulation engine.
 
 ---
 
@@ -297,42 +305,18 @@ Requires `pip install hypothesis`.
 
 ---
 
-## SimEngine
-
-Event-driven simulation with proper Verilog scheduling semantics:
-
-```python
-from veripy.sim import SimEngine
-
-c = counter(width=4)
-sim = SimEngine(c)
-sim.clock(c.clock, 10)
-
-@sim.initial
-def stimulus():
-    c.reset.set(1)
-    c.enable.set(1)
-    yield 10
-    c.reset.set(0)
-    for _ in range(5):
-        yield 10
-    assert int(c.count) == 5
-
-sim.run()
-```
-
-`@sim.initial` blocks run once. `@sim.always` blocks restart on completion.
-`yield N` advances N time units. `sim.clock(signal, period)` generates a
-free-running clock. Simulation ends when all initial blocks finish or
-`sim.finish()` is called.
-
 ## VCD Waveforms
 
-Dump waveforms viewable in GTKWave:
+Dump waveforms viewable in GTKWave via `CSimModel`:
 
 ```python
-sim = SimEngine(c, vcd='counter.vcd')
-sim.run()
+from veripy import CSimModel
+
+with CSimModel(my_module, 'my_module', trace='out.vcd') as model:
+    for _ in range(100):
+        model.set('clock', 0); model.eval()
+        model.set('clock', 1); model.eval()
+# out.vcd written on context exit
 ```
 
 From `TestBench`, enable on failure:
@@ -349,35 +333,39 @@ Or globally: `VERIPY_VCD_ON_FAIL=1`.
 `yield until(cond)` suspends a block until a condition becomes true, checked each time unit:
 
 ```python
-from veripy.sim import SimEngine, until
+from veripy.verify import TestBench, initial
+from veripy.sim import until
 
-@sim.initial
-def stimulus():
-    c.enable.set(1)
-    yield until(lambda: int(c.count) == 10)    # wait for count to reach 10
-    c.enable.set(0)
+class TestMyModule(TestBench):
+    def test_something(self):
+        dut = self.dut
+        self.clock('clock', 10)
+
+        @initial
+        def stim():
+            dut.enable = 1
+            yield until(lambda: dut.count == 10)
+            dut.enable = 0
 ```
 
 Optional timeout raises `TimeoutError`:
 
 ```python
-yield until(lambda: int(c.done), timeout=1000)
+yield until(lambda: dut.done, timeout=1000)
 ```
-
-Works in both `SimEngine` blocks and `TestBench` initial blocks.
 
 ## Fork / Join
 
 Run multiple generator blocks in parallel:
 
 ```python
-@sim.initial
+@initial
 def test():
     # fork() waits for ALL blocks to finish
-    yield sim.fork(drive_clock, send_data)
+    yield self.fork(drive_inputs, check_outputs)
 
     # fork_any() waits for the FIRST block to finish
-    yield sim.fork_any(wait_for_done, timeout_block)
+    yield self.fork_any(wait_for_done, timeout_block)
 ```
 
 Each forked function is a generator (uses `yield`):
@@ -385,21 +373,16 @@ Each forked function is a generator (uses `yield`):
 ```python
 def send_data():
     for byte in data:
-        c.tx_data.set(byte)
-        c.tx_valid.set(1)
+        dut.tx_data = byte
+        dut.tx_valid = 1
         yield 10
-        c.tx_valid.set(0)
-        yield until(lambda: int(c.tx_ready))
+        dut.tx_valid = 0
+        yield until(lambda: dut.tx_ready)
 ```
-
-In `TestBench`, use `self.fork()` and `self.fork_any()`.
 
 ## Native C Simulation (csim)
 
-The csim backend compiles your design to native C for near-Verilator performance.
-It runs automatically in `TestBench` — no setup needed.
-
-For standalone use:
+For standalone use outside of `TestBench`:
 
 ```python
 from veripy import CSimModel
@@ -408,16 +391,6 @@ with CSimModel(my_module, 'my_module') as model:
     model.set('enable', 1)
     model.eval()
     print(model.get('count'))
-```
-
-### VCD Tracing from csim
-
-```python
-with CSimModel(my_module, 'my_module', trace='out.vcd') as model:
-    for _ in range(100):
-        model.set('clock', 0); model.eval()
-        model.set('clock', 1); model.eval()
-# out.vcd written on context exit
 ```
 
 ## Protocol Drivers
@@ -433,30 +406,35 @@ from veripy.sim import until
 class SpiDriver(Driver):
     def send(self, data):
         m = self.mod
-        m.cs_n.set(0)
+        m.cs_n = 0
         for bit in range(7, -1, -1):
-            m.mosi.set((data >> bit) & 1)
-            m.sclk.set(0); yield 5
-            m.sclk.set(1); yield 5
-        m.sclk.set(0)
-        m.cs_n.set(1)
+            m.mosi = (data >> bit) & 1
+            m.sclk = 0; yield 5
+            m.sclk = 1; yield 5
+        m.sclk = 0
+        m.cs_n = 1
         yield 5
 
     def recv(self):
         m = self.mod
-        yield until(lambda: int(m.rx_valid) == 1)
-        return int(m.rx_data)
+        yield until(lambda: m.rx_valid == 1)
+        return m.rx_data
 ```
 
 Usage in a testbench:
 
 ```python
-drv = SpiDriver(sim, dut)
+class TestSpi(TestBench):
+    def test_transfer(self):
+        dut = self.dut
+        drv = SpiDriver(self, dut)
+        self.clock('clock', 10)
 
-@sim.initial
-def stim():
-    yield from drv.send(0xA5)
-    val = yield from drv.recv()
+        @initial
+        def stim():
+            yield from drv.send(0xA5)
+            val = yield from drv.recv()
+            assert val == 0xA5
 ```
 
 Override `send(txn)`, `recv()`, and optionally `reset()`. See
