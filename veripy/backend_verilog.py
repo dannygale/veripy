@@ -118,15 +118,32 @@ def _emit_assigns(ir, lines):
 # ── Combinational blocks ────────────────────────────────────────────
 
 def _emit_comb_blocks(ir, lines):
+    inout_names = {p.name for p in ir.ports if p.direction == 'inout'}
     for blk in ir.comb_blocks:
         lines.append('')
-        # Local reg declarations for always @(*) blocks
-        for name, width in blk.locals.items():
-            lines.append(f'    reg {_width_decl(width)}{name};')
-        lines.append('    always @(*) begin')
+        # Extract top-level If stmts that assign only inout ports → tristate assigns
+        remaining = []
         for s in blk.stmts:
-            _emit_stmt(s, lines, indent=2)
-        lines.append('    end')
+            if (isinstance(s, If) and not s.else_body
+                    and all(isinstance(a, Assign) and a.target in inout_names
+                            for a in s.then_body)):
+                # emit: assign sda = cond ? val : {w}'bz;
+                for a in s.then_body:
+                    w = next((p.width for p in ir.ports if p.name == a.target), 1)
+                    w_str = _width_decl(w).strip() or '1'
+                    z = f"{w}'bz" if isinstance(w, int) and w > 1 else "1'bz"
+                    lines.append(
+                        f'    assign {a.target} = {_expr(s.cond)} ? '
+                        f'{_expr(a.value)} : {z};')
+            else:
+                remaining.append(s)
+        if remaining:
+            for name, width in blk.locals.items():
+                lines.append(f'    reg {_width_decl(width)}{name};')
+            lines.append('    always @(*) begin')
+            for s in remaining:
+                _emit_stmt(s, lines, indent=2)
+            lines.append('    end')
 
 
 # ── Sequential blocks ───────────────────────────────────────────────
