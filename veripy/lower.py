@@ -963,9 +963,11 @@ class _Lowerer:
         """Return set of signal names assigned inside always @(*) comb blocks."""
         targets = set()
         for method in comb_blocks:
-            tree = self._get_func_ast(method)
+            # For FSM blocks, use the wrapped function to get actual assignments
+            actual = getattr(method, '__wrapped__', method)
+            tree = self._get_func_ast(actual)
             if not all(self._is_nba(s) for s in tree.body):
-                self._func = method
+                self._func = actual
                 self._reg_locals = {}
                 for node in ast.walk(tree):
                     if isinstance(node, ast.Assign):
